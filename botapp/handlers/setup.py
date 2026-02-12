@@ -522,7 +522,11 @@ async def _render_keywords_editor(message: Message, state: FSMContext) -> None:
     try:
         await message.edit_text(text, reply_markup=kb)
     except Exception:
-        await message.edit_reply_markup(reply_markup=kb)
+        try:
+            await message.edit_reply_markup(reply_markup=kb)
+        except Exception:
+            # "message is not modified" etc.
+            return
 
 
 @router.callback_query(SetupStates.EDIT_NICHE, F.data.startswith("kw_toggle:"))
@@ -839,8 +843,11 @@ async def _render_prune(message: Message, state: FSMContext) -> None:
     try:
         await message.edit_text(text, reply_markup=kb)
     except Exception:
-        # "message is not modified" etc.
-        await message.edit_reply_markup(reply_markup=kb)
+        try:
+            await message.edit_reply_markup(reply_markup=kb)
+        except Exception:
+            # "message is not modified" etc.
+            return
 
 
 async def _ask_timezone_method(message: Message, state: FSMContext) -> None:
