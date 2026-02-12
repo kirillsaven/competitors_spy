@@ -51,7 +51,7 @@ Reporting:
 
 LLM (optional):
 - GOOGLE_LLM_API_KEY (Gemini) is used only for internal tasks (no user chat)
-- Rate-limit: GOOGLE_LLM_MAX_CALLS_PER_USER_PER_DAY (default 3)
+- Rate-limit: GOOGLE_LLM_MAX_CALLS_PER_USER_PER_DAY (default 10)
 
 ## Engineering rules
 - Modular code: adapters + services + celery tasks.

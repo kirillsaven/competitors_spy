@@ -71,7 +71,18 @@ class CompetitorBaselineAdmin(admin.ModelAdmin):
 
 @admin.register(Schedule)
 class ScheduleAdmin(admin.ModelAdmin):
-    list_display = ("id", "user", "is_enabled", "times", "next_run_at", "last_run_at", "created_at", "updated_at")
+    list_display = (
+        "id",
+        "user",
+        "is_enabled",
+        "is_running",
+        "running_started_at",
+        "times",
+        "next_run_at",
+        "last_run_at",
+        "created_at",
+        "updated_at",
+    )
     list_filter = ("is_enabled",)
 
 

@@ -177,6 +177,9 @@ class Schedule(models.Model):
     times = models.JSONField(default=list, blank=True)  # ["09:00", "21:00"] in user's timezone
     next_run_at = models.DateTimeField(null=True, blank=True)
     last_run_at = models.DateTimeField(null=True, blank=True)
+    # Used to avoid overlapping report jobs for the same user (which can lead to identical periods / missing deltas).
+    is_running = models.BooleanField(default=False)
+    running_started_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

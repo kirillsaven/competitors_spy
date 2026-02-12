@@ -102,7 +102,14 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
 
             if delta is not None and delta_hours:
                 try:
-                    lines.append(f"Просмотры за период: +{int(delta)} (за {float(delta_hours):.1f}ч)")
+                    delta_int = int(delta)
+                    views_end_int = int(views_end) if views_end is not None else None
+                    growth = ""
+                    if views_end_int is not None:
+                        views_start_int = views_end_int - delta_int
+                        if views_start_int > 0:
+                            growth = f" ({(float(delta_int) / float(views_start_int)) * 100.0:+.1f}%)"
+                    lines.append(f"Просмотры за период: +{delta_int}{growth} (за {float(delta_hours):.1f}ч)")
                 except Exception:
                     lines.append(f"Просмотры за период: +{delta}")
             else:

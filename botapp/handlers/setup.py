@@ -1109,16 +1109,27 @@ async def _finalize_schedule(message: Message, state: FSMContext) -> None:
     now = timezone.now()
     next_run_at = compute_next_run_at(user.timezone_str, times, now)
 
-    await db_call(
-        Schedule.objects.update_or_create,
-        user=user,
-        defaults={
-            "is_enabled": True,
-            "times": times,
-            "next_run_at": next_run_at,
-            "last_run_at": None,
-        },
-    )
+    # Preserve last_run_at when user reconfigures schedule, so deltas keep working.
+    now_utc = timezone.now()
+
+    def _upsert_schedule() -> None:
+        sched, created = Schedule.objects.get_or_create(
+            user=user,
+            defaults={
+                "is_enabled": True,
+                "times": times,
+                "next_run_at": next_run_at,
+            },
+        )
+        if not created:
+            Schedule.objects.filter(id=sched.id).update(
+                is_enabled=True,
+                times=times,
+                next_run_at=next_run_at,
+                updated_at=now_utc,
+            )
+
+    await db_run(_upsert_schedule)
 
     comp_count = await db_run(
         lambda: UserCompetitor.objects.filter(user=user, is_active=True, competitor__platform=Platform.YOUTUBE).count()

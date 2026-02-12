@@ -87,7 +87,21 @@ def tick_due_schedules() -> int:
     To avoid duplicate enqueues, we advance next_run_at before sending the job.
     """
     now = timezone.now()
-    due = Schedule.objects.select_related("user").filter(is_enabled=True).filter(next_run_at__lte=now)
+    # Safety: if a worker crashed mid-job, we can get "stuck" schedules. Clear stale locks.
+    stale_minutes = int(getattr(settings, "SCHEDULE_RUNNING_STALE_MINUTES", 60))
+    if stale_minutes > 0:
+        cutoff = now - timedelta(minutes=stale_minutes)
+        Schedule.objects.filter(is_running=True, running_started_at__lt=cutoff).update(
+            is_running=False,
+            running_started_at=None,
+            updated_at=now,
+        )
+
+    due = (
+        Schedule.objects.select_related("user")
+        .filter(is_enabled=True, is_running=False)
+        .filter(next_run_at__lte=now)
+    )
     enqueued = 0
     for sched in due:
         # Move next_run_at forward to prevent enqueuing again on the next tick.
@@ -110,7 +124,18 @@ def run_user_report(self, user_id: int) -> None:
     # Use a transaction for schedule updates to keep period boundaries consistent.
     with transaction.atomic():
         schedule = Schedule.objects.select_for_update().get(user=user)
-        period_start = schedule.last_run_at or (now - timedelta(hours=24))
+        if schedule.is_running:
+            logger.info("Skipping scheduled report: already running (user_id=%s)", user_id)
+            return
+
+        schedule.is_running = True
+        schedule.running_started_at = now
+        schedule.save(update_fields=["is_running", "running_started_at", "updated_at"])
+
+        if schedule.last_run_at is not None and schedule.last_run_at < now:
+            period_start = schedule.last_run_at
+        else:
+            period_start = now - timedelta(hours=24)
         period_end = now
 
         job = JobRun.objects.create(
@@ -128,9 +153,15 @@ def run_user_report(self, user_id: int) -> None:
 
         with transaction.atomic():
             schedule = Schedule.objects.select_for_update().get(user=user)
-            schedule.last_run_at = period_end
+            # Never move last_run_at backwards (can happen if two jobs finish out of order).
+            if schedule.last_run_at is None or period_end > schedule.last_run_at:
+                schedule.last_run_at = period_end
             schedule.next_run_at = compute_next_run_at(user.timezone_str, list(schedule.times or []), period_end)
-            schedule.save(update_fields=["last_run_at", "next_run_at", "updated_at"])
+            schedule.is_running = False
+            schedule.running_started_at = None
+            schedule.save(
+                update_fields=["last_run_at", "next_run_at", "is_running", "running_started_at", "updated_at"]
+            )
 
         job.status = JobStatus.SUCCESS
         job.finished_at = timezone.now()
@@ -145,8 +176,10 @@ def run_user_report(self, user_id: int) -> None:
         try:
             with transaction.atomic():
                 schedule = Schedule.objects.select_for_update().get(user=user)
+                schedule.is_running = False
+                schedule.running_started_at = None
                 schedule.next_run_at = timezone.now() + timedelta(minutes=5)
-                schedule.save(update_fields=["next_run_at", "updated_at"])
+                schedule.save(update_fields=["is_running", "running_started_at", "next_run_at", "updated_at"])
         except Exception:
             logger.exception("Failed to reschedule after error (user_id=%s)", user_id)
 
@@ -172,12 +205,22 @@ def run_user_report_now(self, user_id: int) -> None:
 
     with transaction.atomic():
         schedule = Schedule.objects.select_for_update().get(user=user)
-        period_start = schedule.last_run_at or (now - timedelta(hours=24))
+        if schedule.is_running:
+            logger.info("Skipping manual report: already running (user_id=%s)", user_id)
+            return
+
+        schedule.is_running = True
+        schedule.running_started_at = now
+
+        if schedule.last_run_at is not None and schedule.last_run_at < now:
+            period_start = schedule.last_run_at
+        else:
+            period_start = now - timedelta(hours=24)
         period_end = now
 
         # Prevent beat from enqueuing an immediate duplicate run.
         schedule.next_run_at = compute_next_run_at(user.timezone_str, list(schedule.times or []), now)
-        schedule.save(update_fields=["next_run_at", "updated_at"])
+        schedule.save(update_fields=["is_running", "running_started_at", "next_run_at", "updated_at"])
 
         job = JobRun.objects.create(
             job_type="run_user_report_now",
@@ -194,9 +237,14 @@ def run_user_report_now(self, user_id: int) -> None:
 
         with transaction.atomic():
             schedule = Schedule.objects.select_for_update().get(user=user)
-            schedule.last_run_at = period_end
+            if schedule.last_run_at is None or period_end > schedule.last_run_at:
+                schedule.last_run_at = period_end
             schedule.next_run_at = compute_next_run_at(user.timezone_str, list(schedule.times or []), period_end)
-            schedule.save(update_fields=["last_run_at", "next_run_at", "updated_at"])
+            schedule.is_running = False
+            schedule.running_started_at = None
+            schedule.save(
+                update_fields=["last_run_at", "next_run_at", "is_running", "running_started_at", "updated_at"]
+            )
 
         job.status = JobStatus.SUCCESS
         job.finished_at = timezone.now()
@@ -211,8 +259,10 @@ def run_user_report_now(self, user_id: int) -> None:
         try:
             with transaction.atomic():
                 schedule = Schedule.objects.select_for_update().get(user=user)
+                schedule.is_running = False
+                schedule.running_started_at = None
                 schedule.next_run_at = timezone.now() + timedelta(minutes=5)
-                schedule.save(update_fields=["next_run_at", "updated_at"])
+                schedule.save(update_fields=["is_running", "running_started_at", "next_run_at", "updated_at"])
         except Exception:
             logger.exception("Failed to reschedule after error (user_id=%s)", user_id)
 

@@ -45,6 +45,10 @@ async def cmd_report(message: Message) -> None:
     if not user:
         await message.answer("Сначала запусти /setup.")
         return
+    schedule = await db_run(lambda: Schedule.objects.filter(user=user).first())
+    if schedule and schedule.is_running:
+        await message.answer("Отчет уже собирается. Пришлю сообщением, когда будет готов.")
+        return
     run_user_report_now.delay(user.id)
     await message.answer("Собираю отчет. Пришлю сообщением, когда будет готов.")
 
