@@ -30,7 +30,8 @@ Note: keep default Django auth User for admin login; create separate TgUser mode
 
 - TgUser(tg_user_id unique, tg_chat_id, timezone_str, tz_source, created_at, updated_at, limits_json)
 - SeedProfile(user, raw_input, detected_platform, canonical_url, niche_keywords jsonb, niche_source, status, created_at)
-- Competitor(user, platform, external_id, handle, url, display_name, added_by, is_active, meta jsonb, created_at)
+- Competitor(platform, external_id, handle, url, display_name, meta jsonb, created_at, updated_at)
+- UserCompetitor(user, competitor, added_by, is_active, created_at, updated_at)
 - ContentItem(competitor, platform, external_id, url, title, description, published_at, duration_seconds, meta jsonb, created_at)
 - MetricSnapshot(content_item, captured_at, views, likes nullable, comments nullable, shares nullable, extra jsonb)
 - CompetitorBaseline(competitor, computed_at, window_days, n_items, metrics jsonb)
@@ -38,9 +39,14 @@ Note: keep default Django auth User for admin login; create separate TgUser mode
 - Report(user, period_start, period_end, created_at, sent_at, status, payload jsonb)
 - JobRun(job_type, user nullable, status, started_at, finished_at, attempts, error text, payload jsonb)
 
+Shared data:
+- Competitor/ContentItem/MetricSnapshot are shared across all users (one global row per channel/video).
+- UserCompetitor stores per-user tracking preferences (active flag + origin).
+
 Constraints/indexes:
-- Unique: (user, platform, external_id) for Competitor
-- Unique: (competitor, platform, external_id) for ContentItem
+- Unique: (platform, external_id) for Competitor
+- Unique: (user, competitor) for UserCompetitor
+- Unique: (platform, external_id) for ContentItem
 - Index MetricSnapshot(content_item, captured_at)
 
 ## YouTube adapter (MVP)

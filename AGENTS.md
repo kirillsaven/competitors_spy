@@ -44,6 +44,7 @@ Reporting:
 - MAX_COMPETITORS_YOUTUBE = 20 (raise carefully; quota risk)
 - MIN_DELTA_VIEWS = 500
 - MIN_VIEWS_END = 1000 (only for warm-up/fallback scoring when delta is unavailable)
+- Snapshots are shared across users: the same YouTube channel/video is stored once globally, and users only keep an "active list" link.
 - Avoid expensive YouTube API calls:
   - Prefer channels.list + channelSections.list + playlistItems.list + videos.list
   - Use search.list only for discovery / fallback resolving, strictly limited and cached
