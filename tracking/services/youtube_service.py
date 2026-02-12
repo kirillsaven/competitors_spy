@@ -37,6 +37,28 @@ def resolve_youtube_seed(raw_input: str) -> SeedResolution | None:
         client.close()
 
 
+def get_recent_video_titles(seed: SeedResolution, *, n: int = 10) -> list[str]:
+    client = get_youtube_client()
+    try:
+        uploads = seed.uploads_playlist_id
+        if not uploads:
+            return []
+        playlist_items = client.playlist_items(playlist_id=uploads, max_results=n)
+        video_ids = playlist_items_to_video_ids(playlist_items)
+        if not video_ids:
+            return []
+        vids = client.videos_list(ids=video_ids, part="snippet")
+        titles: list[str] = []
+        for it in vids:
+            snippet = it.get("snippet") or {}
+            title = snippet.get("title")
+            if title:
+                titles.append(str(title))
+        return titles[:n]
+    finally:
+        client.close()
+
+
 def infer_youtube_keywords(seed: SeedResolution) -> list[str]:
     """
     Keyword inference: channel title + description + last ~10 video titles.
@@ -72,6 +94,7 @@ def discover_youtube_competitors(
     seed: SeedResolution | None,
     max_search_calls: int,
     max_candidates: int = 20,
+    extra_featured_channel_ids: list[str] | None = None,
 ) -> list[CompetitorCandidate]:
     client = get_youtube_client()
     try:
@@ -88,14 +111,21 @@ def discover_youtube_competitors(
                 candidate_ids.append(cid)
             reason_by_id[cid].add(reason)
 
-        # Featured channels from seed channel sections.
+        # Featured channels from seed and (optionally) user-provided competitors.
+        featured_sources: list[tuple[str, str]] = []
         if seed:
+            featured_sources.append((seed.external_id, "featured_seed"))
+        for cid in (extra_featured_channel_ids or [])[:3]:
+            if cid:
+                featured_sources.append((cid, "featured_comp"))
+
+        for src_id, reason in featured_sources:
             try:
-                sections = client.channel_sections(channel_id=seed.external_id)
+                sections = client.channel_sections(channel_id=src_id)
                 for cid in extract_featured_channel_ids(sections):
-                    add_id(cid, "featured")
+                    add_id(cid, reason)
             except YouTubeApiError as e:
-                logger.warning("Failed to load channel sections: %s", e)
+                logger.warning("Failed to load channel sections (%s): %s", src_id, e)
 
         # Keyword-based discovery (very limited due to quota).
         q = " ".join((keywords or [])[:8]).strip()

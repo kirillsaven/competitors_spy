@@ -20,18 +20,18 @@ class TimezoneParseError(ValueError):
 def parse_hhmm(value: str) -> time:
     m = _HHMM_RE.match(value or "")
     if not m:
-        raise TimeParseError("Expected HH:MM (e.g., 09:00).")
+        raise TimeParseError("Ожидаю время в формате HH:MM (например, 09:00).")
     hh = int(m.group(1))
     mm = int(m.group(2))
     if not (0 <= hh <= 23) or not (0 <= mm <= 59):
-        raise TimeParseError("Invalid time. Expected HH:MM (00:00..23:59).")
+        raise TimeParseError("Неверное время. Формат HH:MM (00:00..23:59).")
     return time(hour=hh, minute=mm)
 
 
 def normalize_timezone_str(value: str) -> str:
     v = (value or "").strip()
     if not v:
-        raise TimezoneParseError("Empty timezone.")
+        raise TimezoneParseError("Пустая таймзона.")
 
     m = _UTC_OFFSET_RE.match(v)
     if m:
@@ -39,7 +39,7 @@ def normalize_timezone_str(value: str) -> str:
         hh = int(m.group(2))
         mm = int(m.group(3) or "0")
         if hh > 23 or mm > 59:
-            raise TimezoneParseError("Invalid UTC offset.")
+            raise TimezoneParseError("Неверный UTC-оффсет.")
         total_minutes = sign * (hh * 60 + mm)
         sign_char = "+" if total_minutes >= 0 else "-"
         total_minutes_abs = abs(total_minutes)
@@ -51,7 +51,7 @@ def normalize_timezone_str(value: str) -> str:
     try:
         ZoneInfo(v)
     except Exception as e:
-        raise TimezoneParseError("Invalid timezone. Use IANA name (e.g., Europe/Moscow) or UTC+03:00.") from e
+        raise TimezoneParseError("Неверная таймзона. Используй IANA (например: Europe/Moscow) или UTC+03:00.") from e
     return v
 
 

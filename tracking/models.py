@@ -24,6 +24,7 @@ class SeedStatus(models.TextChoices):
 
 class NicheSource(models.TextChoices):
     AUTO = "auto", "Auto"
+    LLM = "llm", "LLM"
     MANUAL = "manual", "Manual"
 
 

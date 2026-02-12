@@ -10,6 +10,7 @@ from tracking.services.scoring import ScoredItem
 def build_report_payload(*, scored: list[ScoredItem], period_start: datetime, period_end: datetime) -> dict:
     youtube_items: list[dict] = []
     for s in scored[:5]:
+        content_type = (s.content_item.meta or {}).get("content_type") if isinstance(s.content_item.meta, dict) else None
         youtube_items.append(
             {
                 "platform": "youtube",
@@ -23,7 +24,12 @@ def build_report_payload(*, scored: list[ScoredItem], period_start: datetime, pe
                     "external_id": s.competitor.external_id,
                 },
                 "published_at": s.content_item.published_at.isoformat(),
+                "content_type": content_type,
                 "delta_views": s.delta_views,
+                "delta_hours": s.delta_hours,
+                "views_end": s.views_end,
+                "velocity_vph": s.velocity,
+                "score_type": s.score_type,
                 "score": s.score,
                 "er_end": s.er_end,
             }
@@ -66,17 +72,44 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
     if not yt_items:
         lines.append("Пока нет данных (попробуйте позже).")
     else:
+        fallback_count = 0
         for idx, it in enumerate(yt_items, start=1):
             title = it.get("title") or "Без названия"
             url = it.get("url") or ""
             delta = it.get("delta_views")
+            delta_hours = it.get("delta_hours")
+            views_end = it.get("views_end")
+            velocity = it.get("velocity_vph")
+            score_type = it.get("score_type") or ""
             score = it.get("score")
+            content_type = it.get("content_type") or ""
             competitor = (it.get("competitor") or {}).get("display_name") or (it.get("competitor") or {}).get("handle") or ""
-            lines.append(f"{idx}) {title}")
+            tag = " [Shorts]" if str(content_type) == "short" else ""
+            lines.append(f"{idx}) {title}{tag}")
             if competitor:
                 lines.append(f"Канал: {competitor}")
             if delta is not None:
-                lines.append(f"+{delta} просмотров")
+                if delta_hours:
+                    try:
+                        lines.append(f"+{int(delta)} просмотров за {float(delta_hours):.1f}ч")
+                    except Exception:
+                        lines.append(f"+{delta} просмотров")
+                else:
+                    lines.append(f"+{delta} просмотров")
+            else:
+                fallback_count += 1
+                if velocity is not None:
+                    try:
+                        lines.append(f"~{float(velocity):.0f} просмотров/ч (пока нет дельты)")
+                    except Exception:
+                        lines.append("Пока нет дельты по просмотрам")
+                else:
+                    lines.append("Пока нет дельты по просмотрам")
+                if views_end is not None:
+                    try:
+                        lines.append(f"Всего просмотров: {int(views_end)}")
+                    except Exception:
+                        pass
             if score is not None:
                 try:
                     lines.append(f"score: {float(score):.2f}")
@@ -84,6 +117,10 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
                     pass
             if url:
                 lines.append(url)
+            lines.append("")
+
+        if fallback_count:
+            lines.append("Примечание: для дельты нужен хотя бы один предыдущий снимок метрик. Обычно со 2-го запуска отчеты точнее.")
             lines.append("")
 
     lines.append("TikTok: MVP: пока не поддерживается")

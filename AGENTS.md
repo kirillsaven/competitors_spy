@@ -21,11 +21,17 @@ MVP scope:
 
 ## Product requirements (MVP)
 Onboarding in Telegram:
-1) user sends a profile link/handle (any platform) or a short niche description
-2) system infers niche keywords if seed is YouTube (channel description + recent titles); otherwise ask user to input keywords
-3) user can paste competitor list (optional). System still does its own discovery for YouTube
-4) user reviews/edits final YouTube competitor list
-5) user configures schedule: 1 or 2 times per day + preferred time(s); timezone via location (optional) or manual input
+1) user sends a profile link/handle (required)
+2) system infers niche keywords:
+   - prefer LLM (Gemini) when configured + rate-limited
+   - fallback to heuristic (channel description + recent titles)
+   - if weak/empty: ask user to input keywords manually
+3) user can paste competitor list (optional). System still does its own discovery for YouTube.
+   If user provided competitors, use them to improve niche inference and YouTube discovery.
+4) user reviews final YouTube competitor list by removing irrelevant channels (default: apply all suggestions)
+5) user configures timezone and schedule:
+   - timezone via location (optional) or manual input
+   - schedule: 1 or 2 times per day (prefer presets; manual time as fallback)
 
 Reporting:
 - Send a report for the period (since last run) with TOP 5 YouTube videos that went “viral” relative to each competitor baseline.
@@ -37,9 +43,14 @@ Reporting:
 - YT_RECENT_N_FOR_METRICS = 15 (how many recent videos per competitor we refresh each run)
 - MAX_COMPETITORS_YOUTUBE = 20 (raise carefully; quota risk)
 - MIN_DELTA_VIEWS = 500
+- MIN_VIEWS_END = 1000 (only for warm-up/fallback scoring when delta is unavailable)
 - Avoid expensive YouTube API calls:
   - Prefer channels.list + channelSections.list + playlistItems.list + videos.list
   - Use search.list only for discovery / fallback resolving, strictly limited and cached
+
+LLM (optional):
+- GOOGLE_LLM_API_KEY (Gemini) is used only for internal tasks (no user chat)
+- Rate-limit: GOOGLE_LLM_MAX_CALLS_PER_USER_PER_DAY (default 3)
 
 ## Engineering rules
 - Modular code: adapters + services + celery tasks.

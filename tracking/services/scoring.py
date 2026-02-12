@@ -26,9 +26,11 @@ class BaselineMetrics:
 class ScoredItem:
     content_item: ContentItem
     competitor: Competitor
-    delta_views: int
-    delta_hours: float
-    view_velocity: float
+    views_end: int
+    velocity: float  # views/hour, either delta-based or current average since publish
+    score_type: str  # "delta" | "current_vph"
+    delta_views: int | None
+    delta_hours: float | None
     er_end: float | None
     score: float
 
@@ -97,6 +99,7 @@ def score_items_for_period(
 ) -> list[ScoredItem]:
     scored: list[ScoredItem] = []
     min_delta_views = int(getattr(settings, "MIN_DELTA_VIEWS", 500))
+    min_views_end = int(getattr(settings, "MIN_VIEWS_END", 1000))
     max_age_days = 30
     min_published_at = period_end - timedelta(days=max_age_days)
 
@@ -110,26 +113,47 @@ def score_items_for_period(
         if not baseline:
             continue
 
-        snap_end = MetricSnapshot.objects.filter(content_item=item, captured_at__lte=period_end).order_by("-captured_at").first()
-        snap_start = MetricSnapshot.objects.filter(content_item=item, captured_at__lte=period_start).order_by("-captured_at").first()
-        if not snap_end or not snap_start:
+        snap_end = (
+            MetricSnapshot.objects.filter(content_item=item, captured_at__lte=period_end).order_by("-captured_at").first()
+        )
+        if not snap_end:
             continue
 
-        delta_views = int(snap_end.views) - int(snap_start.views)
-        if delta_views < min_delta_views:
-            continue
+        views_end = int(snap_end.views)
 
-        delta_hours = (snap_end.captured_at - snap_start.captured_at).total_seconds() / 3600.0
-        if delta_hours <= 0:
-            continue
+        # Try delta-based velocity first; if we don't have a start snapshot, fall back to average views/hour.
+        snap_start = (
+            MetricSnapshot.objects.filter(content_item=item, captured_at__lte=period_start).order_by("-captured_at").first()
+        )
 
-        view_velocity = float(delta_views) / delta_hours
+        delta_views: int | None = None
+        delta_hours: float | None = None
+        velocity: float | None = None
+        score_type = "current_vph"
+
+        if snap_start:
+            dv = views_end - int(snap_start.views)
+            dh = (snap_end.captured_at - snap_start.captured_at).total_seconds() / 3600.0
+            if dv >= min_delta_views and dh > 0:
+                delta_views = dv
+                delta_hours = dh
+                velocity = float(dv) / dh
+                score_type = "delta"
+
+        if velocity is None:
+            # Warm-up fallback: avoid tiny videos where vph is too noisy.
+            if views_end < min_views_end:
+                continue
+            age_hours = (snap_end.captured_at - item.published_at).total_seconds() / 3600.0
+            if age_hours <= 0:
+                continue
+            velocity = float(views_end) / age_hours
 
         er_end: float | None = None
         if snap_end.likes is not None and snap_end.comments is not None and snap_end.views > 0:
             er_end = float(snap_end.likes + snap_end.comments) / float(snap_end.views)
 
-        z_vel = (view_velocity - baseline.vph_median) / max(baseline.vph_iqr, EPS)
+        z_vel = (velocity - baseline.vph_median) / max(baseline.vph_iqr, EPS)
         if er_end is not None and baseline.er_median is not None and baseline.er_iqr is not None:
             z_er = (er_end - baseline.er_median) / max(baseline.er_iqr, EPS)
             score = 0.75 * z_vel + 0.25 * z_er
@@ -140,9 +164,11 @@ def score_items_for_period(
             ScoredItem(
                 content_item=item,
                 competitor=competitor,
+                views_end=views_end,
+                velocity=velocity,
+                score_type=score_type,
                 delta_views=delta_views,
                 delta_hours=delta_hours,
-                view_velocity=view_velocity,
                 er_end=er_end,
                 score=score,
             )

@@ -9,6 +9,7 @@ Key decisions:
 - Collection strategy: incremental (minimize YouTube quota)
 - Report period: since last run (last_run_at -> now)
 - Timezone: optional via location -> IANA timezone; fallback manual input; default Europe/Moscow
+- LLM (optional): Gemini used only for internal niche inference (no user chat), rate-limited per user/day
 
 ## Architecture
 Django project with apps:
@@ -76,11 +77,19 @@ Notes:
 - When Instagram adapter is implemented later, it must cover both Posts and Reels (store as meta/content type).
 
 ## Niche keyword inference (MVP)
-If seed is YouTube and channel resolves:
-- source text: channel title + description + last ~10 video titles
-- tokenize (RU+EN), remove stopwords, keep tokens len>=3
-- pick top N keywords by frequency
-If weak/empty -> ask user to input/edit keywords manually.
+Goal: infer 5-8 concise RU keywords/phrases for YouTube discovery.
+
+Strategy:
+- Prefer LLM (Gemini) when configured:
+  - prompt is fixed (no user chat), output is strict JSON
+  - rate-limited: GOOGLE_LLM_MAX_CALLS_PER_USER_PER_DAY
+- Fallback heuristic:
+  - source text: channel title + description + last ~10 video titles
+  - tokenize (RU+EN), remove stopwords, keep tokens len>=3
+  - pick top N keywords by frequency
+- If weak/empty -> ask user to input/edit keywords manually.
+
+If user provided competitor list, include their channel title/description as extra context for better keywords.
 
 ## Viral scoring (MVP)
 Period-based:
@@ -88,11 +97,15 @@ Period-based:
 - period_end = now
 For each candidate video:
 - snapshot_end = latest snapshot at/near period_end (collected in this run)
-- snapshot_start = latest snapshot <= period_start (often previous run snapshot); if missing -> skip delta-based scoring
+- snapshot_start = latest snapshot <= period_start (often previous run snapshot)
 - delta_views = views_end - views_start
 - delta_hours = hours(snapshot_end - snapshot_start)
 - view_velocity = delta_views / max(delta_hours, eps)
 - er_end = (likes_end+comments_end)/views_end when available
+
+Warm-up fallback (first run / missing snapshot_start):
+- Use current average views/hour since publish: views_end / age_hours
+- Apply MIN_VIEWS_END to avoid noisy tiny videos
 
 Baseline per competitor:
 - Use latest snapshot per each of last BASELINE_N videos within BASELINE_WINDOW_DAYS
@@ -129,22 +142,22 @@ Telegram message (RU) contains:
   - store Report, send Telegram message
   - update schedule next_run_at/last_run_at
   - write JobRun for observability
+- run_user_report_now(user_id): manual trigger ("Отчет сейчас")
+  - advances next_run_at before running to avoid immediate duplicate scheduled run
 
 ## Telegram bot commands (MVP)
 /start, /setup, /status, /competitors, /schedule, /report, /help
 
 FSM (updated):
 WAIT_SEED_INPUT
+-> WAIT_COMPETITOR_LIST (optional; button to skip/continue)
 -> CONFIRM_OR_EDIT_NICHE (if auto inferred)
 -> WAIT_MANUAL_NICHE (if needed)
--> ASK_UPLOAD_COMPETITORS
--> WAIT_COMPETITOR_LIST
--> SHOW_AUTO_CANDIDATES (choose by numbers)
--> REVIEW_FINAL_COMPETITORS (optional removal)
--> ASK_REPORTS_PER_DAY (1/2)
--> WAIT_TIME_1 (and WAIT_TIME_2 if needed)
+-> PRUNE_COMPETITORS (remove irrelevant channels; default apply all)
 -> ASK_TIMEZONE_METHOD (location vs manual)
 -> WAIT_LOCATION / WAIT_TZ_MANUAL
+-> ASK_REPORTS_PER_DAY (1/2)
+-> PICK_TIME_SINGLE | PICK_TIME_PAIR (presets; manual time only as fallback)
 -> DONE
 
 ## Docker Compose
@@ -159,4 +172,5 @@ Services:
 .env.example includes:
 TELEGRAM_BOT_TOKEN, YOUTUBE_API_KEY, DATABASE_URL, REDIS_URL,
 BASELINE_N, BASELINE_WINDOW_DAYS, YT_RECENT_N_FOR_METRICS,
-MAX_COMPETITORS_YOUTUBE, MIN_DELTA_VIEWS, DEFAULT_TIMEZONE
+MAX_COMPETITORS_YOUTUBE, MIN_DELTA_VIEWS, MIN_VIEWS_END, DEFAULT_TIMEZONE,
+GOOGLE_LLM_API_KEY, GOOGLE_LLM_MODEL, GOOGLE_LLM_MAX_CALLS_PER_USER_PER_DAY

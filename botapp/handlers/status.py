@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import Message
-from django.utils import timezone
+from aiogram.types import CallbackQuery, Message
 
 from botapp.db import db_run
 from common.time import format_dt_local
 from tracking.models import Platform, Schedule, TgUser
-from tracking.tasks import run_user_report
+from tracking.tasks import run_user_report_now
 
 router = Router()
 
@@ -44,8 +43,23 @@ async def cmd_report(message: Message) -> None:
     if not user:
         await message.answer("Сначала запусти /setup.")
         return
-    run_user_report.delay(user.id)
-    await message.answer("Ок, собираю отчет. Пришлю сообщением, когда будет готов.")
+    run_user_report_now.delay(user.id)
+    await message.answer("Собираю отчет. Пришлю сообщением, когда будет готов.")
+
+
+@router.callback_query(F.data == "report_now")
+async def cb_report_now(cb: CallbackQuery) -> None:
+    await cb.answer()
+    if not cb.from_user:
+        return
+    user = await db_run(lambda: TgUser.objects.filter(tg_user_id=cb.from_user.id).first())
+    if not user:
+        if cb.message:
+            await cb.message.answer("Сначала запусти /setup.")
+        return
+    run_user_report_now.delay(user.id)
+    if cb.message:
+        await cb.message.answer("Собираю отчет. Пришлю сообщением, когда будет готов.")
 
 
 @router.message(Command("competitors"))
