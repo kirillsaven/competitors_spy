@@ -184,7 +184,7 @@ CELERY_TASK_SOFT_TIME_LIMIT = _env_int("CELERY_TASK_SOFT_TIME_LIMIT", 60 * 9)
 CELERY_BEAT_SCHEDULE = {
     "tick_due_schedules": {
         "task": "tracking.tasks.tick_due_schedules",
-        "schedule": timedelta(minutes=5),
+        "schedule": timedelta(minutes=1),
     }
 }
 

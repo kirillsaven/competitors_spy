@@ -4,6 +4,30 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
 
 
+TIME_PRESETS = [
+    "00:00",
+    "02:00",
+    "04:00",
+    "06:00",
+    "08:00",
+    "10:00",
+    "12:00",
+    "14:00",
+    "16:00",
+    "18:00",
+    "20:00",
+    "22:00",
+]
+
+TIME_PAIR_PRESETS = [
+    ("08:00", "20:00"),
+    ("09:00", "21:00"),
+    ("10:00", "20:00"),
+    ("12:00", "18:00"),
+    ("14:00", "20:00"),
+]
+
+
 def kb_keywords_confirm() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.add(InlineKeyboardButton(text="Подходит", callback_data="kw_ok"))
@@ -13,8 +37,8 @@ def kb_keywords_confirm() -> InlineKeyboardMarkup:
 
 def kb_reports_per_day() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.add(InlineKeyboardButton(text="1 раз в день", callback_data="rpd_1"))
-    b.add(InlineKeyboardButton(text="2 раза в день", callback_data="rpd_2"))
+    b.add(InlineKeyboardButton(text="Раз в день", callback_data="rpd_1"))
+    b.add(InlineKeyboardButton(text="Два раза в день", callback_data="rpd_2"))
     return b.as_markup()
 
 
@@ -52,10 +76,10 @@ def kb_time_presets_single() -> InlineKeyboardMarkup:
     Presets for 1 report/day.
     """
     b = InlineKeyboardBuilder()
-    for t in ["09:00", "10:00", "12:00", "18:00", "21:00"]:
+    for t in TIME_PRESETS:
         b.add(InlineKeyboardButton(text=t, callback_data=f"time1:{t}"))
     b.add(InlineKeyboardButton(text="Другое время", callback_data="time1:custom"))
-    b.adjust(3, 2, 1)
+    b.adjust(3, 3, 3, 3, 1)
     return b.as_markup()
 
 
@@ -64,28 +88,28 @@ def kb_time_presets_pair() -> InlineKeyboardMarkup:
     Presets for 2 reports/day.
     """
     b = InlineKeyboardBuilder()
-    for a, c in [("09:00", "21:00"), ("10:00", "20:00"), ("12:00", "18:00")]:
+    for a, c in TIME_PAIR_PRESETS:
         b.add(InlineKeyboardButton(text=f"{a} + {c}", callback_data=f"timep:{a},{c}"))
     b.add(InlineKeyboardButton(text="Другое время", callback_data="timep:custom"))
-    b.adjust(1, 1, 1, 1)
+    b.adjust(1)
     return b.as_markup()
 
 
 def kb_time_presets_first() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    for t in ["09:00", "10:00", "12:00", "18:00", "21:00"]:
+    for t in TIME_PRESETS:
         b.add(InlineKeyboardButton(text=t, callback_data=f"time1pick:{t}"))
     b.add(InlineKeyboardButton(text="Ввести вручную", callback_data="time1pick:manual"))
-    b.adjust(3, 2, 1)
+    b.adjust(3, 3, 3, 3, 1)
     return b.as_markup()
 
 
 def kb_time_presets_second() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    for t in ["09:00", "10:00", "12:00", "18:00", "21:00"]:
+    for t in TIME_PRESETS:
         b.add(InlineKeyboardButton(text=t, callback_data=f"time2:{t}"))
     b.add(InlineKeyboardButton(text="Ввести вручную", callback_data="time2:manual"))
-    b.adjust(3, 2, 1)
+    b.adjust(3, 3, 3, 3, 1)
     return b.as_markup()
 
 

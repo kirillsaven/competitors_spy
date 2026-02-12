@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import re
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -13,6 +14,10 @@ from .base import CompetitorCandidate, SeedResolution, VideoDetails
 
 class YouTubeApiError(RuntimeError):
     pass
+
+
+_PLAIN_HANDLE_RE = re.compile(r"^[0-9A-Za-z._-]{3,50}$")
+_PLAIN_CHANNEL_ID_RE = re.compile(r"^UC[0-9A-Za-z_-]{22}$")
 
 
 def _parse_rfc3339(value: str) -> datetime:
@@ -33,6 +38,9 @@ def extract_handle(raw: str) -> str | None:
         return None
     if s.startswith("@"):
         return s[1:]
+    # Allow plain handle/nickname (no '@') to keep UX simple.
+    if _PLAIN_HANDLE_RE.match(s) and not _PLAIN_CHANNEL_ID_RE.match(s):
+        return s
     try:
         u = urlparse(s)
     except Exception:
@@ -50,6 +58,9 @@ def extract_channel_id(raw: str) -> str | None:
     s = (raw or "").strip()
     if not s:
         return None
+    # Allow pasting channelId directly (e.g. UCxxxxxxxxxxxxxxxxxxxxxx).
+    if _PLAIN_CHANNEL_ID_RE.match(s):
+        return s
     try:
         u = urlparse(s)
     except Exception:

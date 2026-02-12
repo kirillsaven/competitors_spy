@@ -2,7 +2,7 @@
 
 ## Goal
 Telegram bot + Django Admin to track competitors' content performance.
-Users do NOT log into social networks. Users only provide a profile URL/handle.
+Users do NOT log into social networks. Users only provide a profile URL or handle/nickname.
 
 MVP scope:
 - YouTube end-to-end (setup -> discovery -> collection -> scoring -> scheduled reporting).
@@ -21,7 +21,7 @@ MVP scope:
 
 ## Product requirements (MVP)
 Onboarding in Telegram:
-1) user sends a profile link/handle (required)
+1) user sends a profile link or handle/nickname (required). Both `@handle` and plain `handle` are accepted.
 2) system infers niche keywords:
    - prefer LLM (Gemini) when configured + rate-limited
    - fallback to heuristic (channel description + recent titles)

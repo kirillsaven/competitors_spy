@@ -86,7 +86,7 @@ def _build_prune_text(*, selected: int, total: int, limit: int) -> str:
 
 async def _ask_seed(message: Message, state: FSMContext) -> None:
     await state.set_state(SetupStates.WAIT_SEED_INPUT)
-    await message.answer("Пришли ссылку или @хендл профиля.")
+    await message.answer("Пришли ссылку или хендл (handle/nickname) профиля.")
 
 
 @router.message(Command("setup"))
@@ -128,10 +128,10 @@ async def on_seed_input(message: Message, state: FSMContext) -> None:
     user = await db_call(TgUser.objects.get, id=data["user_id"])
     raw = (message.text or "").strip()
     if not raw:
-        await message.answer("Пришли ссылку или @хендл.")
+        await message.answer("Пришли ссылку или хендл (handle/nickname).")
         return
-    if "http" not in raw.lower() and not raw.startswith("@"):
-        await message.answer("Нужна ссылка или @хендл (например: https://youtube.com/@example или @example).")
+    if re.search(r"\s", raw):
+        await message.answer("Нужна ссылка или хендл (handle/nickname) без пробелов. Например: https://youtube.com/@example или example")
         return
 
     seed: SeedResolution | None = None
@@ -146,6 +146,23 @@ async def on_seed_input(message: Message, state: FSMContext) -> None:
     except Exception as e:
         logger.warning("Seed resolve failed: %s", e)
         seed = None
+
+    if not seed:
+        await db_call(
+            SeedProfile.objects.create,
+            user=user,
+            raw_input=raw,
+            detected_platform="",
+            canonical_url="",
+            niche_keywords=[],
+            niche_source="manual",
+            status=SeedStatus.FAILED,
+        )
+        await message.answer(
+            "Не нашел точного совпадения по этому хендлу (handle/nickname).\n"
+            "Пришли ссылку на профиль или хендл еще раз.",
+        )
+        return
 
     if seed:
         detected_platform = Platform.YOUTUBE
@@ -170,7 +187,7 @@ async def on_seed_input(message: Message, state: FSMContext) -> None:
     )
     await state.set_state(SetupStates.WAIT_COMPETITOR_LIST)
     await message.answer(
-        "Если хочешь, пришли конкурентов на YouTube (ссылки/хендлы), по одному в строке.\n"
+        "Если хочешь, пришли конкурентов на YouTube: ссылки или хендлы (handle/nickname), по одному в строке.\n"
         "Это опционально: если ничего не пришлешь, я сам подберу.",
         reply_markup=kb_competitors_optional(),
     )
@@ -618,14 +635,12 @@ async def _apply_timezone_and_continue(message: Message, state: FSMContext, *, t
     user.timezone_str = timezone_str
     user.tz_source = tz_source
     await db_run(lambda: user.save(update_fields=["timezone_str", "tz_source", "updated_at"]))
-
-    await message.answer("Принято.", reply_markup=ReplyKeyboardRemove())
     await _ask_reports_per_day(message, state)
 
 
 async def _ask_reports_per_day(message: Message, state: FSMContext) -> None:
     await state.set_state(SetupStates.ASK_REPORTS_PER_DAY)
-    await message.answer("Сколько раз в день присылать отчет?", reply_markup=kb_reports_per_day())
+    await message.answer("Как часто присылать отчет?", reply_markup=kb_reports_per_day())
 
 
 @router.callback_query(SetupStates.ASK_REPORTS_PER_DAY, F.data.in_(["rpd_1", "rpd_2"]))

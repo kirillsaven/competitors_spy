@@ -2,7 +2,7 @@
 
 ## Summary
 Telegram bot for tracking competitors and sending scheduled reports (RU messages).
-User supplies a profile URL/handle (no social logins).
+User supplies a profile URL or handle/nickname (no social logins).
 MVP: YouTube full; TikTok/Instagram stubs.
 
 Key decisions:
@@ -48,7 +48,7 @@ API: YouTube Data API v3 via HTTP client (timeouts, retries, backoff).
 
 Resolve input -> channelId:
 Accept:
-- @handle
+- @handle (or plain handle without '@')
 - https://youtube.com/@handle
 - https://youtube.com/channel/<id>
 - video URL (watch?v= / shorts/) -> resolve videoId -> channelId via videos.list
@@ -134,7 +134,7 @@ Telegram message (RU) contains:
 - TikTok/Instagram: “MVP: пока не поддерживается”
 
 ## Celery tasks
-- tick_due_schedules (every 5 min): find due schedules, enqueue run_user_report
+- tick_due_schedules (every 1 min): find due schedules, enqueue run_user_report
 - run_user_report(user_id):
   - compute period
   - collect fresh metrics (incremental)
