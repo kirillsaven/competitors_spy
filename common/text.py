@@ -30,6 +30,13 @@ _STOPWORDS_EN = {
     "videos",
     "channel",
     "new",
+    "youtube",
+    "youtu",
+    "youtu.be",
+    "http",
+    "https",
+    "www",
+    "com",
 }
 
 _STOPWORDS_RU = {
@@ -77,4 +84,3 @@ def extract_keywords(text: str, max_keywords: int = 8) -> list[str]:
         return []
     counts = Counter(tokens)
     return [w for w, _ in counts.most_common(max_keywords)]
-
