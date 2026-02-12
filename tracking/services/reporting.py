@@ -119,10 +119,6 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
                 lines.append(url)
             lines.append("")
 
-        if fallback_count:
-            lines.append("Примечание: для дельты нужен хотя бы один предыдущий снимок метрик. Обычно со 2-го запуска отчеты точнее.")
-            lines.append("")
-
     lines.append("TikTok: MVP: пока не поддерживается")
     lines.append("Instagram: MVP: пока не поддерживается")
     return "\n".join(lines).rstrip() + "\n"

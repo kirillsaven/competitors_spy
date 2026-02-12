@@ -5,6 +5,7 @@ import logging
 import re
 from dataclasses import asdict
 from datetime import timedelta
+from urllib.parse import urlparse
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -15,13 +16,14 @@ from django.utils import timezone
 
 from botapp.db import db_call, db_run
 from botapp.keyboards import (
-    kb_competitors_optional,
-    kb_keywords_confirm,
+    kb_competitors_next,
+    kb_competitors_next_or_ignore,
     kb_prune_competitors,
+    kb_prune_keywords,
     kb_report_now,
     kb_reports_per_day,
+    kb_seed_candidates,
     kb_time_presets_first,
-    kb_time_presets_pair,
     kb_time_presets_second,
     kb_time_presets_single,
     kb_timezone_method,
@@ -38,10 +40,16 @@ from common.time import (
 from tracking.adapters.base import SeedResolution
 from tracking.models import AddedBy, Competitor, Platform, Schedule, SeedProfile, SeedStatus, TgUser, TzSource
 from tracking.services.competitor_service import upsert_competitor
-from tracking.services.llm_usage import try_consume_llm_call
+from tracking.adapters.youtube import extract_handle as yt_extract_handle
+from tracking.services.llm_usage import decide_and_consume_llm_call
 from tracking.services.niche_service import infer_niche_keywords
-from tracking.services.youtube_service import YouTubeNotConfigured, discover_youtube_competitors, resolve_youtube_seed
-from tracking.tasks import bootstrap_user_data
+from tracking.services.youtube_service import (
+    YouTubeNotConfigured,
+    discover_youtube_competitors,
+    resolve_youtube_seed,
+    search_youtube_seed_candidates,
+)
+from tracking.tasks import run_user_report_now
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -68,6 +76,77 @@ def _parse_keywords(text: str) -> list[str]:
     return parts[:12]
 
 
+def _kw_key(s: str) -> str:
+    return re.sub(r"\s+", " ", (s or "").strip().lower())
+
+
+def _merge_keywords(*, new: list[str], existing: list[str], max_keywords: int = 12) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for kw in (new or []) + (existing or []):
+        k = re.sub(r"\s+", " ", (kw or "").strip())
+        if not k:
+            continue
+        key = _kw_key(k)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(k)
+        if len(out) >= max_keywords:
+            break
+    return out
+
+
+def _detect_platform_from_url(raw: str) -> str | None:
+    s = (raw or "").strip()
+    if not s.lower().startswith(("http://", "https://")):
+        return None
+    try:
+        u = urlparse(s)
+    except Exception:
+        return None
+    host = (u.netloc or "").lower()
+    if not host:
+        return None
+    if "youtube." in host or "youtu.be" in host:
+        return Platform.YOUTUBE
+    if "instagram." in host:
+        return Platform.INSTAGRAM
+    if "tiktok." in host:
+        return Platform.TIKTOK
+    return None
+
+
+def _seed_from_profile_url(*, platform: str, url: str) -> SeedResolution:
+    handle = None
+    try:
+        u = urlparse(url)
+        parts = [p for p in (u.path or "").split("/") if p]
+    except Exception:
+        parts = []
+
+    if platform == Platform.INSTAGRAM:
+        if parts and parts[0] not in {"p", "reel", "tv", "stories"}:
+            handle = parts[0]
+    elif platform == Platform.TIKTOK:
+        if parts:
+            first = parts[0]
+            if first.startswith("@") and len(first) > 1:
+                handle = first[1:]
+            elif first and first not in {"t"}:
+                handle = first
+
+    return SeedResolution(
+        platform=platform,
+        external_id="",
+        handle=handle,
+        url=url,
+        title=None,
+        description=None,
+        uploads_playlist_id=None,
+    )
+
+
 def _candidate_display_name(c: dict) -> str:
     return (c.get("display_name") or c.get("handle") or c.get("external_id") or "").strip() or "Без названия"
 
@@ -84,9 +163,41 @@ def _build_prune_text(*, selected: int, total: int, limit: int) -> str:
     return "\n".join(lines)
 
 
+def _build_keywords_edit_text(*, keywords: list[str], excluded: set[str]) -> str:
+    included = [k for k in keywords if _kw_key(k) not in excluded]
+    lines = ["Ключевые слова по нише:"]
+    for k in included[:12]:
+        lines.append(f"• {k}")
+    if not included:
+        lines.append("• (пусто)")
+    lines.append("")
+    lines.append("Нажимай на ключевые слова ниже, чтобы исключить лишнее. Можно добавить свои.")
+    return "\n".join(lines)
+
+
 async def _ask_seed(message: Message, state: FSMContext) -> None:
     await state.set_state(SetupStates.WAIT_SEED_INPUT)
-    await message.answer("Пришли ссылку или хендл (handle/nickname) профиля.")
+    await message.answer("Пришли ссылку или хендл/никнейм профиля.")
+
+
+async def _enter_competitor_step(
+    message: Message,
+    state: FSMContext,
+    *,
+    seed_profile_id: int,
+    seed: SeedResolution,
+) -> None:
+    await state.update_data(
+        seed_profile_id=seed_profile_id,
+        seed=_seed_to_dict(seed),
+        competitor_seeds=[],
+    )
+    await state.set_state(SetupStates.WAIT_COMPETITOR_LIST)
+    await message.answer(
+        "Если хочешь, пришли конкурентов: ссылки или хендлы/никнеймы, по одному в строке.\n"
+        "Это опционально: если ничего не пришлешь, я сам подберу.",
+        reply_markup=kb_competitors_next(),
+    )
 
 
 @router.message(Command("setup"))
@@ -128,16 +239,37 @@ async def on_seed_input(message: Message, state: FSMContext) -> None:
     user = await db_call(TgUser.objects.get, id=data["user_id"])
     raw = (message.text or "").strip()
     if not raw:
-        await message.answer("Пришли ссылку или хендл (handle/nickname).")
-        return
-    if re.search(r"\s", raw):
-        await message.answer("Нужна ссылка или хендл (handle/nickname) без пробелов. Например: https://youtube.com/@example или example")
+        await message.answer("Пришли ссылку или хендл/никнейм.")
         return
 
-    seed: SeedResolution | None = None
-    detected_platform = ""
-    canonical_url = ""
-    status = SeedStatus.PENDING
+    sp = await db_call(
+        SeedProfile.objects.create,
+        user=user,
+        raw_input=raw,
+        detected_platform="",
+        canonical_url="",
+        niche_keywords=[],
+        niche_source="manual",
+        status=SeedStatus.PENDING,
+    )
+
+    # Non-YouTube seed URL: accept and continue (MVP analysis is still YouTube-only).
+    url_platform = _detect_platform_from_url(raw)
+    if url_platform and url_platform != Platform.YOUTUBE:
+        seed = _seed_from_profile_url(platform=url_platform, url=raw)
+        await db_run(
+            lambda: SeedProfile.objects.filter(id=sp.id).update(
+                detected_platform=url_platform,
+                canonical_url=seed.url,
+                status=SeedStatus.RESOLVED,
+            )
+        )
+        await _enter_competitor_step(message, state, seed_profile_id=sp.id, seed=seed)
+        return
+    if raw.lower().startswith(("http://", "https://")) and url_platform is None:
+        await db_run(lambda: SeedProfile.objects.filter(id=sp.id).update(status=SeedStatus.FAILED))
+        await message.answer("Не понял эту ссылку. Пришли ссылку на профиль или хендл/никнейм.")
+        return
 
     try:
         seed = await asyncio.to_thread(resolve_youtube_seed, raw)
@@ -147,59 +279,101 @@ async def on_seed_input(message: Message, state: FSMContext) -> None:
         logger.warning("Seed resolve failed: %s", e)
         seed = None
 
-    if not seed:
-        await db_call(
-            SeedProfile.objects.create,
-            user=user,
-            raw_input=raw,
-            detected_platform="",
-            canonical_url="",
-            niche_keywords=[],
-            niche_source="manual",
-            status=SeedStatus.FAILED,
+    if seed:
+        await db_run(
+            lambda: SeedProfile.objects.filter(id=sp.id).update(
+                detected_platform=Platform.YOUTUBE,
+                canonical_url=seed.url,
+                status=SeedStatus.RESOLVED,
+            )
         )
+        await _enter_competitor_step(message, state, seed_profile_id=sp.id, seed=seed)
+        return
+
+    # If input looks like a handle / URL, we require an exact match.
+    raw_lower = raw.lower()
+    looks_like_exact = bool(yt_extract_handle(raw)) or raw_lower.startswith("http") or "youtube." in raw_lower or "youtu.be" in raw_lower
+    if looks_like_exact:
+        await db_run(lambda: SeedProfile.objects.filter(id=sp.id).update(status=SeedStatus.FAILED))
         await message.answer(
-            "Не нашел точного совпадения по этому хендлу (handle/nickname).\n"
+            "Не нашел точного совпадения по этому хендлу/ссылке.\n"
             "Пришли ссылку на профиль или хендл еще раз.",
         )
         return
 
-    if seed:
-        detected_platform = Platform.YOUTUBE
-        canonical_url = seed.url
-        status = SeedStatus.RESOLVED
+    # Otherwise treat as nickname and try a best-effort search (user will pick the correct channel).
+    try:
+        candidates = await asyncio.to_thread(search_youtube_seed_candidates, query=raw, max_results=8)
+    except Exception as e:
+        logger.warning("Seed search failed: %s", e)
+        candidates = []
 
-    sp = await db_call(
-        SeedProfile.objects.create,
-        user=user,
-        raw_input=raw,
-        detected_platform=detected_platform,
-        canonical_url=canonical_url,
-        niche_keywords=[],
-        niche_source="manual",
-        status=status,
-    )
+    if not candidates:
+        await db_run(lambda: SeedProfile.objects.filter(id=sp.id).update(status=SeedStatus.FAILED))
+        await message.answer(
+            "Не нашел профиль по этому никнейму.\n"
+            "Пришли ссылку на профиль или хендл.",
+        )
+        return
 
     await state.update_data(
         seed_profile_id=sp.id,
-        seed=_seed_to_dict(seed) if seed else None,
-        competitor_seeds=[],
+        seed_candidates=[_seed_to_dict(c) for c in candidates],
     )
-    await state.set_state(SetupStates.WAIT_COMPETITOR_LIST)
+    await state.set_state(SetupStates.PICK_SEED_CANDIDATE)
     await message.answer(
-        "Если хочешь, пришли конкурентов на YouTube: ссылки или хендлы (handle/nickname), по одному в строке.\n"
-        "Это опционально: если ничего не пришлешь, я сам подберу.",
-        reply_markup=kb_competitors_optional(),
+        "Нашел несколько вариантов. Выбери профиль:",
+        reply_markup=kb_seed_candidates(candidates=[_seed_to_dict(c) for c in candidates]),
     )
 
 
-@router.callback_query(SetupStates.WAIT_COMPETITOR_LIST, F.data.in_(["comp_skip", "comp_done"]))
+@router.callback_query(SetupStates.PICK_SEED_CANDIDATE, F.data == "seed_retry")
+async def on_seed_retry(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    if not cb.message:
+        return
+    await state.update_data(seed_candidates=[])
+    await _ask_seed(cb.message, state)
+
+
+@router.callback_query(SetupStates.PICK_SEED_CANDIDATE, F.data.startswith("seed_pick:"))
+async def on_seed_pick(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    if not cb.message:
+        return
+    data = await state.get_data()
+    try:
+        idx = int(str(cb.data).split(":", 1)[1])
+    except Exception:
+        idx = -1
+
+    candidates = data.get("seed_candidates") or []
+    if not (0 <= idx < len(candidates)):
+        await cb.message.answer("Не понял выбор. Пришли ссылку или хендл/никнейм еще раз.")
+        await _ask_seed(cb.message, state)
+        return
+
+    seed = _seed_from_dict(candidates[idx])
+    sp_id = int(data.get("seed_profile_id") or 0)
+    if sp_id:
+        await db_run(
+            lambda: SeedProfile.objects.filter(id=sp_id).update(
+                detected_platform=Platform.YOUTUBE,
+                canonical_url=seed.url,
+                status=SeedStatus.RESOLVED,
+            )
+        )
+
+    await _enter_competitor_step(cb.message, state, seed_profile_id=sp_id, seed=seed)
+
+
+@router.callback_query(SetupStates.WAIT_COMPETITOR_LIST, F.data.in_(["comp_done", "comp_clear"]))
 async def on_competitors_optional(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
     if not cb.message:
         return
 
-    if cb.data == "comp_skip":
+    if cb.data == "comp_clear":
         await state.update_data(competitor_seeds=[])
     await _start_keywords_step(cb.message, state)
 
@@ -210,7 +384,7 @@ async def on_competitor_list(message: Message, state: FSMContext) -> None:
     if not raw:
         await message.answer(
             "Пришли список конкурентов одним сообщением (по одному в строке) или нажми «Дальше».",
-            reply_markup=kb_competitors_optional(),
+            reply_markup=kb_competitors_next(),
         )
         return
 
@@ -254,7 +428,8 @@ async def on_competitor_list(message: Message, state: FSMContext) -> None:
         parts.append("Не нашел валидных ссылок.")
 
     parts.append("Можно прислать еще, или нажми «Дальше».")
-    await message.answer(" ".join(parts), reply_markup=kb_competitors_optional())
+    kb = kb_competitors_next_or_ignore() if existing else kb_competitors_next()
+    await message.answer(" ".join(parts), reply_markup=kb)
 
 
 async def _start_keywords_step(message: Message, state: FSMContext) -> None:
@@ -275,23 +450,30 @@ async def _start_keywords_step(message: Message, state: FSMContext) -> None:
             except Exception:
                 continue
 
-    if seed is None and comp_seeds:
-        # Fallback: use the first competitor as context seed.
-        seed = comp_seeds[0]
+    # Build a YouTube-only context seed (we can infer niche from it).
+    context_seed = seed if (seed and seed.platform == Platform.YOUTUBE and seed.external_id) else None
+    if context_seed is None and comp_seeds:
+        context_seed = comp_seeds[0]
         comp_seeds = comp_seeds[1:]
 
-    if seed is None:
-        await state.set_state(SetupStates.WAIT_MANUAL_NICHE)
-        await message.answer("Чтобы подобрать конкурентов, напиши ключевые слова по нише (через запятую).")
+    if context_seed is None:
+        await state.update_data(niche_keywords=[], excluded_keywords=[])
+        await state.set_state(SetupStates.ADD_NICHE)
+        await message.answer("Чтобы подобрать конкурентов, напиши ключевые слова по нише (через запятую или с новой строки).")
         return
 
     await message.answer("Секунду, подбираю ключевые слова по нише…")
 
-    prefer_llm = await db_call(try_consume_llm_call, user=user, now_utc=timezone.now())
+    decision = await db_call(decide_and_consume_llm_call, user=user, now_utc=timezone.now())
+    if not decision.allow and decision.reason == "limit_reached":
+        await message.answer(
+            f"Лимит умного анализа на сегодня исчерпан ({decision.used_today}/{decision.max_calls_per_day}). Использую быстрый анализ."
+        )
+    prefer_llm = decision.allow
     try:
         kws, source = await asyncio.to_thread(
             infer_niche_keywords,
-            seed=seed,
+            seed=context_seed,
             competitors=comp_seeds,
             prefer_llm=prefer_llm,
         )
@@ -301,8 +483,9 @@ async def _start_keywords_step(message: Message, state: FSMContext) -> None:
 
     kws = [k.strip() for k in (kws or []) if isinstance(k, str) and k.strip()][:12]
     if not kws:
-        await state.set_state(SetupStates.WAIT_MANUAL_NICHE)
-        await message.answer("Не получилось надежно определить нишу. Напиши ключевые слова (через запятую).")
+        await state.update_data(niche_keywords=[], excluded_keywords=[])
+        await state.set_state(SetupStates.ADD_NICHE)
+        await message.answer("Не получилось надежно определить нишу. Напиши ключевые слова (через запятую или с новой строки).")
         return
 
     if sp:
@@ -314,46 +497,144 @@ async def _start_keywords_step(message: Message, state: FSMContext) -> None:
             )
         )
 
-    await state.update_data(niche_keywords=kws)
-    await state.set_state(SetupStates.CONFIRM_OR_EDIT_NICHE)
-    await message.answer(
-        "Ключевые слова по нише:\n" + "\n".join([f"• {k}" for k in kws]) + "\n\nПодходит?",
-        reply_markup=kb_keywords_confirm(),
+    await state.update_data(niche_keywords=kws, excluded_keywords=[], niche_source=source)
+    await _show_keywords_editor(message, state)
+
+
+async def _show_keywords_editor(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    keywords = list(data.get("niche_keywords") or [])
+    excluded = set(str(x) for x in (data.get("excluded_keywords") or []))
+    await state.set_state(SetupStates.EDIT_NICHE)
+    m = await message.answer(
+        _build_keywords_edit_text(keywords=keywords, excluded=excluded),
+        reply_markup=kb_prune_keywords(keywords=keywords, excluded=excluded),
     )
+    await state.update_data(kw_editor_chat_id=m.chat.id, kw_editor_message_id=m.message_id)
 
 
-@router.callback_query(SetupStates.CONFIRM_OR_EDIT_NICHE, F.data.in_(["kw_ok", "kw_edit"]))
-async def on_keywords_confirm(cb: CallbackQuery, state: FSMContext) -> None:
+async def _render_keywords_editor(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    keywords = list(data.get("niche_keywords") or [])
+    excluded = set(str(x) for x in (data.get("excluded_keywords") or []))
+    text = _build_keywords_edit_text(keywords=keywords, excluded=excluded)
+    kb = kb_prune_keywords(keywords=keywords, excluded=excluded)
+    try:
+        await message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await message.edit_reply_markup(reply_markup=kb)
+
+
+@router.callback_query(SetupStates.EDIT_NICHE, F.data.startswith("kw_toggle:"))
+async def on_kw_toggle(cb: CallbackQuery, state: FSMContext) -> None:
     await cb.answer()
     if not cb.message:
         return
-    if cb.data == "kw_ok":
-        await _start_discovery(cb.message, state)
+    try:
+        idx = int(str(cb.data).split(":", 1)[1])
+    except Exception:
         return
-    await state.set_state(SetupStates.WAIT_MANUAL_NICHE)
-    await cb.message.answer("Напиши ключевые слова по нише (через запятую).")
-
-
-@router.message(SetupStates.WAIT_MANUAL_NICHE)
-async def on_manual_niche(message: Message, state: FSMContext) -> None:
-    kws = _parse_keywords(message.text or "")
-    if not kws:
-        await message.answer("Не вижу ключевых слов. Напиши через запятую, например: сборка ПК, комплектующие, ремонт.")
-        return
-
     data = await state.get_data()
-    sp_id = data.get("seed_profile_id")
+    keywords = list(data.get("niche_keywords") or [])
+    if not (0 <= idx < len(keywords)):
+        return
+    excluded = set(str(x) for x in (data.get("excluded_keywords") or []))
+    key = _kw_key(keywords[idx])
+    if key in excluded:
+        excluded.remove(key)
+    else:
+        excluded.add(key)
+    await state.update_data(excluded_keywords=sorted(excluded))
+    await _render_keywords_editor(cb.message, state)
+
+
+@router.callback_query(SetupStates.EDIT_NICHE, F.data == "kw_all")
+async def on_kw_all(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    if not cb.message:
+        return
+    await state.update_data(excluded_keywords=[])
+    await _render_keywords_editor(cb.message, state)
+
+
+@router.callback_query(SetupStates.EDIT_NICHE, F.data == "kw_add")
+async def on_kw_add(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    if not cb.message:
+        return
+    await state.update_data(kw_editor_chat_id=cb.message.chat.id, kw_editor_message_id=cb.message.message_id)
+    await state.set_state(SetupStates.ADD_NICHE)
+    await cb.message.answer(
+        "Добавь ключевые слова по нише (через запятую или с новой строки).\n"
+        "Они добавятся к текущим.",
+    )
+
+
+@router.callback_query(SetupStates.EDIT_NICHE, F.data == "kw_done")
+async def on_kw_done(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    if not cb.message:
+        return
+    data = await state.get_data()
+    keywords = list(data.get("niche_keywords") or [])
+    excluded = set(str(x) for x in (data.get("excluded_keywords") or []))
+    final = [k for k in keywords if _kw_key(k) not in excluded]
+    if not final:
+        await cb.answer("Нужно оставить хотя бы одно ключевое слово.", show_alert=True)
+        return
+
+    sp_id = int(data.get("seed_profile_id") or 0)
+    source = str(data.get("niche_source") or "manual")
     if sp_id:
         await db_run(
             lambda: SeedProfile.objects.filter(id=sp_id).update(
-                niche_keywords=kws,
-                niche_source="manual",
+                niche_keywords=final,
+                niche_source=source,
                 status=SeedStatus.RESOLVED,
             )
         )
 
-    await state.update_data(niche_keywords=kws)
-    await _start_discovery(message, state)
+    await state.update_data(niche_keywords=final)
+    await _start_discovery(cb.message, state)
+
+
+@router.message(SetupStates.ADD_NICHE)
+async def on_add_niche(message: Message, state: FSMContext) -> None:
+    new_kws = _parse_keywords(message.text or "")
+    if not new_kws:
+        await message.answer(
+            "Не вижу ключевых слов. Пришли через запятую или с новой строки, например:\n"
+            "сборка ПК\nкомплектующие\nремонт"
+        )
+        return
+
+    data = await state.get_data()
+    existing = list(data.get("niche_keywords") or [])
+    merged = _merge_keywords(new=new_kws, existing=existing, max_keywords=12) if existing else new_kws[:12]
+    await state.update_data(niche_keywords=merged)
+
+    # Return to the editor (edit the existing message if we have it).
+    await state.set_state(SetupStates.EDIT_NICHE)
+    excluded = set(str(x) for x in (data.get("excluded_keywords") or []))
+    text = _build_keywords_edit_text(keywords=merged, excluded=excluded)
+    kb = kb_prune_keywords(keywords=merged, excluded=excluded)
+
+    chat_id = data.get("kw_editor_chat_id")
+    msg_id = data.get("kw_editor_message_id")
+    if chat_id and msg_id:
+        try:
+            await message.bot.edit_message_text(
+                chat_id=int(chat_id),
+                message_id=int(msg_id),
+                text=text,
+                reply_markup=kb,
+            )
+            return
+        except Exception:
+            pass
+
+    m = await message.answer(text, reply_markup=kb)
+    await state.update_data(kw_editor_chat_id=m.chat.id, kw_editor_message_id=m.message_id)
 
 
 async def _start_discovery(message: Message, state: FSMContext) -> None:
@@ -362,6 +643,8 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
 
     seed_dict = data.get("seed") or None
     seed = _seed_from_dict(seed_dict) if isinstance(seed_dict, dict) else None
+    if seed and (seed.platform != Platform.YOUTUBE or not seed.external_id):
+        seed = None
 
     keywords = list(data.get("niche_keywords") or [])
 
@@ -662,10 +945,10 @@ async def on_reports_per_day(cb: CallbackQuery, state: FSMContext) -> None:
         )
         return
 
-    await state.set_state(SetupStates.PICK_TIME_PAIR)
+    await state.set_state(SetupStates.PICK_TIME_CUSTOM_1)
     await cb.message.answer(
-        f"Когда присылать отчеты? (время: {user.timezone_str})",
-        reply_markup=kb_time_presets_pair(),
+        f"Когда присылать первый отчет? (время: {user.timezone_str})",
+        reply_markup=kb_time_presets_first(),
     )
 
 
@@ -680,28 +963,6 @@ async def on_time_single(cb: CallbackQuery, state: FSMContext) -> None:
         await cb.message.answer("Напиши время в формате HH:MM (например, 09:00).")
         return
     await state.update_data(times=[value])
-    await _finalize_schedule(cb.message, state)
-
-
-@router.callback_query(SetupStates.PICK_TIME_PAIR, F.data.startswith("timep:"))
-async def on_time_pair(cb: CallbackQuery, state: FSMContext) -> None:
-    await cb.answer()
-    if not cb.message:
-        return
-    value = str(cb.data).split(":", 1)[1]
-    if value == "custom":
-        await state.set_state(SetupStates.PICK_TIME_CUSTOM_1)
-        await cb.message.answer("Выбери время первого отчета:", reply_markup=kb_time_presets_first())
-        return
-    try:
-        a, b = value.split(",", 1)
-    except Exception:
-        return
-    times = sorted({a.strip(), b.strip()})
-    if len(times) != 2:
-        await cb.message.answer("Времена совпали. Выбери другое сочетание или «Другое время».")
-        return
-    await state.update_data(times=times)
     await _finalize_schedule(cb.message, state)
 
 
@@ -804,8 +1065,6 @@ async def _finalize_schedule(message: Message, state: FSMContext) -> None:
         },
     )
 
-    bootstrap_user_data.delay(user.id)
-
     comp_count = await db_run(lambda: user.competitors.filter(platform=Platform.YOUTUBE, is_active=True).count())
     await state.clear()
 
@@ -814,6 +1073,8 @@ async def _finalize_schedule(message: Message, state: FSMContext) -> None:
         f"Конкуренты (YouTube): {comp_count}\n"
         f"Расписание: {', '.join(times)} (время: {user.timezone_str})\n"
         f"Следующий отчет: {format_dt_local(next_run_at, user.timezone_str)}\n\n"
-        "Первый отчет может быть менее точным: для дельт по просмотрам нужен хотя бы один предыдущий снимок метрик.",
+        "Сейчас соберу первый отчет, чтобы все проверить.",
         reply_markup=kb_report_now(),
     )
+
+    run_user_report_now.delay(user.id)

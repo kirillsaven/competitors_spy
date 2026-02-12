@@ -172,7 +172,7 @@ TELEGRAM_BOT_TOKEN = _env("TELEGRAM_BOT_TOKEN", "") or ""
 YOUTUBE_API_KEY = _env("YOUTUBE_API_KEY", "") or ""
 GOOGLE_LLM_API_KEY = _env("GOOGLE_LLM_API_KEY", "") or ""
 GOOGLE_LLM_MODEL = _env("GOOGLE_LLM_MODEL", "gemini-2.0-flash-lite") or "gemini-2.0-flash-lite"
-GOOGLE_LLM_MAX_CALLS_PER_USER_PER_DAY = _env_int("GOOGLE_LLM_MAX_CALLS_PER_USER_PER_DAY", 3)
+GOOGLE_LLM_MAX_CALLS_PER_USER_PER_DAY = _env_int("GOOGLE_LLM_MAX_CALLS_PER_USER_PER_DAY", 10)
 
 # Redis / Celery
 REDIS_URL = _env("REDIS_URL", "redis://redis:6379/0") or "redis://redis:6379/0"

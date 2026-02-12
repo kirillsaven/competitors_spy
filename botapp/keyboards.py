@@ -19,19 +19,32 @@ TIME_PRESETS = [
     "22:00",
 ]
 
-TIME_PAIR_PRESETS = [
-    ("08:00", "20:00"),
-    ("09:00", "21:00"),
-    ("10:00", "20:00"),
-    ("12:00", "18:00"),
-    ("14:00", "20:00"),
-]
-
-
-def kb_keywords_confirm() -> InlineKeyboardMarkup:
+def kb_seed_candidates(*, candidates: list[dict]) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.add(InlineKeyboardButton(text="Подходит", callback_data="kw_ok"))
-    b.add(InlineKeyboardButton(text="Изменить", callback_data="kw_edit"))
+    for idx, c in enumerate((candidates or [])[:8]):
+        title = (c.get("title") or "").strip()
+        handle = (c.get("handle") or "").strip()
+        if not title:
+            title = handle or (c.get("external_id") or "")
+        txt = title
+        if handle:
+            txt = f"{title} (@{handle})"
+        b.row(InlineKeyboardButton(text=txt[:64], callback_data=f"seed_pick:{idx}"))
+    b.row(InlineKeyboardButton(text="Это не то", callback_data="seed_retry"))
+    return b.as_markup()
+
+
+def kb_prune_keywords(*, keywords: list[str], excluded: set[str]) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for idx, kw in enumerate((keywords or [])[:12]):
+        key = " ".join(str(kw).split()).lower()
+        mark = "❌" if key in excluded else "✅"
+        b.row(InlineKeyboardButton(text=f"{mark} {kw}"[:64], callback_data=f"kw_toggle:{idx}"))
+    b.row(
+        InlineKeyboardButton(text="Добавить", callback_data="kw_add"),
+        InlineKeyboardButton(text="Готово", callback_data="kw_done"),
+    )
+    b.row(InlineKeyboardButton(text="Включить все", callback_data="kw_all"))
     return b.as_markup()
 
 
@@ -50,18 +63,17 @@ def kb_timezone_method() -> ReplyKeyboardMarkup:
     b.adjust(1)
     return b.as_markup(resize_keyboard=True, one_time_keyboard=True)
 
-
-def kb_skip_competitors() -> InlineKeyboardMarkup:
+def kb_competitors_next() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.add(InlineKeyboardButton(text="Пропустить", callback_data="comp_skip"))
+    b.add(InlineKeyboardButton(text="Дальше", callback_data="comp_done"))
     return b.as_markup()
 
 
-def kb_competitors_optional() -> InlineKeyboardMarkup:
+def kb_competitors_next_or_ignore() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
-    b.add(InlineKeyboardButton(text="Пропустить", callback_data="comp_skip"))
     b.add(InlineKeyboardButton(text="Дальше", callback_data="comp_done"))
-    b.adjust(2)
+    b.add(InlineKeyboardButton(text="Не учитывать список", callback_data="comp_clear"))
+    b.adjust(1)
     return b.as_markup()
 
 
@@ -80,18 +92,6 @@ def kb_time_presets_single() -> InlineKeyboardMarkup:
         b.add(InlineKeyboardButton(text=t, callback_data=f"time1:{t}"))
     b.add(InlineKeyboardButton(text="Другое время", callback_data="time1:custom"))
     b.adjust(3, 3, 3, 3, 1)
-    return b.as_markup()
-
-
-def kb_time_presets_pair() -> InlineKeyboardMarkup:
-    """
-    Presets for 2 reports/day.
-    """
-    b = InlineKeyboardBuilder()
-    for a, c in TIME_PAIR_PRESETS:
-        b.add(InlineKeyboardButton(text=f"{a} + {c}", callback_data=f"timep:{a},{c}"))
-    b.add(InlineKeyboardButton(text="Другое время", callback_data="timep:custom"))
-    b.adjust(1)
     return b.as_markup()
 
 

@@ -162,3 +162,52 @@ def discover_youtube_competitors(
         return list(uniq.values())[:max_candidates]
     finally:
         client.close()
+
+
+def search_youtube_seed_candidates(*, query: str, max_results: int = 8) -> list[SeedResolution]:
+    """
+    Best-effort search for a channel by a human-friendly nickname (e.g. Cyrillic).
+
+    This uses search.list(type=channel) and is more quota-expensive than handle/channelId resolve.
+    """
+    q = (query or "").strip()
+    if not q:
+        return []
+    client = get_youtube_client()
+    try:
+        ids = client.search_channels(q=q, max_results=max(1, min(int(max_results), 10)))
+        # De-dup, preserve order.
+        seen: set[str] = set()
+        uniq: list[str] = []
+        for cid in ids:
+            if not cid or cid in seen:
+                continue
+            seen.add(cid)
+            uniq.append(cid)
+
+        if not uniq:
+            return []
+
+        items = client.channels_list(part="snippet,contentDetails", ids=uniq[:50])
+        out: list[SeedResolution] = []
+        for it in items:
+            cid = it.get("id")
+            snippet = it.get("snippet") or {}
+            cd = it.get("contentDetails") or {}
+            uploads = ((cd.get("relatedPlaylists") or {}).get("uploads")) if cd else None
+            custom_url = snippet.get("customUrl") or ""
+            handle = custom_url[1:] if isinstance(custom_url, str) and custom_url.startswith("@") else None
+            out.append(
+                SeedResolution(
+                    platform="youtube",
+                    external_id=str(cid),
+                    handle=handle,
+                    url=f"https://www.youtube.com/channel/{cid}" if cid else "",
+                    title=snippet.get("title"),
+                    description=snippet.get("description"),
+                    uploads_playlist_id=uploads,
+                )
+            )
+        return out[: max_results]
+    finally:
+        client.close()
