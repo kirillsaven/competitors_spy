@@ -1,0 +1,152 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+from django.conf import settings
+
+from common.stats import iqr, median
+
+from tracking.models import Competitor, CompetitorBaseline, ContentItem, MetricSnapshot
+
+
+EPS = 1e-6
+
+
+@dataclass(frozen=True)
+class BaselineMetrics:
+    vph_median: float
+    vph_iqr: float
+    er_median: float | None
+    er_iqr: float | None
+    n: int
+
+
+@dataclass(frozen=True)
+class ScoredItem:
+    content_item: ContentItem
+    competitor: Competitor
+    delta_views: int
+    delta_hours: float
+    view_velocity: float
+    er_end: float | None
+    score: float
+
+
+def compute_competitor_baseline(*, competitor: Competitor, now: datetime) -> BaselineMetrics:
+    window_days = int(getattr(settings, "BASELINE_WINDOW_DAYS", 30))
+    n_items = int(getattr(settings, "BASELINE_N", 30))
+    window_start = now - timedelta(days=window_days)
+
+    items = (
+        ContentItem.objects.filter(competitor=competitor, published_at__gte=window_start)
+        .order_by("-published_at")
+        .all()[:n_items]
+    )
+
+    vph_values: list[float] = []
+    er_values: list[float] = []
+
+    for item in items:
+        snap = MetricSnapshot.objects.filter(content_item=item).order_by("-captured_at").first()
+        if not snap:
+            continue
+        age_hours = (snap.captured_at - item.published_at).total_seconds() / 3600.0
+        if age_hours <= 0:
+            continue
+        vph_values.append(float(snap.views) / age_hours)
+        if snap.likes is not None and snap.comments is not None and snap.views > 0:
+            er_values.append(float(snap.likes + snap.comments) / float(snap.views))
+
+    if not vph_values:
+        metrics = BaselineMetrics(vph_median=0.0, vph_iqr=1.0, er_median=None, er_iqr=None, n=0)
+    else:
+        vph_med = median(vph_values)
+        vph_i = max(iqr(vph_values), EPS)
+        if er_values:
+            er_med = median(er_values)
+            er_i = max(iqr(er_values), EPS)
+        else:
+            er_med = None
+            er_i = None
+        metrics = BaselineMetrics(vph_median=vph_med, vph_iqr=vph_i, er_median=er_med, er_iqr=er_i, n=len(vph_values))
+
+    CompetitorBaseline.objects.create(
+        competitor=competitor,
+        computed_at=now,
+        window_days=window_days,
+        n_items=n_items,
+        metrics={
+            "vph_median": metrics.vph_median,
+            "vph_iqr": metrics.vph_iqr,
+            "er_median": metrics.er_median,
+            "er_iqr": metrics.er_iqr,
+            "n": metrics.n,
+        },
+    )
+    return metrics
+
+
+def score_items_for_period(
+    *,
+    items: list[ContentItem],
+    competitor_by_item_id: dict[int, Competitor],
+    baseline_by_competitor_id: dict[int, BaselineMetrics],
+    period_start: datetime,
+    period_end: datetime,
+) -> list[ScoredItem]:
+    scored: list[ScoredItem] = []
+    min_delta_views = int(getattr(settings, "MIN_DELTA_VIEWS", 500))
+    max_age_days = 30
+    min_published_at = period_end - timedelta(days=max_age_days)
+
+    for item in items:
+        if item.published_at < min_published_at:
+            continue
+        competitor = competitor_by_item_id.get(item.id)
+        if not competitor:
+            continue
+        baseline = baseline_by_competitor_id.get(competitor.id)
+        if not baseline:
+            continue
+
+        snap_end = MetricSnapshot.objects.filter(content_item=item, captured_at__lte=period_end).order_by("-captured_at").first()
+        snap_start = MetricSnapshot.objects.filter(content_item=item, captured_at__lte=period_start).order_by("-captured_at").first()
+        if not snap_end or not snap_start:
+            continue
+
+        delta_views = int(snap_end.views) - int(snap_start.views)
+        if delta_views < min_delta_views:
+            continue
+
+        delta_hours = (snap_end.captured_at - snap_start.captured_at).total_seconds() / 3600.0
+        if delta_hours <= 0:
+            continue
+
+        view_velocity = float(delta_views) / delta_hours
+
+        er_end: float | None = None
+        if snap_end.likes is not None and snap_end.comments is not None and snap_end.views > 0:
+            er_end = float(snap_end.likes + snap_end.comments) / float(snap_end.views)
+
+        z_vel = (view_velocity - baseline.vph_median) / max(baseline.vph_iqr, EPS)
+        if er_end is not None and baseline.er_median is not None and baseline.er_iqr is not None:
+            z_er = (er_end - baseline.er_median) / max(baseline.er_iqr, EPS)
+            score = 0.75 * z_vel + 0.25 * z_er
+        else:
+            score = z_vel
+
+        scored.append(
+            ScoredItem(
+                content_item=item,
+                competitor=competitor,
+                delta_views=delta_views,
+                delta_hours=delta_hours,
+                view_velocity=view_velocity,
+                er_end=er_end,
+                score=score,
+            )
+        )
+
+    scored.sort(key=lambda s: s.score, reverse=True)
+    return scored
