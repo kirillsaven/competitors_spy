@@ -27,6 +27,8 @@ class ScoredItem:
     content_item: ContentItem
     competitor: Competitor
     views_end: int
+    likes_end: int | None
+    comments_end: int | None
     velocity: float  # views/hour, either delta-based or current average since publish
     score_type: str  # "delta" | "current_vph"
     delta_views: int | None
@@ -120,6 +122,8 @@ def score_items_for_period(
             continue
 
         views_end = int(snap_end.views)
+        likes_end = int(snap_end.likes) if snap_end.likes is not None else None
+        comments_end = int(snap_end.comments) if snap_end.comments is not None else None
 
         # Try delta-based velocity first; if we don't have a start snapshot (or the delta is too small),
         # fall back to average views/hour. We still keep the delta fields for display if we have both snapshots.
@@ -167,6 +171,8 @@ def score_items_for_period(
                 content_item=item,
                 competitor=competitor,
                 views_end=views_end,
+                likes_end=likes_end,
+                comments_end=comments_end,
                 velocity=velocity,
                 score_type=score_type,
                 delta_views=delta_views,

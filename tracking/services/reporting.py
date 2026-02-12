@@ -28,6 +28,8 @@ def build_report_payload(*, scored: list[ScoredItem], period_start: datetime, pe
                 "delta_views": s.delta_views,
                 "delta_hours": s.delta_hours,
                 "views_end": s.views_end,
+                "likes_end": s.likes_end,
+                "comments_end": s.comments_end,
                 "velocity_vph": s.velocity,
                 "score_type": s.score_type,
                 "score": s.score,
@@ -55,15 +57,15 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
     lines: list[str] = []
     if period_start and period_end:
         tz_label = format_timezone_label(timezone_str)
-        lines.append(
-            f"Отчет за период: {format_dt_local(period_start, timezone_str)} - {format_dt_local(period_end, timezone_str)} (время: {tz_label})"
-        )
+        lines.append(f"Отчет за период: {format_dt_local(period_start, timezone_str)} - {format_dt_local(period_end, timezone_str)}")
+        lines.append(f"Время: {tz_label}")
     else:
         lines.append("Отчет")
 
     # YouTube
     lines.append("")
     lines.append("YouTube:")
+    lines.append("Скор: рост просмотров относительно обычного для канала (плюс вовлеченность ER).")
     yt = None
     for sec in payload.get("sections") or []:
         if sec.get("platform") == "youtube":
@@ -73,44 +75,68 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
     if not yt_items:
         lines.append("Пока нет данных (попробуйте позже).")
     else:
-        fallback_count = 0
         for idx, it in enumerate(yt_items, start=1):
             title = it.get("title") or "Без названия"
             url = it.get("url") or ""
             delta = it.get("delta_views")
             delta_hours = it.get("delta_hours")
             views_end = it.get("views_end")
-            velocity = it.get("velocity_vph")
-            score_type = it.get("score_type") or ""
+            likes_end = it.get("likes_end")
+            comments_end = it.get("comments_end")
             score = it.get("score")
             content_type = it.get("content_type") or ""
             competitor = (it.get("competitor") or {}).get("display_name") or (it.get("competitor") or {}).get("handle") or ""
+            published_at = None
+            pa = it.get("published_at")
+            if isinstance(pa, str) and pa:
+                try:
+                    published_at = datetime.fromisoformat(pa.replace("Z", "+00:00"))
+                except Exception:
+                    published_at = None
             tag = " [Shorts]" if str(content_type) == "short" else ""
             lines.append(f"{idx}) {title}{tag}")
             if competitor:
                 lines.append(f"Канал: {competitor}")
+            if published_at:
+                lines.append(f"Опубликовано: {format_dt_local(published_at, timezone_str)}")
+
             if delta is not None and delta_hours:
                 try:
-                    lines.append(f"+{int(delta)} просмотров за {float(delta_hours):.1f}ч")
+                    lines.append(f"Просмотры за период: +{int(delta)} (за {float(delta_hours):.1f}ч)")
                 except Exception:
-                    lines.append(f"+{delta} просмотров")
+                    lines.append(f"Просмотры за период: +{delta}")
             else:
-                fallback_count += 1
-                if velocity is not None:
-                    try:
-                        lines.append(f"~{float(velocity):.0f} просмотров/ч")
-                    except Exception:
-                        pass
-                if delta is None:
-                    lines.append("Пока нет дельты по просмотрам")
+                lines.append("Просмотры за период: пока нет (нужен предыдущий сбор)")
+
             if views_end is not None:
                 try:
                     lines.append(f"Всего просмотров: {int(views_end)}")
                 except Exception:
                     pass
+
+            parts: list[str] = []
+            try:
+                if likes_end is not None:
+                    parts.append(f"лайки: {int(likes_end)}")
+            except Exception:
+                pass
+            try:
+                if comments_end is not None:
+                    parts.append(f"комментарии: {int(comments_end)}")
+            except Exception:
+                pass
+            er = it.get("er_end")
+            if er is not None:
+                try:
+                    parts.append(f"ER: {float(er) * 100.0:.2f}%")
+                except Exception:
+                    pass
+            if parts:
+                lines.append("Реакции: " + ", ".join(parts))
+
             if score is not None:
                 try:
-                    lines.append(f"score: {float(score):.2f}")
+                    lines.append(f"Вирусность: {float(score):.2f}")
                 except Exception:
                     pass
             if url:

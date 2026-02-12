@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
-from aiogram.utils.keyboard import InlineKeyboardBuilder, ReplyKeyboardBuilder
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
 TIME_PRESETS = [
@@ -55,13 +55,12 @@ def kb_reports_per_day() -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
-def kb_timezone_method() -> ReplyKeyboardMarkup:
-    b = ReplyKeyboardBuilder()
-    b.add(KeyboardButton(text="Отправить геолокацию", request_location=True))
-    b.add(KeyboardButton(text="Ввести таймзону вручную"))
-    b.add(KeyboardButton(text="Оставить текущую"))
-    b.adjust(1)
-    return b.as_markup(resize_keyboard=True, one_time_keyboard=True)
+def kb_timezone_method() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    b.row(InlineKeyboardButton(text="Отправить геолокацию", callback_data="tz_location"))
+    b.row(InlineKeyboardButton(text="Ввести таймзону вручную", callback_data="tz_manual"))
+    b.row(InlineKeyboardButton(text="Оставить текущую", callback_data="tz_keep"))
+    return b.as_markup()
 
 def kb_competitors_next() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
@@ -74,12 +73,6 @@ def kb_competitors_next_or_ignore() -> InlineKeyboardMarkup:
     b.add(InlineKeyboardButton(text="Дальше", callback_data="comp_done"))
     b.add(InlineKeyboardButton(text="Не учитывать список", callback_data="comp_clear"))
     b.adjust(1)
-    return b.as_markup()
-
-
-def kb_report_now() -> InlineKeyboardMarkup:
-    b = InlineKeyboardBuilder()
-    b.add(InlineKeyboardButton(text="Отчет сейчас", callback_data="report_now"))
     return b.as_markup()
 
 

@@ -164,12 +164,11 @@ def _build_prune_text(*, selected: int, total: int, limit: int) -> str:
 
 
 def _build_keywords_edit_text(*, keywords: list[str], excluded: set[str]) -> str:
-    included = [k for k in keywords if _kw_key(k) not in excluded]
-    lines = ["Ключевые слова по нише:"]
-    for k in included[:12]:
-        lines.append(f"• {k}")
-    if not included:
-        lines.append("• (пусто)")
+    total = len(keywords)
+    included = sum(1 for k in keywords if _kw_key(k) not in excluded)
+    lines = ["Ключевые слова по нише."]
+    if total:
+        lines.append(f"Выбрано: {included}/{total}.")
     lines.append("")
     lines.append("Нажимай на ключевые слова ниже, чтобы исключить лишнее. Можно добавить свои.")
     return "\n".join(lines)
@@ -624,38 +623,11 @@ async def on_add_niche(message: Message, state: FSMContext) -> None:
     text = _build_keywords_edit_text(keywords=merged, excluded=excluded)
     kb = kb_prune_keywords(keywords=merged, excluded=excluded)
 
-    # UX: "recreate" the keywords message near the latest user action (don't silently edit an old message above).
+    # UX: send a NEW editor message after the user's input (more intuitive than editing older messages above).
     old_editor_chat_id = data.get("kw_editor_chat_id")
     old_editor_msg_id = data.get("kw_editor_message_id")
     prompt_chat_id = data.get("kw_add_prompt_chat_id")
     prompt_msg_id = data.get("kw_add_prompt_message_id")
-
-    # Prefer turning the "Добавь..." prompt into the updated editor message.
-    if prompt_chat_id and prompt_msg_id:
-        try:
-            await message.bot.edit_message_text(
-                chat_id=int(prompt_chat_id),
-                message_id=int(prompt_msg_id),
-                text=text,
-                reply_markup=kb,
-            )
-            await state.update_data(
-                kw_editor_chat_id=int(prompt_chat_id),
-                kw_editor_message_id=int(prompt_msg_id),
-                kw_add_prompt_chat_id=None,
-                kw_add_prompt_message_id=None,
-            )
-            if old_editor_chat_id and old_editor_msg_id and (
-                int(old_editor_chat_id) != int(prompt_chat_id) or int(old_editor_msg_id) != int(prompt_msg_id)
-            ):
-                try:
-                    await message.bot.delete_message(chat_id=int(old_editor_chat_id), message_id=int(old_editor_msg_id))
-                except Exception:
-                    pass
-            return
-        except Exception:
-            # Fall back to sending a new message.
-            pass
 
     m = await message.answer(text, reply_markup=kb)
     await state.update_data(kw_editor_chat_id=m.chat.id, kw_editor_message_id=m.message_id, kw_add_prompt_chat_id=None, kw_add_prompt_message_id=None)
@@ -896,6 +868,40 @@ async def _ask_timezone_method(message: Message, state: FSMContext) -> None:
         reply_markup=kb_timezone_method(),
     )
 
+@router.callback_query(SetupStates.ASK_TIMEZONE_METHOD, F.data.in_(["tz_location", "tz_manual", "tz_keep"]))
+async def on_timezone_method_choice(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    if not cb.message:
+        return
+
+    # Remove the choice keyboard after click.
+    try:
+        await cb.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+
+    if cb.data == "tz_manual":
+        await state.set_state(SetupStates.WAIT_TZ_MANUAL)
+        await cb.message.answer(
+            "Введи таймзону: например `Europe/Moscow` или `UTC+03:00`.",
+            reply_markup=ReplyKeyboardRemove(),
+        )
+        return
+
+    if cb.data == "tz_keep":
+        data = await state.get_data()
+        user = await db_call(TgUser.objects.get, id=data["user_id"])
+        await _apply_timezone_and_continue(cb.message, state, timezone_str=user.timezone_str, tz_source=user.tz_source)
+        return
+
+    # tz_location
+    await state.set_state(SetupStates.WAIT_LOCATION)
+    await cb.message.answer(
+        "Отправь геолокацию одним сообщением.\n"
+        "В Telegram: скрепка → Геопозиция.",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+
 
 @router.message(SetupStates.ASK_TIMEZONE_METHOD, F.location)
 async def on_timezone_location(message: Message, state: FSMContext) -> None:
@@ -904,18 +910,8 @@ async def on_timezone_location(message: Message, state: FSMContext) -> None:
 
 
 @router.message(SetupStates.ASK_TIMEZONE_METHOD)
-async def on_timezone_method_text(message: Message, state: FSMContext) -> None:
-    txt = (message.text or "").strip().lower()
-    if "вруч" in txt:
-        await state.set_state(SetupStates.WAIT_TZ_MANUAL)
-        await message.answer("Введи таймзону: например `Europe/Moscow` или `UTC+03:00`.", reply_markup=ReplyKeyboardRemove())
-        return
-    if "остав" in txt:
-        data = await state.get_data()
-        user = await db_call(TgUser.objects.get, id=data["user_id"])
-        await _apply_timezone_and_continue(message, state, timezone_str=user.timezone_str, tz_source=user.tz_source)
-        return
-    await message.answer("Выбери один из вариантов на клавиатуре.")
+async def on_timezone_method_text(message: Message) -> None:
+    await message.answer("Нажми одну из кнопок ниже.")
 
 
 @router.message(SetupStates.WAIT_LOCATION, F.location)
@@ -983,14 +979,14 @@ async def on_reports_per_day(cb: CallbackQuery, state: FSMContext) -> None:
     if rpd == 1:
         await state.set_state(SetupStates.PICK_TIME_SINGLE)
         await cb.message.answer(
-            f"Когда присылать отчет? (время: {tz_label})",
+            f"Когда присылать отчет?\nВремя: {tz_label}",
             reply_markup=kb_time_presets_single(),
         )
         return
 
     await state.set_state(SetupStates.PICK_TIME_CUSTOM_1)
     await cb.message.answer(
-        f"Когда присылать первый отчет? (время: {tz_label})",
+        f"Когда присылать первый отчет?\nВремя: {tz_label}",
         reply_markup=kb_time_presets_first(),
     )
 
@@ -1006,7 +1002,7 @@ async def on_time_single(cb: CallbackQuery, state: FSMContext) -> None:
         user = await db_call(TgUser.objects.get, id=data["user_id"])
         tz_label = format_timezone_label(user.timezone_str)
         await state.set_state(SetupStates.WAIT_TIME_1)
-        await cb.message.answer(f"Напиши время в формате HH:MM (например, 09:00). (время: {tz_label})")
+        await cb.message.answer(f"Напиши время в формате HH:MM (например, 09:00).\nВремя: {tz_label}")
         return
     await state.update_data(times=[value])
     await _finalize_schedule(cb.message, state)
@@ -1023,14 +1019,14 @@ async def on_time1_pick(cb: CallbackQuery, state: FSMContext) -> None:
         user = await db_call(TgUser.objects.get, id=data["user_id"])
         tz_label = format_timezone_label(user.timezone_str)
         await state.set_state(SetupStates.WAIT_TIME_1)
-        await cb.message.answer(f"Напиши время первого отчета в формате HH:MM (например, 09:00). (время: {tz_label})")
+        await cb.message.answer(f"Напиши время первого отчета в формате HH:MM (например, 09:00).\nВремя: {tz_label}")
         return
     await state.update_data(times=[value])
     await state.set_state(SetupStates.PICK_TIME_CUSTOM_2)
     data = await state.get_data()
     user = await db_call(TgUser.objects.get, id=data["user_id"])
     tz_label = format_timezone_label(user.timezone_str)
-    await cb.message.answer(f"Когда присылать второй отчет? (время: {tz_label})", reply_markup=kb_time_presets_second())
+    await cb.message.answer(f"Когда присылать второй отчет?\nВремя: {tz_label}", reply_markup=kb_time_presets_second())
 
 
 @router.callback_query(SetupStates.PICK_TIME_CUSTOM_2, F.data.startswith("time2:"))
@@ -1044,7 +1040,7 @@ async def on_time2_pick(cb: CallbackQuery, state: FSMContext) -> None:
         user = await db_call(TgUser.objects.get, id=data["user_id"])
         tz_label = format_timezone_label(user.timezone_str)
         await state.set_state(SetupStates.WAIT_TIME_2)
-        await cb.message.answer(f"Напиши время второго отчета в формате HH:MM (например, 21:00). (время: {tz_label})")
+        await cb.message.answer(f"Напиши время второго отчета в формате HH:MM (например, 21:00).\nВремя: {tz_label}")
         return
     data = await state.get_data()
     times = list(data.get("times") or [])
@@ -1079,7 +1075,7 @@ async def on_time_1_manual(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     user = await db_call(TgUser.objects.get, id=data["user_id"])
     tz_label = format_timezone_label(user.timezone_str)
-    await message.answer(f"Когда присылать второй отчет? (время: {tz_label})", reply_markup=kb_time_presets_second())
+    await message.answer(f"Когда присылать второй отчет?\nВремя: {tz_label}", reply_markup=kb_time_presets_second())
 
 
 @router.message(SetupStates.WAIT_TIME_2)
@@ -1132,7 +1128,8 @@ async def _finalize_schedule(message: Message, state: FSMContext) -> None:
     await message.answer(
         "Готово.\n\n"
         f"Конкуренты (YouTube): {comp_count}\n"
-        f"Расписание: {', '.join(times)} (время: {tz_label})\n"
+        f"Расписание: {', '.join(times)}\n"
+        f"Время: {tz_label}\n"
         f"Следующий отчет: {format_dt_local(next_run_at, user.timezone_str)}\n\n"
         "Сейчас соберу первый отчет, чтобы все проверить.",
     )
