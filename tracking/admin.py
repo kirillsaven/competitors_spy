@@ -12,6 +12,7 @@ from .models import (
     Schedule,
     SeedProfile,
     TgUser,
+    UserCompetitor,
 )
 
 
@@ -31,9 +32,21 @@ class SeedProfileAdmin(admin.ModelAdmin):
 
 @admin.register(Competitor)
 class CompetitorAdmin(admin.ModelAdmin):
-    list_display = ("id", "user", "platform", "external_id", "handle", "display_name", "added_by", "is_active", "created_at")
+    list_display = ("id", "platform", "external_id", "handle", "display_name", "created_at", "updated_at")
     search_fields = ("external_id", "handle", "display_name", "url")
-    list_filter = ("platform", "added_by", "is_active")
+    list_filter = ("platform",)
+
+
+@admin.register(UserCompetitor)
+class UserCompetitorAdmin(admin.ModelAdmin):
+    list_display = ("id", "user", "platform", "competitor", "added_by", "is_active", "created_at", "updated_at")
+    search_fields = ("user__tg_user_id", "competitor__external_id", "competitor__handle", "competitor__display_name")
+    list_filter = ("added_by", "is_active", "competitor__platform")
+    list_select_related = ("user", "competitor")
+
+    @admin.display(description="Platform")
+    def platform(self, obj: UserCompetitor) -> str:
+        return obj.competitor.platform
 
 
 @admin.register(ContentItem)

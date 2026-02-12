@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from common.time import format_dt_local
+from common.time import format_dt_local, format_timezone_label
 
 from tracking.services.scoring import ScoredItem
 
@@ -54,8 +54,9 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
 
     lines: list[str] = []
     if period_start and period_end:
+        tz_label = format_timezone_label(timezone_str)
         lines.append(
-            f"Отчет за период: {format_dt_local(period_start, timezone_str)} - {format_dt_local(period_end, timezone_str)} ({timezone_str})"
+            f"Отчет за период: {format_dt_local(period_start, timezone_str)} - {format_dt_local(period_end, timezone_str)} (время: {tz_label})"
         )
     else:
         lines.append("Отчет")
@@ -88,28 +89,25 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
             lines.append(f"{idx}) {title}{tag}")
             if competitor:
                 lines.append(f"Канал: {competitor}")
-            if delta is not None:
-                if delta_hours:
-                    try:
-                        lines.append(f"+{int(delta)} просмотров за {float(delta_hours):.1f}ч")
-                    except Exception:
-                        lines.append(f"+{delta} просмотров")
-                else:
+            if delta is not None and delta_hours:
+                try:
+                    lines.append(f"+{int(delta)} просмотров за {float(delta_hours):.1f}ч")
+                except Exception:
                     lines.append(f"+{delta} просмотров")
             else:
                 fallback_count += 1
                 if velocity is not None:
                     try:
-                        lines.append(f"~{float(velocity):.0f} просмотров/ч (пока нет дельты)")
-                    except Exception:
-                        lines.append("Пока нет дельты по просмотрам")
-                else:
-                    lines.append("Пока нет дельты по просмотрам")
-                if views_end is not None:
-                    try:
-                        lines.append(f"Всего просмотров: {int(views_end)}")
+                        lines.append(f"~{float(velocity):.0f} просмотров/ч")
                     except Exception:
                         pass
+                if delta is None:
+                    lines.append("Пока нет дельты по просмотрам")
+            if views_end is not None:
+                try:
+                    lines.append(f"Всего просмотров: {int(views_end)}")
+                except Exception:
+                    pass
             if score is not None:
                 try:
                     lines.append(f"score: {float(score):.2f}")

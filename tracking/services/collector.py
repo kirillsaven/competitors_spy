@@ -71,10 +71,10 @@ def refresh_youtube_competitor(
             for v in details:
                 content_type = "short" if v.duration_seconds is not None and v.duration_seconds <= 60 else "video"
                 obj, created = ContentItem.objects.get_or_create(
-                    competitor=competitor,
                     platform=Platform.YOUTUBE,
                     external_id=v.video_id,
                     defaults={
+                        "competitor": competitor,
                         "url": v.url,
                         "title": v.title,
                         "description": v.description,
@@ -85,6 +85,9 @@ def refresh_youtube_competitor(
                 )
                 # Keep mutable fields fresh.
                 changed = False
+                if obj.competitor_id != competitor.id:
+                    obj.competitor = competitor
+                    changed = True
                 for field, value in [
                     ("url", v.url),
                     ("title", v.title),

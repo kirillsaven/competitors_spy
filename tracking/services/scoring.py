@@ -121,7 +121,8 @@ def score_items_for_period(
 
         views_end = int(snap_end.views)
 
-        # Try delta-based velocity first; if we don't have a start snapshot, fall back to average views/hour.
+        # Try delta-based velocity first; if we don't have a start snapshot (or the delta is too small),
+        # fall back to average views/hour. We still keep the delta fields for display if we have both snapshots.
         snap_start = (
             MetricSnapshot.objects.filter(content_item=item, captured_at__lte=period_start).order_by("-captured_at").first()
         )
@@ -134,11 +135,12 @@ def score_items_for_period(
         if snap_start:
             dv = views_end - int(snap_start.views)
             dh = (snap_end.captured_at - snap_start.captured_at).total_seconds() / 3600.0
-            if dv >= min_delta_views and dh > 0:
+            if dv >= 0 and dh > 0:
                 delta_views = dv
                 delta_hours = dh
-                velocity = float(dv) / dh
-                score_type = "delta"
+                if dv >= min_delta_views:
+                    velocity = float(dv) / dh
+                    score_type = "delta"
 
         if velocity is None:
             # Warm-up fallback: avoid tiny videos where vph is too noisy.

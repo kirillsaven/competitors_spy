@@ -12,6 +12,7 @@ from botapp.telegram_api import send_message
 from common.time import compute_next_run_at
 from tracking.models import (
     Competitor,
+    UserCompetitor,
     JobRun,
     JobStatus,
     Platform,
@@ -29,9 +30,13 @@ logger = logging.getLogger(__name__)
 
 def _generate_and_send_report(*, user: TgUser, period_start, period_end) -> Report:
     max_competitors = int(getattr(settings, "MAX_COMPETITORS_YOUTUBE", 20))
-    competitors = (
-        Competitor.objects.filter(user=user, is_active=True, platform=Platform.YOUTUBE).order_by("id").all()[:max_competitors]
+    links = (
+        UserCompetitor.objects.select_related("competitor")
+        .filter(user=user, is_active=True, competitor__platform=Platform.YOUTUBE)
+        .order_by("id")
+        .all()[:max_competitors]
     )
+    competitors = [lnk.competitor for lnk in links]
 
     updated_items = []
     for comp in competitors:
@@ -119,10 +124,6 @@ def run_user_report(self, user_id: int) -> None:
 
     report: Report | None = None
     try:
-        # If the window is too small (e.g., first run right after onboarding), widen it for a useful report.
-        if period_end - period_start < timedelta(hours=1):
-            period_start = period_end - timedelta(hours=24)
-
         report = _generate_and_send_report(user=user, period_start=period_start, period_end=period_end)
 
         with transaction.atomic():
@@ -189,9 +190,6 @@ def run_user_report_now(self, user_id: int) -> None:
 
     report: Report | None = None
     try:
-        if period_end - period_start < timedelta(hours=1):
-            period_start = period_end - timedelta(hours=24)
-
         report = _generate_and_send_report(user=user, period_start=period_start, period_end=period_end)
 
         with transaction.atomic():
@@ -245,11 +243,13 @@ def bootstrap_user_data(user_id: int) -> None:
     )
     try:
         max_competitors = int(getattr(settings, "MAX_COMPETITORS_YOUTUBE", 20))
-        competitors = (
-            Competitor.objects.filter(user=user, is_active=True, platform=Platform.YOUTUBE)
+        links = (
+            UserCompetitor.objects.select_related("competitor")
+            .filter(user=user, is_active=True, competitor__platform=Platform.YOUTUBE)
             .order_by("id")
             .all()[:max_competitors]
         )
+        competitors = [lnk.competitor for lnk in links]
         for comp in competitors:
             refresh_youtube_competitor(competitor=comp, mode="incremental", captured_at=now)
 

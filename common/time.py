@@ -7,6 +7,23 @@ from zoneinfo import ZoneInfo
 
 _HHMM_RE = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*$")
 _UTC_OFFSET_RE = re.compile(r"^\s*UTC\s*([+-])\s*(\d{1,2})(?::?(\d{2}))?\s*$", re.IGNORECASE)
+_UTC_NORMALIZED_RE = re.compile(r"^UTC([+-])(\d{2}):(\d{2})$")
+
+# For users who keep a fixed UTC offset instead of an IANA tz, show a friendly city hint.
+# This is intentionally conservative: we only map the most common RU offsets.
+_RU_OFFSET_CITY: dict[str, str] = {
+    "UTC+02:00": "Калининград",
+    "UTC+03:00": "Москва",
+    "UTC+04:00": "Самара",
+    "UTC+05:00": "Екатеринбург",
+    "UTC+06:00": "Омск",
+    "UTC+07:00": "Красноярск",
+    "UTC+08:00": "Иркутск",
+    "UTC+09:00": "Якутск",
+    "UTC+10:00": "Владивосток",
+    "UTC+11:00": "Магадан",
+    "UTC+12:00": "Анадырь",
+}
 
 
 class TimeParseError(ValueError):
@@ -99,6 +116,40 @@ def compute_next_run_at(timezone_str: str, times: list[str], now_utc: datetime) 
 def format_dt_local(dt_utc: datetime, timezone_str: str) -> str:
     tz = tzinfo_from_timezone_str(timezone_str)
     return dt_utc.astimezone(tz).strftime("%Y-%m-%d %H:%M")
+
+
+def format_timezone_label(timezone_str: str, *, now_utc: datetime | None = None) -> str:
+    """
+    Human-friendly timezone label.
+
+    Examples:
+    - "Asia/Krasnoyarsk (UTC+07:00)"
+    - "UTC+07:00 (Красноярск)"
+    """
+    tzs = normalize_timezone_str(timezone_str)
+    if _UTC_NORMALIZED_RE.match(tzs):
+        city = _RU_OFFSET_CITY.get(tzs)
+        return f"{tzs} ({city})" if city else tzs
+
+    try:
+        tz = ZoneInfo(tzs)
+    except Exception:
+        return tzs
+
+    now = now_utc if now_utc is not None else datetime.now(UTC)
+    try:
+        offset = now.astimezone(tz).utcoffset()
+    except Exception:
+        offset = None
+    if offset is None:
+        return tzs
+
+    total_minutes = int(offset.total_seconds() // 60)
+    sign = "+" if total_minutes >= 0 else "-"
+    total_minutes_abs = abs(total_minutes)
+    hh = total_minutes_abs // 60
+    mm = total_minutes_abs % 60
+    return f"{tzs} (UTC{sign}{hh:02d}:{mm:02d})"
 
 
 _ISO8601_DURATION_RE = re.compile(r"^P(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$")

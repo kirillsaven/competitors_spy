@@ -5,8 +5,8 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from botapp.db import db_run
-from common.time import format_dt_local
-from tracking.models import Platform, Schedule, TgUser
+from common.time import format_dt_local, format_timezone_label
+from tracking.models import Platform, Schedule, TgUser, UserCompetitor
 from tracking.tasks import run_user_report_now
 
 router = Router()
@@ -21,7 +21,9 @@ async def cmd_status(message: Message) -> None:
         await message.answer("Сначала запусти /setup.")
         return
 
-    comps = await db_run(lambda: user.competitors.filter(platform=Platform.YOUTUBE, is_active=True).count())
+    comps = await db_run(
+        lambda: UserCompetitor.objects.filter(user=user, is_active=True, competitor__platform=Platform.YOUTUBE).count()
+    )
     schedule = await db_run(lambda: Schedule.objects.filter(user=user).first())
     if not schedule or not schedule.is_enabled or not schedule.next_run_at:
         await message.answer(f"Конкуренты (YouTube): {comps}\nРасписание: не настроено. Запусти /setup.")
@@ -29,7 +31,7 @@ async def cmd_status(message: Message) -> None:
 
     await message.answer(
         f"Конкуренты (YouTube): {comps}\n"
-        f"Таймзона: {user.timezone_str}\n"
+        f"Таймзона: {format_timezone_label(user.timezone_str)}\n"
         f"Время отчетов: {', '.join(schedule.times or [])}\n"
         f"Следующий отчет: {format_dt_local(schedule.next_run_at, user.timezone_str)}"
     )
@@ -70,7 +72,14 @@ async def cmd_competitors(message: Message) -> None:
     if not user:
         await message.answer("Сначала запусти /setup.")
         return
-    comps = await db_run(lambda: list(user.competitors.filter(platform=Platform.YOUTUBE, is_active=True).order_by("id")))
+    links = await db_run(
+        lambda: list(
+            UserCompetitor.objects.select_related("competitor")
+            .filter(user=user, is_active=True, competitor__platform=Platform.YOUTUBE)
+            .order_by("id")
+        )
+    )
+    comps = [lnk.competitor for lnk in links]
     if not comps:
         await message.answer("Конкуренты не настроены. Запусти /setup.")
         return

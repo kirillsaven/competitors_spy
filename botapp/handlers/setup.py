@@ -20,7 +20,6 @@ from botapp.keyboards import (
     kb_competitors_next_or_ignore,
     kb_prune_competitors,
     kb_prune_keywords,
-    kb_report_now,
     kb_reports_per_day,
     kb_seed_candidates,
     kb_time_presets_first,
@@ -34,11 +33,12 @@ from common.time import (
     TimezoneParseError,
     compute_next_run_at,
     format_dt_local,
+    format_timezone_label,
     normalize_timezone_str,
     parse_hhmm,
 )
 from tracking.adapters.base import SeedResolution
-from tracking.models import AddedBy, Competitor, Platform, Schedule, SeedProfile, SeedStatus, TgUser, TzSource
+from tracking.models import AddedBy, Competitor, Platform, Schedule, SeedProfile, SeedStatus, TgUser, TzSource, UserCompetitor
 from tracking.services.competitor_service import upsert_competitor
 from tracking.adapters.youtube import extract_handle as yt_extract_handle
 from tracking.services.llm_usage import decide_and_consume_llm_call
@@ -212,7 +212,7 @@ async def cmd_setup(message: Message, state: FSMContext) -> None:
     )
 
     # Reset active competitors for a clean re-setup.
-    await db_run(lambda: user.competitors.filter(platform=Platform.YOUTUBE).update(is_active=False))
+    await db_run(lambda: UserCompetitor.objects.filter(user=user, competitor__platform=Platform.YOUTUBE).update(is_active=False))
 
     await state.clear()
     await state.update_data(user_id=user.id)
@@ -568,10 +568,11 @@ async def on_kw_add(cb: CallbackQuery, state: FSMContext) -> None:
         return
     await state.update_data(kw_editor_chat_id=cb.message.chat.id, kw_editor_message_id=cb.message.message_id)
     await state.set_state(SetupStates.ADD_NICHE)
-    await cb.message.answer(
+    prompt = await cb.message.answer(
         "Добавь ключевые слова по нише (через запятую или с новой строки).\n"
         "Они добавятся к текущим.",
     )
+    await state.update_data(kw_add_prompt_chat_id=prompt.chat.id, kw_add_prompt_message_id=prompt.message_id)
 
 
 @router.callback_query(SetupStates.EDIT_NICHE, F.data == "kw_done")
@@ -617,28 +618,61 @@ async def on_add_niche(message: Message, state: FSMContext) -> None:
     merged = _merge_keywords(new=new_kws, existing=existing, max_keywords=12) if existing else new_kws[:12]
     await state.update_data(niche_keywords=merged)
 
-    # Return to the editor (edit the existing message if we have it).
+    # Return to the editor.
     await state.set_state(SetupStates.EDIT_NICHE)
     excluded = set(str(x) for x in (data.get("excluded_keywords") or []))
     text = _build_keywords_edit_text(keywords=merged, excluded=excluded)
     kb = kb_prune_keywords(keywords=merged, excluded=excluded)
 
-    chat_id = data.get("kw_editor_chat_id")
-    msg_id = data.get("kw_editor_message_id")
-    if chat_id and msg_id:
+    # UX: "recreate" the keywords message near the latest user action (don't silently edit an old message above).
+    old_editor_chat_id = data.get("kw_editor_chat_id")
+    old_editor_msg_id = data.get("kw_editor_message_id")
+    prompt_chat_id = data.get("kw_add_prompt_chat_id")
+    prompt_msg_id = data.get("kw_add_prompt_message_id")
+
+    # Prefer turning the "Добавь..." prompt into the updated editor message.
+    if prompt_chat_id and prompt_msg_id:
         try:
             await message.bot.edit_message_text(
-                chat_id=int(chat_id),
-                message_id=int(msg_id),
+                chat_id=int(prompt_chat_id),
+                message_id=int(prompt_msg_id),
                 text=text,
                 reply_markup=kb,
             )
+            await state.update_data(
+                kw_editor_chat_id=int(prompt_chat_id),
+                kw_editor_message_id=int(prompt_msg_id),
+                kw_add_prompt_chat_id=None,
+                kw_add_prompt_message_id=None,
+            )
+            if old_editor_chat_id and old_editor_msg_id and (
+                int(old_editor_chat_id) != int(prompt_chat_id) or int(old_editor_msg_id) != int(prompt_msg_id)
+            ):
+                try:
+                    await message.bot.delete_message(chat_id=int(old_editor_chat_id), message_id=int(old_editor_msg_id))
+                except Exception:
+                    pass
             return
         except Exception:
+            # Fall back to sending a new message.
             pass
 
     m = await message.answer(text, reply_markup=kb)
-    await state.update_data(kw_editor_chat_id=m.chat.id, kw_editor_message_id=m.message_id)
+    await state.update_data(kw_editor_chat_id=m.chat.id, kw_editor_message_id=m.message_id, kw_add_prompt_chat_id=None, kw_add_prompt_message_id=None)
+    if old_editor_chat_id and old_editor_msg_id and (
+        int(old_editor_chat_id) != int(m.chat.id) or int(old_editor_msg_id) != int(m.message_id)
+    ):
+        try:
+            await message.bot.delete_message(chat_id=int(old_editor_chat_id), message_id=int(old_editor_msg_id))
+        except Exception:
+            pass
+    if prompt_chat_id and prompt_msg_id and (
+        int(prompt_chat_id) != int(m.chat.id) or int(prompt_msg_id) != int(m.message_id)
+    ):
+        try:
+            await message.bot.delete_message(chat_id=int(prompt_chat_id), message_id=int(prompt_msg_id))
+        except Exception:
+            pass
 
 
 async def _start_discovery(message: Message, state: FSMContext) -> None:
@@ -809,7 +843,7 @@ async def on_prune_done(cb: CallbackQuery, state: FSMContext) -> None:
 
     # Persist competitors.
     await db_run(
-        lambda: Competitor.objects.filter(user=user, platform=Platform.YOUTUBE).update(is_active=False)
+        lambda: UserCompetitor.objects.filter(user=user, competitor__platform=Platform.YOUTUBE).update(is_active=False)
     )
     for i in selected_indices:
         c = candidates[i]
@@ -853,10 +887,11 @@ async def _render_prune(message: Message, state: FSMContext) -> None:
 async def _ask_timezone_method(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     user = await db_call(TgUser.objects.get, id=data["user_id"])
+    tz_label = format_timezone_label(user.timezone_str)
     await state.set_state(SetupStates.ASK_TIMEZONE_METHOD)
     await message.answer(
         "В каком часовом поясе отправлять отчеты?\n"
-        f"Текущая таймзона: {user.timezone_str}\n\n"
+        f"Текущая таймзона: {tz_label}\n\n"
         "Можно отправить геолокацию или ввести вручную.",
         reply_markup=kb_timezone_method(),
     )
@@ -943,18 +978,19 @@ async def on_reports_per_day(cb: CallbackQuery, state: FSMContext) -> None:
 
     data = await state.get_data()
     user = await db_call(TgUser.objects.get, id=data["user_id"])
+    tz_label = format_timezone_label(user.timezone_str)
 
     if rpd == 1:
         await state.set_state(SetupStates.PICK_TIME_SINGLE)
         await cb.message.answer(
-            f"Когда присылать отчет? (время: {user.timezone_str})",
+            f"Когда присылать отчет? (время: {tz_label})",
             reply_markup=kb_time_presets_single(),
         )
         return
 
     await state.set_state(SetupStates.PICK_TIME_CUSTOM_1)
     await cb.message.answer(
-        f"Когда присылать первый отчет? (время: {user.timezone_str})",
+        f"Когда присылать первый отчет? (время: {tz_label})",
         reply_markup=kb_time_presets_first(),
     )
 
@@ -966,8 +1002,11 @@ async def on_time_single(cb: CallbackQuery, state: FSMContext) -> None:
         return
     value = str(cb.data).split(":", 1)[1]
     if value == "custom":
+        data = await state.get_data()
+        user = await db_call(TgUser.objects.get, id=data["user_id"])
+        tz_label = format_timezone_label(user.timezone_str)
         await state.set_state(SetupStates.WAIT_TIME_1)
-        await cb.message.answer("Напиши время в формате HH:MM (например, 09:00).")
+        await cb.message.answer(f"Напиши время в формате HH:MM (например, 09:00). (время: {tz_label})")
         return
     await state.update_data(times=[value])
     await _finalize_schedule(cb.message, state)
@@ -980,12 +1019,18 @@ async def on_time1_pick(cb: CallbackQuery, state: FSMContext) -> None:
         return
     value = str(cb.data).split(":", 1)[1]
     if value == "manual":
+        data = await state.get_data()
+        user = await db_call(TgUser.objects.get, id=data["user_id"])
+        tz_label = format_timezone_label(user.timezone_str)
         await state.set_state(SetupStates.WAIT_TIME_1)
-        await cb.message.answer("Напиши время первого отчета в формате HH:MM (например, 09:00).")
+        await cb.message.answer(f"Напиши время первого отчета в формате HH:MM (например, 09:00). (время: {tz_label})")
         return
     await state.update_data(times=[value])
     await state.set_state(SetupStates.PICK_TIME_CUSTOM_2)
-    await cb.message.answer("Выбери время второго отчета:", reply_markup=kb_time_presets_second())
+    data = await state.get_data()
+    user = await db_call(TgUser.objects.get, id=data["user_id"])
+    tz_label = format_timezone_label(user.timezone_str)
+    await cb.message.answer(f"Когда присылать второй отчет? (время: {tz_label})", reply_markup=kb_time_presets_second())
 
 
 @router.callback_query(SetupStates.PICK_TIME_CUSTOM_2, F.data.startswith("time2:"))
@@ -995,8 +1040,11 @@ async def on_time2_pick(cb: CallbackQuery, state: FSMContext) -> None:
         return
     value = str(cb.data).split(":", 1)[1]
     if value == "manual":
+        data = await state.get_data()
+        user = await db_call(TgUser.objects.get, id=data["user_id"])
+        tz_label = format_timezone_label(user.timezone_str)
         await state.set_state(SetupStates.WAIT_TIME_2)
-        await cb.message.answer("Напиши время второго отчета в формате HH:MM (например, 21:00).")
+        await cb.message.answer(f"Напиши время второго отчета в формате HH:MM (например, 21:00). (время: {tz_label})")
         return
     data = await state.get_data()
     times = list(data.get("times") or [])
@@ -1028,7 +1076,10 @@ async def on_time_1_manual(message: Message, state: FSMContext) -> None:
     # rpd==2 manual flow: we are picking the first time.
     await state.update_data(times=[value])
     await state.set_state(SetupStates.PICK_TIME_CUSTOM_2)
-    await message.answer("Выбери время второго отчета:", reply_markup=kb_time_presets_second())
+    data = await state.get_data()
+    user = await db_call(TgUser.objects.get, id=data["user_id"])
+    tz_label = format_timezone_label(user.timezone_str)
+    await message.answer(f"Когда присылать второй отчет? (время: {tz_label})", reply_markup=kb_time_presets_second())
 
 
 @router.message(SetupStates.WAIT_TIME_2)
@@ -1054,6 +1105,7 @@ async def on_time_2_manual(message: Message, state: FSMContext) -> None:
 async def _finalize_schedule(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     user = await db_call(TgUser.objects.get, id=data["user_id"])
+    tz_label = format_timezone_label(user.timezone_str)
     times = sorted(set(list(data.get("times") or [])))
     if not times:
         times = ["09:00"]
@@ -1072,16 +1124,17 @@ async def _finalize_schedule(message: Message, state: FSMContext) -> None:
         },
     )
 
-    comp_count = await db_run(lambda: user.competitors.filter(platform=Platform.YOUTUBE, is_active=True).count())
+    comp_count = await db_run(
+        lambda: UserCompetitor.objects.filter(user=user, is_active=True, competitor__platform=Platform.YOUTUBE).count()
+    )
     await state.clear()
 
     await message.answer(
         "Готово.\n\n"
         f"Конкуренты (YouTube): {comp_count}\n"
-        f"Расписание: {', '.join(times)} (время: {user.timezone_str})\n"
+        f"Расписание: {', '.join(times)} (время: {tz_label})\n"
         f"Следующий отчет: {format_dt_local(next_run_at, user.timezone_str)}\n\n"
         "Сейчас соберу первый отчет, чтобы все проверить.",
-        reply_markup=kb_report_now(),
     )
 
     run_user_report_now.delay(user.id)

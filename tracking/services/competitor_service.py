@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from tracking.models import Competitor, TgUser
+from tracking.models import Competitor, TgUser, UserCompetitor
 
 
 def upsert_competitor(
@@ -15,15 +15,12 @@ def upsert_competitor(
     meta: dict | None = None,
 ) -> Competitor:
     obj, created = Competitor.objects.get_or_create(
-        user=user,
         platform=platform,
         external_id=external_id,
         defaults={
             "handle": handle or "",
             "url": url or "",
             "display_name": display_name or "",
-            "added_by": added_by,
-            "is_active": True,
             "meta": meta or {},
         },
     )
@@ -32,8 +29,6 @@ def upsert_competitor(
         ("handle", handle or ""),
         ("url", url or ""),
         ("display_name", display_name or ""),
-        ("added_by", added_by),
-        ("is_active", True),
     ]:
         if getattr(obj, field) != value:
             setattr(obj, field, value)
@@ -46,4 +41,23 @@ def upsert_competitor(
             changed = True
     if changed and not created:
         obj.save()
+
+    link, link_created = UserCompetitor.objects.get_or_create(
+        user=user,
+        competitor=obj,
+        defaults={
+            "added_by": added_by,
+            "is_active": True,
+        },
+    )
+    link_changed = False
+    for field, value in [
+        ("added_by", added_by),
+        ("is_active", True),
+    ]:
+        if getattr(link, field) != value:
+            setattr(link, field, value)
+            link_changed = True
+    if link_changed and not link_created:
+        link.save()
     return obj

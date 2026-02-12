@@ -79,24 +79,46 @@ class SeedProfile(models.Model):
 
 
 class Competitor(models.Model):
-    user = models.ForeignKey(TgUser, on_delete=models.CASCADE, related_name="competitors")
     platform = models.CharField(max_length=16, choices=Platform.choices)
     external_id = models.CharField(max_length=128)
     handle = models.CharField(max_length=128, blank=True, default="")
     url = models.URLField(blank=True, default="")
     display_name = models.CharField(max_length=255, blank=True, default="")
-    added_by = models.CharField(max_length=16, choices=AddedBy.choices, default=AddedBy.MANUAL)
-    is_active = models.BooleanField(default=True)
     meta = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(fields=["user", "platform", "external_id"], name="uniq_user_platform_external"),
+            models.UniqueConstraint(fields=["platform", "external_id"], name="uniq_platform_external"),
         ]
 
     def __str__(self) -> str:
         return f"{self.platform}:{self.display_name or self.handle or self.external_id}"
+
+
+class UserCompetitor(models.Model):
+    """
+    User's tracking list.
+
+    Shared snapshots are stored on Competitor/ContentItem/MetricSnapshot, while this table only stores
+    per-user preferences (active flag, origin).
+    """
+
+    user = models.ForeignKey(TgUser, on_delete=models.CASCADE, related_name="competitor_links")
+    competitor = models.ForeignKey(Competitor, on_delete=models.CASCADE, related_name="user_links")
+    added_by = models.CharField(max_length=16, choices=AddedBy.choices, default=AddedBy.MANUAL)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["user", "competitor"], name="uniq_user_competitor"),
+        ]
+
+    def __str__(self) -> str:
+        return f"UserCompetitor({self.user_id}, {self.competitor_id}, active={self.is_active})"
 
 
 class ContentItem(models.Model):
@@ -113,9 +135,7 @@ class ContentItem(models.Model):
 
     class Meta:
         constraints = [
-            models.UniqueConstraint(
-                fields=["competitor", "platform", "external_id"], name="uniq_competitor_platform_external"
-            ),
+            models.UniqueConstraint(fields=["platform", "external_id"], name="uniq_platform_content_external"),
         ]
 
     def __str__(self) -> str:

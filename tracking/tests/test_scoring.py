@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from tracking.models import Competitor, ContentItem, MetricSnapshot, Platform, TgUser
+from tracking.models import Competitor, ContentItem, MetricSnapshot, Platform, TgUser, UserCompetitor
 from tracking.services.scoring import BaselineMetrics, score_items_for_period
 
 
@@ -12,14 +12,12 @@ from tracking.services.scoring import BaselineMetrics, score_items_for_period
 def test_score_items_for_period_basic() -> None:
     user = TgUser.objects.create(tg_user_id=1, tg_chat_id=1, timezone_str="UTC+00:00")
     comp = Competitor.objects.create(
-        user=user,
         platform=Platform.YOUTUBE,
         external_id="UC123",
         display_name="Test Channel",
-        added_by="manual",
-        is_active=True,
         meta={},
     )
+    UserCompetitor.objects.create(user=user, competitor=comp, added_by="manual", is_active=True)
     published_at = datetime(2026, 2, 10, 0, 0, tzinfo=UTC)
     item = ContentItem.objects.create(
         competitor=comp,
@@ -49,4 +47,3 @@ def test_score_items_for_period_basic() -> None:
     assert len(scored) == 1
     assert scored[0].delta_views == 600
     assert scored[0].score == pytest.approx((120.0 - 50.0) / 10.0, rel=1e-6)
-
