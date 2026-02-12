@@ -73,7 +73,7 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
             break
     yt_items = (yt or {}).get("items") or []
     if not yt_items:
-        lines.append("Пока нет данных (попробуйте позже).")
+        lines.append("За этот период ничего не выбилось выше обычного.")
     else:
         for idx, it in enumerate(yt_items, start=1):
             title = it.get("title") or "Без названия"

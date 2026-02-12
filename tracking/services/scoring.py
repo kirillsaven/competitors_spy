@@ -102,6 +102,9 @@ def score_items_for_period(
     scored: list[ScoredItem] = []
     min_delta_views = int(getattr(settings, "MIN_DELTA_VIEWS", 500))
     min_views_end = int(getattr(settings, "MIN_VIEWS_END", 1000))
+    # Hard floor to avoid noisy "viral" picks on very short periods (e.g. a few minutes).
+    # The main threshold is scaled by period length below.
+    min_delta_floor = 20
     max_age_days = 30
     min_published_at = period_end - timedelta(days=max_age_days)
 
@@ -125,8 +128,8 @@ def score_items_for_period(
         likes_end = int(snap_end.likes) if snap_end.likes is not None else None
         comments_end = int(snap_end.comments) if snap_end.comments is not None else None
 
-        # Try delta-based velocity first; if we don't have a start snapshot (or the delta is too small),
-        # fall back to average views/hour. We still keep the delta fields for display if we have both snapshots.
+        # Main signal: delta views within the report period (views/hour).
+        # If we don't have a start snapshot yet (warm-up), fall back to average views/hour since publish.
         snap_start = (
             MetricSnapshot.objects.filter(content_item=item, captured_at__lte=period_start).order_by("-captured_at").first()
         )
@@ -142,9 +145,12 @@ def score_items_for_period(
             if dv >= 0 and dh > 0:
                 delta_views = dv
                 delta_hours = dh
-                if dv >= min_delta_views:
-                    velocity = float(dv) / dh
-                    score_type = "delta"
+                # Scale the "minimal meaningful delta" by period length. MIN_DELTA_VIEWS is treated as a 24h threshold.
+                effective_min_delta = max(int(min_delta_views * (dh / 24.0)), min_delta_floor)
+                if dv < effective_min_delta:
+                    continue
+                velocity = float(dv) / dh
+                score_type = "delta"
 
         if velocity is None:
             # Warm-up fallback: avoid tiny videos where vph is too noisy.

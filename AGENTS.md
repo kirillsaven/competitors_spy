@@ -40,7 +40,7 @@ Reporting:
 ## Defaults / limits (env-configurable)
 - BASELINE_N = 30
 - BASELINE_WINDOW_DAYS = 30
-- YT_RECENT_N_FOR_METRICS = 15 (how many recent videos per competitor we refresh each run)
+- YT_RECENT_N_FOR_METRICS = 30 (how many recent videos per competitor we refresh each run)
 - MAX_COMPETITORS_YOUTUBE = 20 (raise carefully; quota risk)
 - MIN_DELTA_VIEWS = 500
 - MIN_VIEWS_END = 1000 (only for warm-up/fallback scoring when delta is unavailable)
