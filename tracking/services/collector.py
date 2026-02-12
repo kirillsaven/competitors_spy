@@ -38,6 +38,8 @@ def refresh_youtube_competitor(
     max_results = int(getattr(settings, "YT_RECENT_N_FOR_METRICS", 15))
     if mode == "full":
         max_results = int(getattr(settings, "BASELINE_N", 30))
+    # YouTube playlistItems.list maxResults is 50.
+    max_results = max(1, min(int(max_results), 50))
 
     client = _get_youtube_client()
     try:
