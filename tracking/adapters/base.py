@@ -36,4 +36,5 @@ class VideoDetails:
     views: int
     likes: int | None
     comments: int | None
+    shares: int | None = None
 

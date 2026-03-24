@@ -60,6 +60,9 @@ LLM (optional):
 - Structured logging + JobRun table to track task failures.
 - Docker Compose must include: web, bot, worker, beat, db, redis.
 - Never prompt users for social logins.
+- Codex rule: no silent fallbacks. Prefer fail-fast behavior with explicit errors.
+- Codex rule: do not substitute stub/default/empty results unless the user explicitly requests fallback behavior.
+- Codex rule: any temporary fallback that is intentionally kept must be called out explicitly in the PR description.
 
 ## Commands & docs
 Provide README with exact commands to run:
