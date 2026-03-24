@@ -4,16 +4,27 @@ from datetime import datetime
 
 from common.time import format_dt_local, format_timezone_label
 
+from tracking.models import Platform
 from tracking.services.scoring import ScoredItem
 
 
+PLATFORM_SECTION_ORDER = [
+    Platform.YOUTUBE,
+    Platform.TIKTOK,
+    Platform.INSTAGRAM,
+]
+
+
 def build_report_payload(*, scored: list[ScoredItem], period_start: datetime, period_end: datetime) -> dict:
-    youtube_items: list[dict] = []
-    for s in scored[:5]:
+    section_items: dict[str, list[dict]] = {platform: [] for platform in PLATFORM_SECTION_ORDER}
+    for s in scored:
+        platform = str(s.content_item.platform or s.competitor.platform or "")
+        if platform not in section_items or len(section_items[platform]) >= 5:
+            continue
         content_type = (s.content_item.meta or {}).get("content_type") if isinstance(s.content_item.meta, dict) else None
-        youtube_items.append(
+        section_items[platform].append(
             {
-                "platform": "youtube",
+                "platform": platform,
                 "video_id": s.content_item.external_id,
                 "title": s.content_item.title,
                 "url": s.content_item.url,
@@ -41,9 +52,8 @@ def build_report_payload(*, scored: list[ScoredItem], period_start: datetime, pe
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
         "sections": [
-            {"platform": "youtube", "items": youtube_items},
-            {"platform": "tiktok", "items": []},
-            {"platform": "instagram", "items": []},
+            {"platform": platform, "items": section_items[platform]}
+            for platform in PLATFORM_SECTION_ORDER
         ],
     }
 
@@ -62,16 +72,14 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
     else:
         lines.append("Отчет")
 
-    # YouTube
+    sections_by_platform = {
+        str(sec.get("platform")): sec for sec in (payload.get("sections") or []) if isinstance(sec, dict)
+    }
+
     lines.append("")
     lines.append("YouTube:")
     lines.append("Скор: рост просмотров относительно обычного для канала (плюс вовлеченность ER).")
-    yt = None
-    for sec in payload.get("sections") or []:
-        if sec.get("platform") == "youtube":
-            yt = sec
-            break
-    yt_items = (yt or {}).get("items") or []
+    yt_items = (sections_by_platform.get(Platform.YOUTUBE) or {}).get("items") or []
     if not yt_items:
         lines.append("За этот период ничего не выбилось выше обычного.")
     else:

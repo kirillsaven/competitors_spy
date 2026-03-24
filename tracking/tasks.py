@@ -28,15 +28,22 @@ from tracking.services.scoring import compute_competitor_baseline, score_items_f
 logger = logging.getLogger(__name__)
 
 
-def _generate_and_send_report(*, user: TgUser, period_start, period_end) -> Report:
+def _get_active_competitors(*, user: TgUser) -> list[Competitor]:
     max_competitors = int(getattr(settings, "MAX_COMPETITORS_YOUTUBE", 20))
-    links = (
-        UserCompetitor.objects.select_related("competitor")
-        .filter(user=user, is_active=True, competitor__platform=Platform.YOUTUBE)
-        .order_by("id")
-        .all()[:max_competitors]
-    )
-    competitors = [lnk.competitor for lnk in links]
+    competitors: list[Competitor] = []
+    for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM):
+        links = (
+            UserCompetitor.objects.select_related("competitor")
+            .filter(user=user, is_active=True, competitor__platform=platform)
+            .order_by("id")
+            .all()[:max_competitors]
+        )
+        competitors.extend(lnk.competitor for lnk in links)
+    return competitors
+
+
+def _generate_and_send_report(*, user: TgUser, period_start, period_end) -> Report:
+    competitors = _get_active_competitors(user=user)
 
     updated_items = []
     for comp in competitors:
@@ -292,14 +299,7 @@ def bootstrap_user_data(user_id: int) -> None:
         payload={},
     )
     try:
-        max_competitors = int(getattr(settings, "MAX_COMPETITORS_YOUTUBE", 20))
-        links = (
-            UserCompetitor.objects.select_related("competitor")
-            .filter(user=user, is_active=True, competitor__platform=Platform.YOUTUBE)
-            .order_by("id")
-            .all()[:max_competitors]
-        )
-        competitors = [lnk.competitor for lnk in links]
+        competitors = _get_active_competitors(user=user)
         for comp in competitors:
             refresh_competitor(competitor=comp, mode="incremental", captured_at=now)
 
