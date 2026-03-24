@@ -32,14 +32,24 @@ def _env_int(name: str, default: int) -> int:
     return int(v)
 
 
+def _env_list(name: str, default: list[str] | None = None) -> list[str]:
+    v = os.environ.get(name)
+    if v is None:
+        return list(default or [])
+    return [item.strip() for item in v.split(",") if item.strip()]
+
+
 SECRET_KEY = _env("DJANGO_SECRET_KEY", "dev-insecure-secret-key") or "dev-insecure-secret-key"
 DEBUG = _env_bool("DJANGO_DEBUG", True)
 
-allowed_hosts_raw = _env("DJANGO_ALLOWED_HOSTS", "*") or "*"
-if allowed_hosts_raw.strip() == "*":
-    ALLOWED_HOSTS = ["*"]
+if DEBUG:
+    ALLOWED_HOSTS = _env_list("DJANGO_ALLOWED_HOSTS", ["localhost", "127.0.0.1", "[::1]"])
 else:
-    ALLOWED_HOSTS = [h.strip() for h in allowed_hosts_raw.split(",") if h.strip()]
+    ALLOWED_HOSTS = _env_list("DJANGO_ALLOWED_HOSTS")
+CSRF_TRUSTED_ORIGINS = _env_list("DJANGO_CSRF_TRUSTED_ORIGINS")
+USE_X_FORWARDED_HOST = _env_bool("DJANGO_USE_X_FORWARDED_HOST", not DEBUG)
+USE_X_FORWARDED_PORT = _env_bool("DJANGO_USE_X_FORWARDED_PORT", not DEBUG)
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https") if _env_bool("DJANGO_TRUST_X_FORWARDED_PROTO", not DEBUG) else None
 
 
 # Application definition
@@ -58,6 +68,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
@@ -151,6 +162,15 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/5.2/howto/static-files/
 
 STATIC_URL = 'static/'
+STATIC_ROOT = BASE_DIR / "staticfiles"
+STORAGES = {
+    "default": {
+        "BACKEND": "django.core.files.storage.FileSystemStorage",
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
@@ -188,6 +208,15 @@ CELERY_BEAT_SCHEDULE = {
         "schedule": timedelta(minutes=1),
     }
 }
+
+SECURE_SSL_REDIRECT = _env_bool("DJANGO_SECURE_SSL_REDIRECT", not DEBUG)
+SESSION_COOKIE_SECURE = _env_bool("DJANGO_SESSION_COOKIE_SECURE", not DEBUG)
+CSRF_COOKIE_SECURE = _env_bool("DJANGO_CSRF_COOKIE_SECURE", not DEBUG)
+SECURE_HSTS_SECONDS = _env_int("DJANGO_SECURE_HSTS_SECONDS", 3600 if not DEBUG else 0)
+SECURE_HSTS_INCLUDE_SUBDOMAINS = _env_bool("DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS", not DEBUG)
+SECURE_HSTS_PRELOAD = _env_bool("DJANGO_SECURE_HSTS_PRELOAD", False)
+SECURE_CONTENT_TYPE_NOSNIFF = _env_bool("DJANGO_SECURE_CONTENT_TYPE_NOSNIFF", True)
+X_FRAME_OPTIONS = _env("DJANGO_X_FRAME_OPTIONS", "DENY") or "DENY"
 
 LOGGING = {
     "version": 1,
