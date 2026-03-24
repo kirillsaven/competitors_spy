@@ -33,12 +33,16 @@ def _get_youtube_client() -> YouTubeClient:
     return YouTubeClient(api_key=api_key)
 
 
-def _get_tiktok_client() -> ApifyTikTokClient | None:
+def _get_tiktok_client() -> ApifyTikTokClient:
     config = get_tiktok_apify_config()
     if config.provider != "apify":
-        return None
+        raise CollectorError(f"Unsupported TikTok provider: {config.provider}")
     if not config.access_token:
         raise CollectorError("TIKTOK_PROVIDER_ACCESS_TOKEN is not set")
+    if not config.actor_id:
+        raise CollectorError("TIKTOK_APIFY_PROFILE_ACTOR_ID is not set")
+    if not config.base_url:
+        raise CollectorError("TIKTOK_PROVIDER_BASE_URL is not set")
     return ApifyTikTokClient(
         access_token=config.access_token,
         actor_id=config.actor_id,
@@ -153,9 +157,6 @@ def refresh_tiktok_competitor(
         return []
 
     client = _get_tiktok_client()
-    if client is None:
-        return []
-
     config = get_tiktok_apify_config()
     max_results = int(getattr(settings, "YT_RECENT_N_FOR_METRICS", 15))
     if mode == "full":
@@ -171,15 +172,17 @@ def refresh_tiktok_competitor(
         handle = competitor.external_id
     handle = handle.lstrip("@")
     if not handle:
-        return []
+        raise CollectorError(f"TikTok competitor {competitor.id or competitor.external_id} has no resolvable handle")
 
     try:
         items = client.fetch_profile_feed(handle=handle, results_per_page=max_results)
         if not items:
-            return []
+            raise CollectorError(f"TikTok profile returned no items: handle={handle}")
 
         author_meta = items[0].get("authorMeta") or {}
-        profile_handle = str(author_meta.get("name") or handle).strip()
+        profile_handle = str(author_meta.get("name") or "").strip()
+        if not profile_handle:
+            raise CollectorError(f"TikTok provider response is missing author handle: handle={handle}")
         profile_url = build_profile_url(profile_handle)
 
         changed_fields: set[str] = set()

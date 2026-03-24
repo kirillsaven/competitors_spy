@@ -36,6 +36,26 @@ def test_resolve_seed_input_uses_author_metadata():
     assert seed.description == "web scraping, AI"
 
 
+def test_resolve_seed_input_returns_none_when_provider_returns_no_items():
+    class FakeClient:
+        def fetch_profile_feed(self, *, handle, results_per_page):
+            assert handle == "apifytech"
+            assert results_per_page == 1
+            return []
+
+    assert resolve_seed_input(FakeClient(), "https://www.tiktok.com/@apifytech") is None
+
+
+def test_resolve_seed_input_returns_none_when_provider_cannot_verify_profile():
+    class FakeClient:
+        def fetch_profile_feed(self, *, handle, results_per_page):
+            assert handle == "apifytech"
+            assert results_per_page == 1
+            return [{"authorMeta": {"nickName": "Apify Tech"}}]
+
+    assert resolve_seed_input(FakeClient(), "https://www.tiktok.com/@apifytech") is None
+
+
 def test_item_to_video_details_maps_apify_fields():
     details = item_to_video_details(
         {

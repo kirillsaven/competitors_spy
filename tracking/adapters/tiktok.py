@@ -118,19 +118,13 @@ def resolve_seed_input(client: ApifyTikTokClient, raw_input: str) -> SeedResolut
 
     items = client.fetch_profile_feed(handle=handle, results_per_page=1)
     if not items:
-        return SeedResolution(
-            platform="tiktok",
-            external_id=handle,
-            handle=handle,
-            url=build_profile_url(handle),
-            title=handle,
-            description=None,
-            uploads_playlist_id=None,
-        )
+        return None
 
     author_meta = items[0].get("authorMeta") or {}
-    author_handle = str(author_meta.get("name") or handle)
-    author_id = str(author_meta.get("id") or author_handle)
+    author_handle = str(author_meta.get("name") or "").strip()
+    author_id = str(author_meta.get("id") or "").strip()
+    if not author_handle or not author_id:
+        return None
     return SeedResolution(
         platform="tiktok",
         external_id=author_id,

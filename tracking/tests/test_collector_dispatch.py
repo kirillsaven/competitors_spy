@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+import pytest
+
 from tracking.adapters import registry
 from tracking.models import Competitor, ContentItem, MetricSnapshot, Platform
 from tracking.services import collector
@@ -48,7 +50,7 @@ def test_refresh_competitor_dispatches_by_platform(monkeypatch):
     }
 
 
-def test_refresh_tiktok_competitor_returns_empty_when_provider_not_apify(db, monkeypatch):
+def test_refresh_tiktok_competitor_raises_for_unsupported_provider(db, monkeypatch):
     competitor = Competitor.objects.create(platform=Platform.TIKTOK, external_id="tt-user", handle="tt-user")
     monkeypatch.setattr(
         collector,
@@ -56,11 +58,65 @@ def test_refresh_tiktok_competitor_returns_empty_when_provider_not_apify(db, mon
         lambda: SimpleNamespace(provider="stub", access_token="", actor_id="", base_url="", results_per_profile=10),
     )
 
-    assert collector.refresh_tiktok_competitor(
-        competitor=competitor,
-        mode="incremental",
-        captured_at=datetime.now(tz=UTC),
-    ) == []
+    with pytest.raises(collector.CollectorError, match="Unsupported TikTok provider: stub"):
+        collector.refresh_tiktok_competitor(
+            competitor=competitor,
+            mode="incremental",
+            captured_at=datetime.now(tz=UTC),
+        )
+
+
+def test_refresh_tiktok_competitor_raises_for_missing_credentials(db, monkeypatch):
+    competitor = Competitor.objects.create(platform=Platform.TIKTOK, external_id="tt-user", handle="tt-user")
+    monkeypatch.setattr(
+        collector,
+        "get_tiktok_apify_config",
+        lambda: SimpleNamespace(
+            provider="apify",
+            access_token="",
+            actor_id="clockworks/tiktok-profile-scraper",
+            base_url="https://api.apify.com/v2",
+            results_per_profile=10,
+        ),
+    )
+
+    with pytest.raises(collector.CollectorError, match="TIKTOK_PROVIDER_ACCESS_TOKEN is not set"):
+        collector.refresh_tiktok_competitor(
+            competitor=competitor,
+            mode="incremental",
+            captured_at=datetime.now(tz=UTC),
+        )
+
+
+def test_refresh_tiktok_competitor_raises_when_provider_returns_no_items(db, monkeypatch):
+    competitor = Competitor.objects.create(platform=Platform.TIKTOK, external_id="tt-user", handle="apifytech")
+
+    class FakeClient:
+        def fetch_profile_feed(self, *, handle, results_per_page):
+            return []
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        collector,
+        "get_tiktok_apify_config",
+        lambda: SimpleNamespace(
+            provider="apify",
+            access_token="token",
+            actor_id="actor",
+            base_url="https://api.apify.com/v2",
+            results_per_profile=10,
+        ),
+    )
+    monkeypatch.setattr(collector, "_get_tiktok_client", lambda: FakeClient())
+
+    with pytest.raises(collector.CollectorError, match="TikTok profile returned no items: handle=apifytech"):
+        collector.refresh_tiktok_competitor(
+            competitor=competitor,
+            mode="incremental",
+            captured_at=datetime.now(tz=UTC),
+        )
 
 
 def test_refresh_tiktok_competitor_persists_items_and_shares(db, monkeypatch):
