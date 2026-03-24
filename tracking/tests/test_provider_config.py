@@ -3,7 +3,7 @@ from __future__ import annotations
 from django.test import override_settings
 
 from tracking.models import Platform
-from tracking.services.provider_config import get_provider_config
+from tracking.services.provider_config import get_provider_config, get_tiktok_apify_config
 
 
 @override_settings(
@@ -52,3 +52,20 @@ def test_provider_config_returns_builtin_for_non_stubbed_platform():
     assert config.platform == Platform.YOUTUBE
     assert config.provider == "builtin"
     assert config.base_url == ""
+
+
+@override_settings(
+    TIKTOK_PROVIDER="apify",
+    TIKTOK_PROVIDER_BASE_URL="",
+    TIKTOK_PROVIDER_ACCESS_TOKEN="apify-token",
+    TIKTOK_APIFY_PROFILE_ACTOR_ID="clockworks/custom-actor",
+    TIKTOK_APIFY_RESULTS_PER_PROFILE=25,
+)
+def test_tiktok_apify_config_uses_defaults_and_actor_settings():
+    config = get_tiktok_apify_config()
+
+    assert config.provider == "apify"
+    assert config.base_url == "https://api.apify.com/v2"
+    assert config.access_token == "apify-token"
+    assert config.actor_id == "clockworks/custom-actor"
+    assert config.results_per_profile == 25

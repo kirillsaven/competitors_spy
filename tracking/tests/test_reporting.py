@@ -30,6 +30,7 @@ def _make_scored_item(*, platform: str, suffix: str):
         views_end=5000,
         likes_end=200,
         comments_end=20,
+        shares_end=5 if platform == Platform.TIKTOK else None,
         velocity=250.0,
         score_type="delta",
         score=3.5,
@@ -70,5 +71,21 @@ def test_render_report_text_preserves_youtube_section_and_stub_lines():
 
     assert "YouTube:" in text
     assert "Title 1 [Shorts]" in text
-    assert "TikTok: MVP: пока не поддерживается" in text
+    assert "TikTok:" in text
+    assert "За этот период ничего не выбилось выше обычного." in text
     assert "Instagram: MVP: пока не поддерживается" in text
+
+
+def test_render_report_text_renders_tiktok_items_with_share_counts():
+    payload = build_report_payload(
+        scored=[_make_scored_item(platform=Platform.TIKTOK, suffix="3")],
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+    )
+
+    text = render_report_text(payload=payload, timezone_str="UTC")
+
+    assert "TikTok:" in text
+    assert "Title 3" in text
+    assert "репосты: 5" in text
+    assert "https://example.com/3" in text

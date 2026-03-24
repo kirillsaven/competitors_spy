@@ -17,6 +17,15 @@ class ProviderConfig:
     access_token: str
 
 
+@dataclass(frozen=True)
+class TikTokApifyConfig:
+    provider: str
+    base_url: str
+    access_token: str
+    actor_id: str
+    results_per_profile: int
+
+
 def get_provider_config(platform: str) -> ProviderConfig:
     platform_key = str(platform).strip().lower()
     if platform_key == Platform.TIKTOK:
@@ -40,4 +49,18 @@ def get_provider_config(platform: str) -> ProviderConfig:
         api_key=str(getattr(settings, f"{prefix}_API_KEY", "") or ""),
         api_secret=str(getattr(settings, f"{prefix}_API_SECRET", "") or ""),
         access_token=str(getattr(settings, f"{prefix}_ACCESS_TOKEN", "") or ""),
+    )
+
+
+def get_tiktok_apify_config() -> TikTokApifyConfig:
+    provider = get_provider_config(Platform.TIKTOK)
+    return TikTokApifyConfig(
+        provider=provider.provider,
+        base_url=provider.base_url or "https://api.apify.com/v2",
+        access_token=provider.access_token,
+        actor_id=str(
+            getattr(settings, "TIKTOK_APIFY_PROFILE_ACTOR_ID", "clockworks/tiktok-profile-scraper")
+            or "clockworks/tiktok-profile-scraper"
+        ),
+        results_per_profile=max(1, int(getattr(settings, "TIKTOK_APIFY_RESULTS_PER_PROFILE", 15) or 15)),
     )

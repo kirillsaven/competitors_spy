@@ -10,12 +10,14 @@ from tracking.adapters.registry import (
     get_refresh_competitor_handler,
     register_refresh_competitor_handler,
 )
+from tracking.adapters.tiktok import ApifyTikTokClient, build_profile_url, item_to_video_details
 from tracking.adapters.youtube import (
     YouTubeClient,
     playlist_items_to_video_ids,
     video_items_to_details,
 )
 from tracking.models import Competitor, ContentItem, MetricSnapshot, Platform
+from tracking.services.provider_config import get_tiktok_apify_config
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,19 @@ def _get_youtube_client() -> YouTubeClient:
     if not api_key:
         raise CollectorError("YOUTUBE_API_KEY is not set")
     return YouTubeClient(api_key=api_key)
+
+
+def _get_tiktok_client() -> ApifyTikTokClient | None:
+    config = get_tiktok_apify_config()
+    if config.provider != "apify":
+        return None
+    if not config.access_token:
+        raise CollectorError("TIKTOK_PROVIDER_ACCESS_TOKEN is not set")
+    return ApifyTikTokClient(
+        access_token=config.access_token,
+        actor_id=config.actor_id,
+        base_url=config.base_url,
+    )
 
 
 def refresh_youtube_competitor(
@@ -119,8 +134,132 @@ def refresh_youtube_competitor(
                     views=v.views,
                     likes=v.likes,
                     comments=v.comments,
-                    shares=None,
+                    shares=v.shares,
                     extra={},
+                )
+
+        return updated_items
+    finally:
+        client.close()
+
+
+def refresh_tiktok_competitor(
+    *,
+    competitor: Competitor,
+    mode: str,
+    captured_at: datetime,
+) -> list[ContentItem]:
+    if competitor.platform != Platform.TIKTOK:
+        return []
+
+    client = _get_tiktok_client()
+    if client is None:
+        return []
+
+    config = get_tiktok_apify_config()
+    max_results = int(getattr(settings, "YT_RECENT_N_FOR_METRICS", 15))
+    if mode == "full":
+        max_results = int(getattr(settings, "BASELINE_N", 30))
+    max_results = max(1, min(int(max_results), config.results_per_profile))
+
+    handle = (competitor.handle or "").strip()
+    if not handle:
+        handle = str((competitor.meta or {}).get("profile_handle") or "").strip()
+    if not handle and competitor.url:
+        handle = str(competitor.url.rstrip("/").split("/")[-1]).lstrip("@")
+    if not handle:
+        handle = competitor.external_id
+    handle = handle.lstrip("@")
+    if not handle:
+        return []
+
+    try:
+        items = client.fetch_profile_feed(handle=handle, results_per_page=max_results)
+        if not items:
+            return []
+
+        author_meta = items[0].get("authorMeta") or {}
+        profile_handle = str(author_meta.get("name") or handle).strip()
+        profile_url = build_profile_url(profile_handle)
+
+        changed_fields: set[str] = set()
+        competitor_meta = dict(competitor.meta or {})
+        if competitor.handle != profile_handle:
+            competitor.handle = profile_handle
+            changed_fields.add("handle")
+        if competitor.url != profile_url:
+            competitor.url = profile_url
+            changed_fields.add("url")
+        display_name = str(author_meta.get("nickName") or "").strip()
+        if display_name and competitor.display_name != display_name:
+            competitor.display_name = display_name
+            changed_fields.add("display_name")
+        next_meta = {
+            **competitor_meta,
+            "profile_handle": profile_handle,
+            "provider": "apify",
+        }
+        if author_meta.get("id"):
+            next_meta["profile_id"] = str(author_meta.get("id"))
+        signature = author_meta.get("signature")
+        if signature:
+            next_meta["signature"] = str(signature)
+        if next_meta != competitor_meta:
+            competitor.meta = next_meta
+            changed_fields.add("meta")
+        if changed_fields:
+            competitor.save(update_fields=sorted(changed_fields))
+
+        updated_items: list[ContentItem] = []
+        with transaction.atomic():
+            for item in items:
+                details = item_to_video_details(item)
+                content_meta = {
+                    "content_type": "slideshow" if bool(item.get("isSlideshow")) else "video",
+                    "provider": "apify",
+                }
+                obj, created = ContentItem.objects.get_or_create(
+                    platform=Platform.TIKTOK,
+                    external_id=details.video_id,
+                    defaults={
+                        "competitor": competitor,
+                        "url": details.url,
+                        "title": details.title,
+                        "description": details.description,
+                        "published_at": details.published_at,
+                        "duration_seconds": details.duration_seconds,
+                        "meta": content_meta,
+                    },
+                )
+                changed = False
+                if obj.competitor_id != competitor.id:
+                    obj.competitor = competitor
+                    changed = True
+                for field, value in [
+                    ("url", details.url),
+                    ("title", details.title),
+                    ("description", details.description),
+                    ("published_at", details.published_at),
+                    ("duration_seconds", details.duration_seconds),
+                ]:
+                    if getattr(obj, field) != value and value is not None:
+                        setattr(obj, field, value)
+                        changed = True
+                if obj.meta != content_meta:
+                    obj.meta = content_meta
+                    changed = True
+                if changed and not created:
+                    obj.save()
+                updated_items.append(obj)
+
+                MetricSnapshot.objects.create(
+                    content_item=obj,
+                    captured_at=captured_at,
+                    views=details.views,
+                    likes=details.likes,
+                    comments=details.comments,
+                    shares=details.shares,
+                    extra={"provider": "apify"},
                 )
 
         return updated_items
@@ -139,3 +278,4 @@ def refresh_competitor(
 
 
 register_refresh_competitor_handler(Platform.YOUTUBE, refresh_youtube_competitor)
+register_refresh_competitor_handler(Platform.TIKTOK, refresh_tiktok_competitor)

@@ -29,6 +29,7 @@ class ScoredItem:
     views_end: int
     likes_end: int | None
     comments_end: int | None
+    shares_end: int | None
     velocity: float  # views/hour, either delta-based or current average since publish
     score_type: str  # "delta" | "current_vph"
     delta_views: int | None
@@ -127,6 +128,7 @@ def score_items_for_period(
         views_end = int(snap_end.views)
         likes_end = int(snap_end.likes) if snap_end.likes is not None else None
         comments_end = int(snap_end.comments) if snap_end.comments is not None else None
+        shares_end = int(snap_end.shares) if snap_end.shares is not None else None
 
         # Main signal: delta views within the report period (views/hour).
         # If we don't have a start snapshot yet (warm-up), fall back to average views/hour since publish.
@@ -179,6 +181,7 @@ def score_items_for_period(
                 views_end=views_end,
                 likes_end=likes_end,
                 comments_end=comments_end,
+                shares_end=shares_end,
                 velocity=velocity,
                 score_type=score_type,
                 delta_views=delta_views,

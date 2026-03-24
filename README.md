@@ -7,7 +7,7 @@
 - `TELEGRAM_BOT_TOKEN`
 - `YOUTUBE_API_KEY`
 - (optional) `GOOGLE_LLM_API_KEY` (Gemini, used only for internal niche inference during setup)
-- (optional, future scaffolding) `TIKTOK_PROVIDER`, `TIKTOK_PROVIDER_*`
+- (optional) TikTok via Apify: `TIKTOK_PROVIDER=apify`, `TIKTOK_PROVIDER_ACCESS_TOKEN`, `TIKTOK_PROVIDER_BASE_URL`
 - (optional, future scaffolding) `INSTAGRAM_PROVIDER`, `INSTAGRAM_PROVIDER_*`
 
 2) Start services:
@@ -66,18 +66,28 @@ The production override switches Django to Gunicorn, collects static files, runs
 ## CI
 GitHub Actions runs `python manage.py check`, `python manage.py check --deploy --fail-level WARNING`, and `pytest -q` on pushes to `main` and on pull requests targeting `main`.
 
-## Future provider env vars
-TikTok and Instagram remain stubbed in MVP, but the repo now exposes config contracts for future providers:
+## Provider env vars
+TikTok now supports Apify as the MVP provider. Instagram remains stubbed.
 
 - `TIKTOK_PROVIDER`
 - `TIKTOK_PROVIDER_BASE_URL`
 - `TIKTOK_PROVIDER_API_KEY`
 - `TIKTOK_PROVIDER_API_SECRET`
 - `TIKTOK_PROVIDER_ACCESS_TOKEN`
+- `TIKTOK_APIFY_PROFILE_ACTOR_ID`
+- `TIKTOK_APIFY_RESULTS_PER_PROFILE`
 - `INSTAGRAM_PROVIDER`
 - `INSTAGRAM_PROVIDER_BASE_URL`
 - `INSTAGRAM_PROVIDER_API_KEY`
 - `INSTAGRAM_PROVIDER_API_SECRET`
 - `INSTAGRAM_PROVIDER_ACCESS_TOKEN`
 
-Use `stub` as the provider value today. Later provider adapters can read these values through `tracking.services.provider_config.get_provider_config(...)` without changing the rest of the task/report pipeline.
+TikTok Apify setup:
+
+- Set `TIKTOK_PROVIDER=apify`
+- Set `TIKTOK_PROVIDER_ACCESS_TOKEN` to your Apify API token
+- Optional: set `TIKTOK_PROVIDER_BASE_URL` (defaults to `https://api.apify.com/v2`)
+- Optional: override `TIKTOK_APIFY_PROFILE_ACTOR_ID` (default `clockworks/tiktok-profile-scraper`)
+- Optional: cap per-profile fetch size with `TIKTOK_APIFY_RESULTS_PER_PROFILE`
+
+Instagram should stay on `stub` in this PR.
