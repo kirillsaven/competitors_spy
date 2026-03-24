@@ -21,7 +21,7 @@ from tracking.models import (
     Schedule,
     TgUser,
 )
-from tracking.services.collector import refresh_youtube_competitor
+from tracking.services.collector import refresh_competitor
 from tracking.services.reporting import build_report_payload, render_report_text
 from tracking.services.scoring import compute_competitor_baseline, score_items_for_period
 
@@ -41,7 +41,7 @@ def _generate_and_send_report(*, user: TgUser, period_start, period_end) -> Repo
     updated_items = []
     for comp in competitors:
         updated_items.extend(
-            refresh_youtube_competitor(
+            refresh_competitor(
                 competitor=comp,
                 mode="incremental",
                 captured_at=period_end,
@@ -301,7 +301,7 @@ def bootstrap_user_data(user_id: int) -> None:
         )
         competitors = [lnk.competitor for lnk in links]
         for comp in competitors:
-            refresh_youtube_competitor(competitor=comp, mode="incremental", captured_at=now)
+            refresh_competitor(competitor=comp, mode="incremental", captured_at=now)
 
         # Mark the baseline point for the first delta window.
         with transaction.atomic():
