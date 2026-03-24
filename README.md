@@ -7,6 +7,8 @@
 - `TELEGRAM_BOT_TOKEN`
 - `YOUTUBE_API_KEY`
 - (optional) `GOOGLE_LLM_API_KEY` (Gemini, used only for internal niche inference during setup)
+- (optional, future scaffolding) `TIKTOK_PROVIDER`, `TIKTOK_PROVIDER_*`
+- (optional, future scaffolding) `INSTAGRAM_PROVIDER`, `INSTAGRAM_PROVIDER_*`
 
 2) Start services:
 ```bash
@@ -63,3 +65,19 @@ The production override switches Django to Gunicorn, collects static files, runs
 
 ## CI
 GitHub Actions runs `python manage.py check`, `python manage.py check --deploy --fail-level WARNING`, and `pytest -q` on pushes to `main` and on pull requests targeting `main`.
+
+## Future provider env vars
+TikTok and Instagram remain stubbed in MVP, but the repo now exposes config contracts for future providers:
+
+- `TIKTOK_PROVIDER`
+- `TIKTOK_PROVIDER_BASE_URL`
+- `TIKTOK_PROVIDER_API_KEY`
+- `TIKTOK_PROVIDER_API_SECRET`
+- `TIKTOK_PROVIDER_ACCESS_TOKEN`
+- `INSTAGRAM_PROVIDER`
+- `INSTAGRAM_PROVIDER_BASE_URL`
+- `INSTAGRAM_PROVIDER_API_KEY`
+- `INSTAGRAM_PROVIDER_API_SECRET`
+- `INSTAGRAM_PROVIDER_ACCESS_TOKEN`
+
+Use `stub` as the provider value today. Later provider adapters can read these values through `tracking.services.provider_config.get_provider_config(...)` without changing the rest of the task/report pipeline.
