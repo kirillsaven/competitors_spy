@@ -3,7 +3,7 @@ from __future__ import annotations
 from django.test import override_settings
 
 from tracking.models import Platform
-from tracking.services.provider_config import get_provider_config, get_tiktok_apify_config
+from tracking.services.provider_config import get_instagram_apify_config, get_provider_config, get_tiktok_apify_config
 
 
 @override_settings(
@@ -69,3 +69,18 @@ def test_tiktok_apify_config_uses_defaults_and_actor_settings():
     assert config.access_token == "apify-token"
     assert config.actor_id == "clockworks/custom-actor"
     assert config.results_per_profile == 25
+
+
+@override_settings(
+    INSTAGRAM_PROVIDER="apify",
+    INSTAGRAM_PROVIDER_BASE_URL="",
+    INSTAGRAM_PROVIDER_ACCESS_TOKEN="ig-token",
+    INSTAGRAM_APIFY_PROFILE_ACTOR_ID="apify/custom-instagram-actor",
+)
+def test_instagram_apify_config_uses_defaults_and_actor_settings():
+    config = get_instagram_apify_config()
+
+    assert config.provider == "apify"
+    assert config.base_url == "https://api.apify.com/v2"
+    assert config.access_token == "ig-token"
+    assert config.actor_id == "apify/custom-instagram-actor"

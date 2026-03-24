@@ -96,7 +96,14 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
         empty_line="За этот период ничего не выбилось выше обычного.",
     )
 
-    lines.append("Instagram: MVP: пока не поддерживается")
+    instagram_items = (sections_by_platform.get(Platform.INSTAGRAM) or {}).get("items") or []
+    _render_platform_section(
+        lines=lines,
+        title="Instagram:",
+        items=instagram_items,
+        timezone_str=timezone_str,
+        empty_line="За этот период ничего не выбилось выше обычного.",
+    )
     return "\n".join(lines).rstrip() + "\n"
 
 

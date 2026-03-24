@@ -209,6 +209,10 @@ INSTAGRAM_PROVIDER_BASE_URL = _env("INSTAGRAM_PROVIDER_BASE_URL", "") or ""
 INSTAGRAM_PROVIDER_API_KEY = _env("INSTAGRAM_PROVIDER_API_KEY", "") or ""
 INSTAGRAM_PROVIDER_API_SECRET = _env("INSTAGRAM_PROVIDER_API_SECRET", "") or ""
 INSTAGRAM_PROVIDER_ACCESS_TOKEN = _env("INSTAGRAM_PROVIDER_ACCESS_TOKEN", "") or ""
+INSTAGRAM_APIFY_PROFILE_ACTOR_ID = (
+    _env("INSTAGRAM_APIFY_PROFILE_ACTOR_ID", "apify/instagram-profile-scraper")
+    or "apify/instagram-profile-scraper"
+)
 
 # Redis / Celery
 REDIS_URL = _env("REDIS_URL", "redis://redis:6379/0") or "redis://redis:6379/0"

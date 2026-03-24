@@ -8,7 +8,7 @@
 - `YOUTUBE_API_KEY`
 - (optional) `GOOGLE_LLM_API_KEY` (Gemini, used only for internal niche inference during setup)
 - (optional) TikTok via Apify: `TIKTOK_PROVIDER=apify`, `TIKTOK_PROVIDER_ACCESS_TOKEN`, `TIKTOK_PROVIDER_BASE_URL`
-- (optional, future scaffolding) `INSTAGRAM_PROVIDER`, `INSTAGRAM_PROVIDER_*`
+- (optional) Instagram via Apify: `INSTAGRAM_PROVIDER=apify`, `INSTAGRAM_PROVIDER_ACCESS_TOKEN`, `INSTAGRAM_PROVIDER_BASE_URL`
 
 2) Start services:
 ```bash
@@ -67,7 +67,7 @@ The production override switches Django to Gunicorn, collects static files, runs
 GitHub Actions runs `python manage.py check`, `python manage.py check --deploy --fail-level WARNING`, and `pytest -q` on pushes to `main` and on pull requests targeting `main`.
 
 ## Provider env vars
-TikTok now supports Apify as the MVP provider. Instagram remains stubbed.
+TikTok and Instagram now support Apify as MVP providers.
 
 - `TIKTOK_PROVIDER`
 - `TIKTOK_PROVIDER_BASE_URL`
@@ -81,6 +81,7 @@ TikTok now supports Apify as the MVP provider. Instagram remains stubbed.
 - `INSTAGRAM_PROVIDER_API_KEY`
 - `INSTAGRAM_PROVIDER_API_SECRET`
 - `INSTAGRAM_PROVIDER_ACCESS_TOKEN`
+- `INSTAGRAM_APIFY_PROFILE_ACTOR_ID`
 
 TikTok Apify setup:
 
@@ -90,4 +91,11 @@ TikTok Apify setup:
 - Optional: override `TIKTOK_APIFY_PROFILE_ACTOR_ID` (default `clockworks/tiktok-profile-scraper`)
 - Optional: cap per-profile fetch size with `TIKTOK_APIFY_RESULTS_PER_PROFILE`
 
-Instagram should stay on `stub` in this PR.
+Instagram Apify setup:
+
+- Set `INSTAGRAM_PROVIDER=apify`
+- Set `INSTAGRAM_PROVIDER_ACCESS_TOKEN` to your Apify API token
+- Optional: set `INSTAGRAM_PROVIDER_BASE_URL` (defaults to `https://api.apify.com/v2`)
+- Optional: override `INSTAGRAM_APIFY_PROFILE_ACTOR_ID` (default `apify/instagram-profile-scraper`)
+
+Current Instagram MVP tracks only recent items that include public view counts from Apify output, because the existing scoring/report pipeline is view-based and this PR does not add a separate image-post scoring path.

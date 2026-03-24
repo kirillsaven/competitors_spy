@@ -10,6 +10,7 @@ from tracking.adapters.registry import (
     get_refresh_competitor_handler,
     register_refresh_competitor_handler,
 )
+from tracking.adapters.instagram import ApifyInstagramClient, build_profile_url as build_instagram_profile_url, profile_to_video_details
 from tracking.adapters.tiktok import ApifyTikTokClient, build_profile_url, item_to_video_details
 from tracking.adapters.youtube import (
     YouTubeClient,
@@ -17,7 +18,7 @@ from tracking.adapters.youtube import (
     video_items_to_details,
 )
 from tracking.models import Competitor, ContentItem, MetricSnapshot, Platform
-from tracking.services.provider_config import get_tiktok_apify_config
+from tracking.services.provider_config import get_instagram_apify_config, get_tiktok_apify_config
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,23 @@ def _get_tiktok_client() -> ApifyTikTokClient:
     if not config.base_url:
         raise CollectorError("TIKTOK_PROVIDER_BASE_URL is not set")
     return ApifyTikTokClient(
+        access_token=config.access_token,
+        actor_id=config.actor_id,
+        base_url=config.base_url,
+    )
+
+
+def _get_instagram_client() -> ApifyInstagramClient:
+    config = get_instagram_apify_config()
+    if config.provider != "apify":
+        raise CollectorError(f"Unsupported Instagram provider: {config.provider}")
+    if not config.access_token:
+        raise CollectorError("INSTAGRAM_PROVIDER_ACCESS_TOKEN is not set")
+    if not config.actor_id:
+        raise CollectorError("INSTAGRAM_APIFY_PROFILE_ACTOR_ID is not set")
+    if not config.base_url:
+        raise CollectorError("INSTAGRAM_PROVIDER_BASE_URL is not set")
+    return ApifyInstagramClient(
         access_token=config.access_token,
         actor_id=config.actor_id,
         base_url=config.base_url,
@@ -270,6 +288,121 @@ def refresh_tiktok_competitor(
         client.close()
 
 
+def refresh_instagram_competitor(
+    *,
+    competitor: Competitor,
+    mode: str,
+    captured_at: datetime,
+) -> list[ContentItem]:
+    if competitor.platform != Platform.INSTAGRAM:
+        return []
+
+    client = _get_instagram_client()
+    lookup = (competitor.handle or "").strip()
+    if not lookup:
+        lookup = competitor.url.strip()
+    if not lookup:
+        lookup = competitor.external_id.strip()
+    if not lookup:
+        raise CollectorError(f"Instagram competitor {competitor.id or competitor.external_id} has no resolvable lookup value")
+
+    try:
+        profiles = client.fetch_profiles(inputs=[lookup])
+        if not profiles:
+            raise CollectorError(f"Instagram profile returned no items: lookup={lookup}")
+
+        profile = profiles[0]
+        username = str(profile.get("username") or "").strip()
+        profile_id = str(profile.get("id") or "").strip()
+        if not username:
+            raise CollectorError(f"Instagram provider response is missing username: lookup={lookup}")
+        if not profile_id:
+            raise CollectorError(f"Instagram provider response is missing profile id: lookup={lookup}")
+
+        details = profile_to_video_details(profile)
+        if not details:
+            raise CollectorError(f"Instagram profile returned no recent items with views: username={username}")
+
+        changed_fields: set[str] = set()
+        competitor_meta = dict(competitor.meta or {})
+        profile_url = str(profile.get("url") or build_instagram_profile_url(username))
+        if competitor.handle != username:
+            competitor.handle = username
+            changed_fields.add("handle")
+        if competitor.url != profile_url:
+            competitor.url = profile_url
+            changed_fields.add("url")
+        display_name = str(profile.get("fullName") or "").strip()
+        if display_name and competitor.display_name != display_name:
+            competitor.display_name = display_name
+            changed_fields.add("display_name")
+        next_meta = {
+            **competitor_meta,
+            "profile_id": profile_id,
+            "provider": "apify",
+        }
+        biography = profile.get("biography")
+        if biography:
+            next_meta["biography"] = str(biography)
+        if next_meta != competitor_meta:
+            competitor.meta = next_meta
+            changed_fields.add("meta")
+        if changed_fields:
+            competitor.save(update_fields=sorted(changed_fields))
+
+        updated_items: list[ContentItem] = []
+        with transaction.atomic():
+            for item in details:
+                content_meta = {"content_type": "video", "provider": "apify"}
+                obj, created = ContentItem.objects.get_or_create(
+                    platform=Platform.INSTAGRAM,
+                    external_id=item.video_id,
+                    defaults={
+                        "competitor": competitor,
+                        "url": item.url,
+                        "title": item.title,
+                        "description": item.description,
+                        "published_at": item.published_at,
+                        "duration_seconds": item.duration_seconds,
+                        "meta": content_meta,
+                    },
+                )
+                changed = False
+                if obj.competitor_id != competitor.id:
+                    obj.competitor = competitor
+                    changed = True
+                for field, value in [
+                    ("url", item.url),
+                    ("title", item.title),
+                    ("description", item.description),
+                    ("published_at", item.published_at),
+                    ("duration_seconds", item.duration_seconds),
+                ]:
+                    if getattr(obj, field) != value and value is not None:
+                        setattr(obj, field, value)
+                        changed = True
+                if obj.meta != content_meta:
+                    obj.meta = content_meta
+                    changed = True
+                if changed and not created:
+                    obj.save()
+                updated_items.append(obj)
+
+                MetricSnapshot.objects.create(
+                    content_item=obj,
+                    captured_at=captured_at,
+                    views=item.views,
+                    likes=item.likes,
+                    comments=item.comments,
+                    shares=item.shares,
+                    extra={"provider": "apify"},
+                )
+
+        return updated_items
+    finally:
+        client.close()
+
+
 def refresh_competitor(
     *,
     competitor: Competitor,
@@ -282,3 +415,4 @@ def refresh_competitor(
 
 register_refresh_competitor_handler(Platform.YOUTUBE, refresh_youtube_competitor)
 register_refresh_competitor_handler(Platform.TIKTOK, refresh_tiktok_competitor)
+register_refresh_competitor_handler(Platform.INSTAGRAM, refresh_instagram_competitor)
