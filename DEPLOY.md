@@ -32,9 +32,9 @@ cp deploy/env.production.example .env
 ```
 
 7. Decide how traffic will reach the app.
-   The current production compose file publishes `8000:8000`, so either:
-   - open port `8000` to trusted clients temporarily, or
-   - put a reverse proxy in front of `127.0.0.1:8000` before public launch.
+   This repo now includes an internal production reverse proxy container.
+   Open only port `80/tcp` publicly for the first deployment baseline.
+   Do not expose `8000/tcp` publicly.
 
 ## Required production env vars
 Minimum required values in `.env`:
@@ -89,6 +89,7 @@ bash scripts/prod-update.sh <git-ref>
 `scripts/prod-update.sh` fails fast if:
 - required commands are missing
 - `.env` is missing
+- `deploy/nginx/default.conf` is missing
 - the server checkout is dirty
 - the requested git ref does not resolve
 
@@ -100,12 +101,16 @@ cd YOUR_APP_DIR
 bash scripts/prod-health.sh
 ```
 
+`scripts/prod-health.sh` verifies the public container path through the reverse proxy at `http://127.0.0.1/healthz/`.
+
 If health checks fail or you need more context:
 
 ```bash
 cd YOUR_APP_DIR
 bash scripts/prod-logs.sh 200
 ```
+
+This includes `proxy` logs as well as `web`, `bot`, `worker`, and `beat`.
 
 ## Rollback baseline
 1. Identify the previous good commit or tag.
@@ -121,3 +126,9 @@ bash scripts/prod-update.sh <previous-good-ref>
 ```bash
 bash scripts/prod-health.sh
 ```
+
+## Reverse proxy baseline
+- Public entrypoint: `proxy` on port `80`
+- Internal app port: `web:8000` on the Docker network only
+- Current scope: plain HTTP only
+- Missing piece for HTTPS: an explicit TLS termination plan such as host-level Nginx/Caddy or manually managed certificates

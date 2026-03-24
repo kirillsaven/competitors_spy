@@ -21,6 +21,7 @@ require_cmd docker
 require_cmd curl
 require_file "$COMPOSE_FILE"
 require_file ".env"
+require_file "deploy/nginx/default.conf"
 
 if ! docker compose version >/dev/null 2>&1; then
   echo "Docker Compose plugin is not available" >&2
@@ -28,6 +29,6 @@ if ! docker compose version >/dev/null 2>&1; then
 fi
 
 docker compose -f "$COMPOSE_FILE" ps
-curl --fail --silent --show-error http://127.0.0.1:8000/healthz/
+curl --fail --silent --show-error http://127.0.0.1/healthz/
 echo
 docker compose -f "$COMPOSE_FILE" exec web python manage.py check --deploy --fail-level WARNING
