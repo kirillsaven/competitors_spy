@@ -58,10 +58,10 @@ docker compose -f docker-compose.prod.yml up -d --build
 
 3) Check the app health endpoint:
 ```bash
-curl http://localhost:8000/healthz/
+curl http://localhost/healthz/
 ```
 
-The production override switches Django to Gunicorn, collects static files, runs migrations on web startup, and enables restart/healthcheck defaults for all services.
+The production override switches Django to Gunicorn behind an Nginx reverse proxy, keeps `web` internal on the Docker network, publishes only port `80`, collects static files, runs migrations on web startup, and enables restart/healthcheck defaults for all services.
 
 For the first real VPS deployment baseline, see `DEPLOY.md`.
 

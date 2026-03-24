@@ -14,9 +14,14 @@ if [[ ! -f "$COMPOSE_FILE" ]]; then
   exit 1
 fi
 
+if [[ ! -f "deploy/nginx/default.conf" ]]; then
+  echo "Missing required file: deploy/nginx/default.conf" >&2
+  exit 1
+fi
+
 if ! docker compose version >/dev/null 2>&1; then
   echo "Docker Compose plugin is not available" >&2
   exit 1
 fi
 
-docker compose -f "$COMPOSE_FILE" logs --tail="$TAIL_LINES" web bot worker beat
+docker compose -f "$COMPOSE_FILE" logs --tail="$TAIL_LINES" proxy web bot worker beat

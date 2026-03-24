@@ -22,6 +22,7 @@ require_cmd git
 require_cmd docker
 require_file "$COMPOSE_FILE"
 require_file ".env"
+require_file "deploy/nginx/default.conf"
 
 if ! docker compose version >/dev/null 2>&1; then
   echo "Docker Compose plugin is not available" >&2
