@@ -6,6 +6,10 @@ from datetime import datetime
 from django.conf import settings
 from django.db import transaction
 
+from tracking.adapters.registry import (
+    get_refresh_competitor_handler,
+    register_refresh_competitor_handler,
+)
 from tracking.adapters.youtube import (
     YouTubeClient,
     playlist_items_to_video_ids,
@@ -122,3 +126,16 @@ def refresh_youtube_competitor(
         return updated_items
     finally:
         client.close()
+
+
+def refresh_competitor(
+    *,
+    competitor: Competitor,
+    mode: str,
+    captured_at: datetime,
+) -> list[ContentItem]:
+    handler = get_refresh_competitor_handler(competitor.platform)
+    return handler(competitor=competitor, mode=mode, captured_at=captured_at)
+
+
+register_refresh_competitor_handler(Platform.YOUTUBE, refresh_youtube_competitor)
