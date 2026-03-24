@@ -63,6 +63,8 @@ curl http://localhost:8000/healthz/
 
 The production override switches Django to Gunicorn, collects static files, runs migrations on web startup, and enables restart/healthcheck defaults for all services.
 
+For the first real VPS deployment baseline, see `DEPLOY.md`.
+
 ## CI
 GitHub Actions runs `python manage.py check`, `python manage.py check --deploy --fail-level WARNING`, and `pytest -q` on pushes to `main` and on pull requests targeting `main`.
 

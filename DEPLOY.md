@@ -1,15 +1,59 @@
 # Deploy
 
+Target server for the first real deployment: `YOUR_SERVER_IP`
+
+## Bootstrap checklist
+1. Confirm SSH access to `YOUR_SERVER_IP` with a user that can run Docker commands.
+2. Install these server prerequisites:
+   - Docker Engine
+   - Docker Compose plugin (`docker compose version` must work)
+   - Git
+   - curl
+3. Create the app directory, for example:
+
+```bash
+sudo mkdir -p YOUR_APP_DIR
+sudo chown "$USER":"$USER" YOUR_APP_DIR
+```
+
+4. Configure GitHub read access for the private repo on the server.
+   Without a deploy key, machine user, or PAT-backed clone, server-side `git clone`, update, and rollback commands will fail.
+5. Clone the repo on the server:
+
+```bash
+git clone git@github.com:kirillsaven/competitors_spy.git YOUR_APP_DIR
+cd YOUR_APP_DIR
+```
+
+6. Copy the production env template and fill all required values:
+
+```bash
+cp deploy/env.production.example .env
+```
+
+7. Decide how traffic will reach the app.
+   The current production compose file publishes `8000:8000`, so either:
+   - open port `8000` to trusted clients temporarily, or
+   - put a reverse proxy in front of `127.0.0.1:8000` before public launch.
+
 ## Required production env vars
+Minimum required values in `.env`:
 - `DJANGO_SECRET_KEY`
 - `DJANGO_ALLOWED_HOSTS`
 - `DJANGO_CSRF_TRUSTED_ORIGINS`
+- `POSTGRES_DB`
+- `POSTGRES_USER`
+- `POSTGRES_PASSWORD`
 - `DATABASE_URL`
 - `REDIS_URL`
 - `TELEGRAM_BOT_TOKEN`
 - `YOUTUBE_API_KEY`
 
-Recommended hardening vars:
+Optional provider envs:
+- `TIKTOK_PROVIDER=apify` plus `TIKTOK_PROVIDER_ACCESS_TOKEN` when TikTok is enabled
+- `INSTAGRAM_PROVIDER=apify` plus `INSTAGRAM_PROVIDER_ACCESS_TOKEN` when Instagram is enabled
+
+Recommended hardening vars for a reverse-proxied HTTPS setup:
 - `DJANGO_TRUST_X_FORWARDED_PROTO=1`
 - `DJANGO_USE_X_FORWARDED_HOST=1`
 - `DJANGO_USE_X_FORWARDED_PORT=1`
@@ -20,33 +64,60 @@ Recommended hardening vars:
 - `DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS=1`
 - `DJANGO_SECURE_HSTS_PRELOAD=1`
 
-## Deploy commands
+## Production start and update commands
+First start from the server checkout:
+
 ```bash
-cp .env.example .env
+cd YOUR_APP_DIR
+bash scripts/prod-update.sh origin/main
 ```
 
-Fill `.env` with production values, then:
+Routine update:
 
 ```bash
-docker compose -f docker-compose.prod.yml pull
-docker compose -f docker-compose.prod.yml up -d --build
+cd YOUR_APP_DIR
+bash scripts/prod-update.sh origin/main
 ```
 
-## Validation commands
+Deploy a specific commit or tag:
+
 ```bash
-docker compose -f docker-compose.prod.yml ps
-docker compose -f docker-compose.prod.yml logs --tail=100 web worker beat bot
-curl http://localhost:8000/healthz/
-docker compose -f docker-compose.prod.yml exec web python manage.py check --deploy
+cd YOUR_APP_DIR
+bash scripts/prod-update.sh <git-ref>
+```
+
+`scripts/prod-update.sh` fails fast if:
+- required commands are missing
+- `.env` is missing
+- the server checkout is dirty
+- the requested git ref does not resolve
+
+## Health verification commands
+After each deploy:
+
+```bash
+cd YOUR_APP_DIR
+bash scripts/prod-health.sh
+```
+
+If health checks fail or you need more context:
+
+```bash
+cd YOUR_APP_DIR
+bash scripts/prod-logs.sh 200
 ```
 
 ## Rollback baseline
-1. Keep the previous image set and `.env` file available before each deploy.
-2. If the new release is unhealthy, redeploy the previous revision:
+1. Identify the previous good commit or tag.
+2. Roll back by redeploying that exact ref:
 
 ```bash
-git checkout <previous-good-commit>
-docker compose -f docker-compose.prod.yml up -d --build
+cd YOUR_APP_DIR
+bash scripts/prod-update.sh <previous-good-ref>
 ```
 
-3. Re-run the validation commands and confirm `/healthz/` is healthy.
+3. Re-run:
+
+```bash
+bash scripts/prod-health.sh
+```
