@@ -50,7 +50,7 @@ from tracking.models import (
     TzSource,
     UserCompetitor,
 )
-from tracking.services.account_linking import replace_user_linked_accounts, suggest_accounts_for_platform
+from tracking.services.account_linking import replace_user_linked_accounts, suggest_accounts_for_platforms
 from tracking.services.competitor_service import upsert_competitor
 from tracking.services.llm_usage import decide_and_consume_llm_call
 from tracking.services.niche_service import infer_niche_keywords
@@ -174,16 +174,30 @@ def _format_match_signal(signal: str) -> str:
     raw = str(signal or "").strip()
     if raw == "exact_handle":
         return "совпал хендл"
-    if raw == "exact_display_name":
-        return "совпало название профиля"
-    if raw.startswith("shared_name_tokens:"):
+    if raw == "normalized_handle":
+        return "совпал нормализованный хендл"
+    if raw.startswith("display_similarity:"):
+        try:
+            ratio = float(raw.split(":", 1)[1])
+        except Exception:
+            return "похожее название профиля"
+        if ratio >= 0.92:
+            return "название профиля почти совпало"
+        return "название профиля похоже"
+    if raw.startswith("shared_tokens:"):
         tokens = [token for token in raw.split(":", 1)[1].split(",") if token]
         if tokens:
-            return "совпали слова в названии: " + ", ".join(tokens[:3])
+            return "совпали слова в имени/био: " + ", ".join(tokens[:3])
+    if raw.startswith("shared_domains:"):
+        domains = [domain for domain in raw.split(":", 1)[1].split(",") if domain]
+        if domains:
+            return "совпали внешние домены: " + ", ".join(domains[:2])
     if raw == "seed_exact_resolve":
         return "исходный профиль подтвержден точно"
     if raw == "manual_input":
         return "подтверждено вручную"
+    if raw == "provider_hint":
+        return "есть явная подсказка из профиля/ссылок"
     return raw
 
 
@@ -328,21 +342,7 @@ async def _ask_next_linked_account(message: Message, state: FSMContext) -> None:
     suggestions_by_platform = dict(data.get("link_suggestions") or {})
     suggestion = suggestions_by_platform.get(platform)
     if not isinstance(suggestion, dict):
-        result = await asyncio.to_thread(
-            suggest_accounts_for_platform,
-            seed=seed,
-            target_platform=platform,
-            max_candidates=3,
-        )
-        suggestion = {
-            "candidates": [
-                _linked_account_to_dict(candidate.seed, source=LinkedAccountSource.AUTO, signals=candidate.signals)
-                for candidate in result.candidates
-            ],
-            "note": result.note,
-        }
-        suggestions_by_platform[platform] = suggestion
-        await state.update_data(link_suggestions=suggestions_by_platform)
+        suggestion = {"candidates": [], "note": "Не удалось подготовить подсказки для этой платформы."}
 
     await state.update_data(current_link_platform=platform)
     await state.set_state(SetupStates.PICK_LINKED_ACCOUNT)
@@ -363,6 +363,23 @@ async def _begin_account_linking(
     seed_profile_id: int,
     seed: SeedResolution,
 ) -> None:
+    target_platforms = [platform for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM) if platform != seed.platform]
+    raw_suggestions = await asyncio.to_thread(
+        suggest_accounts_for_platforms,
+        seed=seed,
+        target_platforms=target_platforms,
+        max_candidates=3,
+    )
+    link_suggestions = {
+        platform: {
+            "candidates": [
+                _linked_account_to_dict(candidate.seed, source=LinkedAccountSource.AUTO, signals=candidate.signals)
+                for candidate in suggestion.candidates
+            ],
+            "note": suggestion.note,
+        }
+        for platform, suggestion in raw_suggestions.items()
+    }
     linked_accounts = {
         seed.platform: _linked_account_to_dict(
             seed,
@@ -371,13 +388,13 @@ async def _begin_account_linking(
             is_seed=True,
         )
     }
-    queue = [platform for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM) if platform != seed.platform]
+    queue = list(target_platforms)
     await state.update_data(
         seed_profile_id=seed_profile_id,
         seed=_seed_to_dict(seed),
         linked_accounts=linked_accounts,
         link_platform_queue=queue,
-        link_suggestions={},
+        link_suggestions=link_suggestions,
         skipped_link_platforms=[],
         competitor_seeds=[],
     )

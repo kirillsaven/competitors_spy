@@ -169,26 +169,29 @@ def test_begin_account_linking_prompts_confirmation(monkeypatch):
 
     monkeypatch.setattr(
         setup,
-        "suggest_accounts_for_platform",
-        lambda **kwargs: LinkedAccountSuggestion(
-            platform="tiktok",
-            candidates=[
-                SimpleNamespace(
-                    seed=SeedResolution(
-                        platform="tiktok",
-                        external_id="tt-1",
-                        handle="creator",
-                        url="https://www.tiktok.com/@creator",
-                        title="Creator",
-                        description="Creator profile",
-                        uploads_playlist_id=None,
-                    ),
-                    signals=["exact_handle"],
-                    score=100,
-                )
-            ],
-            note=None,
-        ),
+        "suggest_accounts_for_platforms",
+        lambda **kwargs: {
+            "tiktok": LinkedAccountSuggestion(
+                platform="tiktok",
+                candidates=[
+                    SimpleNamespace(
+                        seed=SeedResolution(
+                            platform="tiktok",
+                            external_id="tt-1",
+                            handle="creator",
+                            url="https://www.tiktok.com/@creator",
+                            title="Creator",
+                            description="Creator profile",
+                            uploads_playlist_id=None,
+                        ),
+                        signals=["exact_handle", "display_similarity:1.00"],
+                        score=125,
+                    )
+                ],
+                note=None,
+            ),
+            "instagram": LinkedAccountSuggestion(platform="instagram", candidates=[], note="none"),
+        },
     )
 
     async_to_sync(setup._begin_account_linking)(message, state, seed_profile_id=11, seed=seed)
