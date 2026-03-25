@@ -42,11 +42,9 @@ from tracking.models import AddedBy, Competitor, Platform, Schedule, SeedProfile
 from tracking.services.competitor_service import upsert_competitor
 from tracking.services.llm_usage import decide_and_consume_llm_call
 from tracking.services.niche_service import infer_niche_keywords
+from tracking.services.platform_onboarding import PlatformOnboardingError, discover_competitors_for_onboarding
 from tracking.services.seed_resolver import SeedResolveError, can_search_youtube_seed_candidates, resolve_exact_seed
-from tracking.services.youtube_service import (
-    discover_youtube_competitors,
-    search_youtube_seed_candidates,
-)
+from tracking.services.youtube_service import search_youtube_seed_candidates
 from tracking.tasks import run_user_report_now
 
 logger = logging.getLogger(__name__)
@@ -144,16 +142,29 @@ def _candidate_display_name(c: dict) -> str:
     return f"[{platform_label}] {name}"
 
 
-def _build_prune_text(*, selected_total: int, total: int, selected_youtube: int, total_youtube: int, limit: int) -> str:
+def _build_prune_text(
+    *,
+    selected_total: int,
+    total: int,
+    selected_by_platform: dict[str, int],
+    total_by_platform: dict[str, int],
+    limit: int,
+    discovery_notes: list[str],
+) -> str:
     lines = [
         "Нашел конкурентов.",
-        "Автоподбор сейчас есть только для YouTube. TikTok и Instagram берутся из того, что ты прислал вручную.",
         "Нажимай на профили, чтобы исключить лишних. По умолчанию выбраны все.",
         f"Выбрано всего: {selected_total}/{total}.",
-        f"YouTube выбрано: {selected_youtube}/{total_youtube} (лимит {limit}).",
+        f"YouTube: {selected_by_platform.get(Platform.YOUTUBE, 0)}/{total_by_platform.get(Platform.YOUTUBE, 0)} (лимит {limit}).",
+        f"TikTok: {selected_by_platform.get(Platform.TIKTOK, 0)}/{total_by_platform.get(Platform.TIKTOK, 0)}.",
+        f"Instagram: {selected_by_platform.get(Platform.INSTAGRAM, 0)}/{total_by_platform.get(Platform.INSTAGRAM, 0)}.",
     ]
+    selected_youtube = selected_by_platform.get(Platform.YOUTUBE, 0)
     if selected_youtube > limit:
         lines.append(f"Нужно исключить YouTube-конкурентов еще: {selected_youtube - limit}.")
+    if discovery_notes:
+        lines.append("")
+        lines.extend(discovery_notes)
     lines.append("Когда готово, нажми «Готово».")
     return "\n".join(lines)
 
@@ -189,7 +200,7 @@ async def _enter_competitor_step(
     await state.set_state(SetupStates.WAIT_COMPETITOR_LIST)
     await message.answer(
         "Если хочешь, пришли конкурентов: ссылки или хендлы/никнеймы, по одному в строке.\n"
-        "Автоподбор сейчас есть только для YouTube. Для TikTok и Instagram конкурентов лучше прислать вручную.",
+        "Если не пришлешь список, я попробую предложить конкурентов автоматически там, где платформа реально это поддерживает.",
         reply_markup=kb_competitors_next(),
     )
 
@@ -469,7 +480,14 @@ async def _start_keywords_step(message: Message, state: FSMContext) -> None:
         )
     except Exception as e:
         logger.warning("infer_niche_keywords failed: %s", e)
-        kws, source = [], "auto"
+        await state.update_data(niche_keywords=[], excluded_keywords=[])
+        await state.set_state(SetupStates.ADD_NICHE)
+        await message.answer(
+            "Не получилось проанализировать профиль автоматически.\n"
+            f"Причина: {e}\n\n"
+            "Пришли ключевые слова по нише (через запятую или с новой строки)."
+        )
+        return
 
     kws = [k.strip() for k in (kws or []) if isinstance(k, str) and k.strip()][:12]
     if not kws:
@@ -644,8 +662,6 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
 
     seed_dict = data.get("seed") or None
     seed = _seed_from_dict(seed_dict) if isinstance(seed_dict, dict) else None
-    youtube_seed = seed if (seed and seed.platform == Platform.YOUTUBE and seed.external_id) else None
-
     keywords = list(data.get("niche_keywords") or [])
 
     comp_dicts = data.get("competitor_seeds") or []
@@ -656,22 +672,30 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
                 comp_seeds.append(_seed_from_dict(d))
             except Exception:
                 continue
-    youtube_comp_seeds = [item for item in comp_seeds if item.platform == Platform.YOUTUBE and item.external_id]
+    await message.answer("Подбираю конкурентов по платформам…")
 
-    await message.answer("Подбираю конкурентов на YouTube…")
-
-    auto_candidates = []
+    discovery_notes: list[str] = []
     try:
-        auto_candidates = await asyncio.to_thread(
-            discover_youtube_competitors,
+        discovery = await asyncio.to_thread(
+            discover_competitors_for_onboarding,
             keywords=keywords,
-            seed=youtube_seed,
-            max_search_calls=int(getattr(settings, "YT_MAX_SEARCH_CALLS_PER_SETUP", 3)),
-            max_candidates=20,
-            extra_featured_channel_ids=[c.external_id for c in youtube_comp_seeds],
+            seed=seed,
+            competitors=comp_seeds,
+            max_youtube_search_calls=int(getattr(settings, "YT_MAX_SEARCH_CALLS_PER_SETUP", 3)),
         )
+    except PlatformOnboardingError as e:
+        logger.warning("Discovery failed: %s", e)
+        await message.answer("Не получилось подобрать конкурентов автоматически.\n" f"Причина: {e}")
+        await _ask_timezone_method(message, state)
+        return
     except Exception as e:
         logger.warning("Discovery failed: %s", e)
+        discovery = None
+        discovery_notes = [f"Автоподбор не сработал: {e}"]
+
+    auto_candidates = discovery.candidates if discovery else []
+    if discovery:
+        discovery_notes = discovery.notes
 
     candidates_by_id: dict[str, dict] = {}
 
@@ -718,9 +742,10 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
 
     candidates = list(candidates_by_id.values())
     if not candidates:
+        details = "\n".join(discovery_notes)
         await message.answer(
-            "Не смог подобрать конкурентов автоматически.\n"
-            "Автоподбор сейчас работает только для YouTube, а TikTok/Instagram нужно добавить вручную через /setup."
+            "Не смог собрать список конкурентов автоматически."
+            + (f"\n{details}" if details else "")
         )
         await _ask_timezone_method(message, state)
         return
@@ -729,6 +754,7 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
         candidates=candidates,
         excluded_candidate_ids=[],
         prune_page=0,
+        discovery_notes=discovery_notes,
     )
     await state.set_state(SetupStates.PRUNE_COMPETITORS)
 
@@ -736,13 +762,18 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
     excluded: set[int] = set()
     competitor_rows = [(i, _candidate_display_name(c)) for i, c in enumerate(candidates)]
     selected_total = len(candidates) - len(excluded)
-    total_youtube = sum(1 for c in candidates if str(c.get("platform") or "") == Platform.YOUTUBE)
+    total_by_platform = {
+        platform: sum(1 for c in candidates if str(c.get("platform") or "") == platform)
+        for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)
+    }
+    selected_by_platform = dict(total_by_platform)
     text = _build_prune_text(
         selected_total=selected_total,
         total=len(candidates),
-        selected_youtube=total_youtube,
-        total_youtube=total_youtube,
+        selected_by_platform=selected_by_platform,
+        total_by_platform=total_by_platform,
         limit=limit,
+        discovery_notes=discovery_notes,
     )
     await message.answer(
         text,
@@ -847,22 +878,30 @@ async def _render_prune(message: Message, state: FSMContext) -> None:
     candidates = list(data.get("candidates") or [])
     excluded = set(int(x) for x in (data.get("excluded_candidate_ids") or []))
     page = int(data.get("prune_page") or 0)
+    discovery_notes = [str(item) for item in (data.get("discovery_notes") or []) if str(item).strip()]
 
     limit = int(getattr(settings, "MAX_COMPETITORS_YOUTUBE", 20))
     competitor_rows = [(i, _candidate_display_name(c)) for i, c in enumerate(candidates)]
     selected_total = len(candidates) - len(excluded)
-    total_youtube = sum(1 for c in candidates if str(c.get("platform") or "") == Platform.YOUTUBE)
-    selected_youtube = sum(
-        1
-        for idx, candidate in enumerate(candidates)
-        if idx not in excluded and str(candidate.get("platform") or "") == Platform.YOUTUBE
-    )
+    total_by_platform = {
+        platform: sum(1 for c in candidates if str(c.get("platform") or "") == platform)
+        for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)
+    }
+    selected_by_platform = {
+        platform: sum(
+            1
+            for idx, candidate in enumerate(candidates)
+            if idx not in excluded and str(candidate.get("platform") or "") == platform
+        )
+        for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)
+    }
     text = _build_prune_text(
         selected_total=selected_total,
         total=len(candidates),
-        selected_youtube=selected_youtube,
-        total_youtube=total_youtube,
+        selected_by_platform=selected_by_platform,
+        total_by_platform=total_by_platform,
         limit=limit,
+        discovery_notes=discovery_notes,
     )
     kb = kb_prune_competitors(competitor_rows=competitor_rows, excluded_ids=excluded, page=page, page_size=8)
     try:

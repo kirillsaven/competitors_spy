@@ -6,7 +6,7 @@ from common.text import extract_keywords
 
 from tracking.adapters.base import SeedResolution
 from tracking.services.llm_gemini import GeminiError, infer_keywords_ru
-from tracking.services.youtube_service import get_recent_video_titles
+from tracking.services.platform_onboarding import get_recent_seed_content_texts
 
 logger = logging.getLogger(__name__)
 
@@ -24,15 +24,9 @@ def build_niche_context_text(*, seed: SeedResolution, competitors: list[SeedReso
     if seed.description:
         lines.append(f"Description: {seed.description}")
 
-    recent: list[str] = []
-    if seed.platform == "youtube":
-        try:
-            recent = get_recent_video_titles(seed, n=10)
-        except Exception as e:
-            logger.warning("Failed to load recent video titles for context: %s", e)
-            recent = []
+    recent = get_recent_seed_content_texts(seed=seed, n=10)
     if recent:
-        lines.append("Recent video titles:")
+        lines.append("Recent content:")
         for t in recent:
             lines.append(f"- {t}")
 
