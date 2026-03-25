@@ -59,6 +59,14 @@ def _append_keyword_source(
     sources.append(KeywordSource(text=value, source_id=source_id, source_type=source_type))
 
 
+def _safe_recent_seed_content_texts(*, seed: SeedResolution, n: int = 10) -> list[str]:
+    try:
+        return get_recent_seed_content_texts(seed=seed, n=n)
+    except Exception as exc:
+        logger.warning("Keyword source fetch failed for %s:%s: %s", seed.platform, seed.external_id, exc)
+        return []
+
+
 def build_niche_context_text(
     *,
     seed: SeedResolution,
@@ -81,7 +89,7 @@ def build_niche_context_text(
         if account.description:
             lines.append(f"Description: {account.description}")
 
-        recent = get_recent_seed_content_texts(seed=account, n=10)
+        recent = _safe_recent_seed_content_texts(seed=account, n=10)
         if recent:
             lines.append("Recent content:")
             for text in recent:
@@ -112,9 +120,11 @@ def build_keyword_source_text(
     parts: list[str] = []
     seen_parts: set[str] = set()
     for account in _ordered_accounts(seed=seed, linked_accounts=linked_accounts):
+        if account.title:
+            _append_unique(parts, account.title, seen_parts)
         if account.description:
             _append_unique(parts, account.description, seen_parts)
-        for text in get_recent_seed_content_texts(seed=account, n=10):
+        for text in _safe_recent_seed_content_texts(seed=account, n=10):
             _append_unique(parts, text, seen_parts)
 
     for competitor in competitors[:20]:
@@ -134,6 +144,14 @@ def build_keyword_sources(
     seen_sources: set[tuple[str, str]] = set()
     for account in _ordered_accounts(seed=seed, linked_accounts=linked_accounts):
         source_id = _account_key(account)
+        if account.title:
+            _append_keyword_source(
+                sources,
+                text=account.title,
+                source_id=source_id,
+                source_type="title",
+                seen=seen_sources,
+            )
         if account.description:
             _append_keyword_source(
                 sources,
@@ -142,7 +160,7 @@ def build_keyword_sources(
                 source_type="description",
                 seen=seen_sources,
             )
-        for text in get_recent_seed_content_texts(seed=account, n=10):
+        for text in _safe_recent_seed_content_texts(seed=account, n=10):
             _append_keyword_source(
                 sources,
                 text=text,
@@ -164,35 +182,37 @@ def build_keyword_sources(
     return sources
 
 
-def build_keyword_blocked_terms(
+def build_keyword_identity_terms(
     *,
     seed: SeedResolution,
     linked_accounts: list[SeedResolution] | None = None,
-    keyword_sources: list[KeywordSource] | None = None,
 ) -> set[str]:
-    blocked: set[str] = set()
-    supporting_tokens: set[str] = set()
-    for source in keyword_sources or []:
-        for token in re.findall(r"[0-9a-zа-яё]+", str(source.text or ""), flags=re.IGNORECASE):
-            norm = token.strip().lower().replace("ё", "е")
-            if len(norm) >= 3:
-                supporting_tokens.add(norm)
+    identity_terms: set[str] = set()
+    ordered_accounts = _ordered_accounts(seed=seed, linked_accounts=linked_accounts)
+    repeated_titles: dict[str, int] = {}
+    for account in ordered_accounts:
+        title = " ".join(str(account.title or "").strip().split())
+        if title:
+            repeated_titles[title] = repeated_titles.get(title, 0) + 1
 
-    for account in _ordered_accounts(seed=seed, linked_accounts=linked_accounts):
-        for token in re.findall(r"[0-9a-zа-яё]+", str(account.handle or ""), flags=re.IGNORECASE):
-            norm = token.strip().lower().replace("ё", "е")
-            if len(norm) >= 3 and norm not in supporting_tokens:
-                blocked.add(norm)
+    for account in ordered_accounts:
+        handle = str(account.handle or "").strip()
+        if handle:
+            identity_terms.add(handle)
 
-        title_tokens = [
-            token.strip().lower().replace("ё", "е")
-            for token in re.findall(r"[0-9a-zа-яё]+", str(account.title or ""), flags=re.IGNORECASE)
-            if len(token.strip()) >= 3
-        ]
-        unsupported_title_tokens = [token for token in title_tokens if token not in supporting_tokens]
-        blocked.update(unsupported_title_tokens)
-
-    return blocked
+        title = str(account.title or "").strip()
+        if not title:
+            continue
+        normalized_title = " ".join(title.split())
+        if repeated_titles.get(normalized_title, 0) > 1 and 1 <= len(normalized_title.split()) <= 4:
+            identity_terms.add(normalized_title)
+        parts = [segment.strip() for segment in re.split(r"[|/•]+", title) if segment.strip()]
+        if len(parts) < 2:
+            continue
+        first_segment = parts[0]
+        if 1 <= len(first_segment.split()) <= 4:
+            identity_terms.add(first_segment)
+    return identity_terms
 
 
 def infer_niche_keywords(
@@ -209,11 +229,10 @@ def infer_niche_keywords(
     keyword_sources = build_keyword_sources(seed=seed, competitors=competitors, linked_accounts=linked_accounts)
     auto_keywords = extract_keywords(
         keyword_sources,
-        max_keywords=6,
-        blocked_terms=build_keyword_blocked_terms(
+        max_keywords=8,
+        identity_terms=build_keyword_identity_terms(
             seed=seed,
             linked_accounts=linked_accounts,
-            keyword_sources=keyword_sources,
         ),
     )
     if len(auto_keywords) >= 3 or not prefer_llm:

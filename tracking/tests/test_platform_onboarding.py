@@ -5,6 +5,26 @@ from tracking.models import Platform
 from tracking.services import platform_onboarding
 
 
+def _seed(
+    *,
+    platform: str,
+    external_id: str,
+    handle: str | None,
+    title: str | None,
+    description: str | None = None,
+    url: str | None = None,
+) -> SeedResolution:
+    return SeedResolution(
+        platform=platform,
+        external_id=external_id,
+        handle=handle,
+        url=url or f"https://example.com/{external_id}",
+        title=title,
+        description=description,
+        uploads_playlist_id=None,
+    )
+
+
 def test_get_recent_seed_content_texts_reads_tiktok_captions(monkeypatch):
     sample_items = [
         {
@@ -37,14 +57,13 @@ def test_get_recent_seed_content_texts_reads_tiktok_captions(monkeypatch):
     monkeypatch.setattr(platform_onboarding, "_get_tiktok_client", lambda: FakeClient())
 
     texts = platform_onboarding.get_recent_seed_content_texts(
-        seed=SeedResolution(
+        seed=_seed(
             platform=Platform.TIKTOK,
             external_id="tt-1",
             handle="apifytech",
             url="https://www.tiktok.com/@apifytech",
             title="Apify Tech",
             description="Automation",
-            uploads_playlist_id=None,
         ),
         n=5,
     )
@@ -84,14 +103,13 @@ def test_get_recent_seed_content_texts_reads_instagram_captions_without_view_fil
     monkeypatch.setattr(platform_onboarding, "_get_instagram_client", lambda: FakeClient())
 
     texts = platform_onboarding.get_recent_seed_content_texts(
-        seed=SeedResolution(
+        seed=_seed(
             platform=Platform.INSTAGRAM,
             external_id="ig-1",
             handle="nasa",
             url="https://www.instagram.com/nasa/",
             title="NASA",
             description="Space agency",
-            uploads_playlist_id=None,
         ),
         n=5,
     )
@@ -99,140 +117,176 @@ def test_get_recent_seed_content_texts_reads_instagram_captions_without_view_fil
     assert texts == ["Mars update", "Moon update"]
 
 
-def test_discover_instagram_competitors_uses_related_profiles(monkeypatch):
-    responses = {
-        "https://www.instagram.com/nasa/": [
-            {
-                "relatedProfiles": [
-                    {"id": "ig-2", "username": "esa", "full_name": "ESA"},
-                    {"id": "ig-3", "username": "jaxa_en", "full_name": "JAXA"},
-                ]
-            }
-        ],
-        "https://www.instagram.com/spacex/": [
-            {
-                "relatedProfiles": [
-                    {"id": "ig-2", "username": "esa", "full_name": "ESA"},
-                    {"id": "ig-4", "username": "blueorigin", "full_name": "Blue Origin"},
-                ]
-            }
-        ],
-    }
+def test_discover_instagram_competitors_performs_real_query_search(monkeypatch):
+    search_calls: list[str] = []
 
     class FakeClient:
-        def fetch_profiles(self, *, inputs):
-            return responses[inputs[0]]
+        def search_profiles(self, *, query):
+            search_calls.append(query)
+            if query == "english teachers":
+                return [
+                    {"id": "ig-1", "username": "teacher_hub", "full_name": "Teacher Hub", "is_verified": True},
+                    {"id": "ig-2", "username": "lessonlab", "full_name": "Lesson Lab"},
+                ]
+            return [
+                {"id": "ig-1", "username": "teacher_hub", "full_name": "Teacher Hub", "is_verified": True},
+                {"id": "ig-3", "username": "teachernotes", "full_name": "Teacher Notes"},
+            ]
 
         def close(self):
             return None
 
     monkeypatch.setattr(platform_onboarding, "_get_instagram_client", lambda: FakeClient())
-    seed = SeedResolution(
-        platform=Platform.INSTAGRAM,
-        external_id="ig-1",
-        handle="nasa",
-        url="https://www.instagram.com/nasa/",
-        title="NASA",
-        description="Space",
-        uploads_playlist_id=None,
-    )
-    competitor = SeedResolution(
-        platform=Platform.INSTAGRAM,
-        external_id="ig-manual",
-        handle="spacex",
-        url="https://www.instagram.com/spacex/",
-        title="SpaceX",
-        description="Rockets",
-        uploads_playlist_id=None,
+
+    candidates = platform_onboarding.discover_instagram_competitors(
+        keywords=["english teachers", "teacher groups"],
+        max_candidates=10,
     )
 
-    candidates = platform_onboarding.discover_instagram_competitors(seed=seed, competitors=[competitor], max_candidates=10)
-
-    assert [(candidate.external_id, candidate.handle, candidate.reason) for candidate in candidates] == [
-        ("ig-2", "esa", "related_comp,related_seed"),
-        ("ig-3", "jaxa_en", "related_seed"),
-        ("ig-4", "blueorigin", "related_comp"),
-    ]
+    assert search_calls == ["english teachers", "teacher groups"]
+    assert [candidate.external_id for candidate in candidates] == ["ig-1", "ig-3", "ig-2"]
+    assert candidates[0].reason == "search: english teachers, teacher groups"
 
 
-def test_discover_competitors_for_onboarding_reports_tiktok_limitations(monkeypatch):
-    monkeypatch.setattr(
-        platform_onboarding,
-        "discover_youtube_competitors",
-        lambda **kwargs: [],
+def test_discover_tiktok_competitors_performs_real_query_search(monkeypatch):
+    search_calls: list[str] = []
+
+    class FakeClient:
+        def search_profiles(self, *, query):
+            search_calls.append(query)
+            if query == "english teachers":
+                return [
+                    {"id": "tt-1", "name": "teacherhub", "nickName": "Teacher Hub", "signature": "English teacher groups", "profileUrl": "https://www.tiktok.com/@teacherhub", "fans": 5000},
+                    {"id": "tt-2", "name": "lessonlab", "nickName": "Lesson Lab", "signature": "Lesson planning for tutors", "profileUrl": "https://www.tiktok.com/@lessonlab", "fans": 3000},
+                ]
+            return [
+                {"id": "tt-1", "name": "teacherhub", "nickName": "Teacher Hub", "signature": "English teacher groups", "profileUrl": "https://www.tiktok.com/@teacherhub", "fans": 5000},
+                {"id": "tt-3", "name": "teachernotes", "nickName": "Teacher Notes", "signature": "Tutor notes and lesson ideas", "profileUrl": "https://www.tiktok.com/@teachernotes", "fans": 2000},
+            ]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(platform_onboarding, "_get_tiktok_client", lambda: FakeClient())
+
+    candidates = platform_onboarding.discover_tiktok_competitors(
+        keywords=["english teachers", "teacher groups"],
+        max_candidates=10,
     )
+
+    assert search_calls == ["english teachers", "teacher groups"]
+    assert [candidate.external_id for candidate in candidates] == ["tt-1", "tt-3", "tt-2"]
+    assert candidates[0].reason == "search: english teachers, teacher groups"
+
+
+def test_discover_competitors_for_onboarding_reports_empty_after_attempted_search(monkeypatch):
+    monkeypatch.setattr(platform_onboarding, "_discover_youtube_search_candidates", lambda **kwargs: [])
+    monkeypatch.setattr(platform_onboarding, "_search_instagram_candidates_raw", lambda **kwargs: [])
+    monkeypatch.setattr(platform_onboarding, "_search_tiktok_candidates_raw", lambda **kwargs: [])
 
     outcome = platform_onboarding.discover_competitors_for_onboarding(
-        keywords=["basketball"],
-        seed=SeedResolution(
-            platform=Platform.TIKTOK,
-            external_id="tt-1",
-            handle="nba",
-            url="https://www.tiktok.com/@nba",
-            title="NBA",
-            description="Basketball",
-            uploads_playlist_id=None,
+        keywords=["english teachers", "teacher groups"],
+        seed=_seed(
+            platform=Platform.INSTAGRAM,
+            external_id="ig-seed",
+            handle="dariapancho",
+            title="Дарья Панчо",
+            description="English tutor",
+            url="https://www.instagram.com/dariapancho/",
         ),
         competitors=[],
+        linked_accounts=[],
         max_youtube_search_calls=3,
         max_candidates_per_platform=20,
     )
 
     assert outcome.candidates == []
-    assert [(item.platform, item.status) for item in outcome.platform_statuses] == [
-        (Platform.YOUTUBE, platform_onboarding.DISCOVERY_EMPTY),
-        (Platform.INSTAGRAM, platform_onboarding.DISCOVERY_EMPTY),
-        (Platform.TIKTOK, platform_onboarding.DISCOVERY_EMPTY),
-    ]
     assert outcome.notes == [
-        "YouTube: EMPTY — по текущим ключевым фразам кандидаты не найдены.",
-        "Instagram: EMPTY — нет подтвержденного Instagram-профиля для автоподбора.",
-        "TikTok: EMPTY — текущий провайдер не отдает связанные профили, поэтому автоподбор пока недоступен.",
+        "YouTube: EMPTY — по текущим поисковым фразам поиск был выполнен, но кандидаты не найдены.",
+        "Instagram: EMPTY — по текущим поисковым фразам поиск был выполнен, но кандидаты не найдены.",
+        "TikTok: EMPTY — по текущим поисковым фразам поиск был выполнен, но кандидаты не найдены.",
     ]
 
 
-def test_discover_competitors_for_onboarding_reports_per_platform_error_and_empty(monkeypatch):
+def test_discover_competitors_for_onboarding_ranks_and_dedupes_candidates(monkeypatch):
     monkeypatch.setattr(
         platform_onboarding,
-        "discover_youtube_competitors",
-        lambda **kwargs: [],
+        "_discover_youtube_search_candidates",
+        lambda **kwargs: [
+            platform_onboarding._DiscoveryCandidate(
+                platform=Platform.YOUTUBE,
+                external_id="yt-seed",
+                handle="dariapancho",
+                url="https://www.youtube.com/@dariapancho",
+                display_name="Daria Pancho",
+                description="Seed account",
+                query_hits={"english teachers"},
+                metadata={"rank_hint": 1000},
+            ),
+            platform_onboarding._DiscoveryCandidate(
+                platform=Platform.YOUTUBE,
+                external_id="yt-1",
+                handle="teacherhub",
+                url="https://www.youtube.com/@teacherhub",
+                display_name="Teacher Hub",
+                description="English teacher groups and tutor notes",
+                query_hits={"english teachers", "teacher groups"},
+                metadata={"rank_hint": 5000},
+            ),
+        ],
     )
     monkeypatch.setattr(
         platform_onboarding,
-        "discover_instagram_competitors",
+        "_search_instagram_candidates_raw",
+        lambda **kwargs: [
+            platform_onboarding._DiscoveryCandidate(
+                platform=Platform.INSTAGRAM,
+                external_id="ig-1",
+                handle="teacherhub",
+                url="https://www.instagram.com/teacherhub/",
+                display_name="Teacher Hub",
+                description="English teacher groups and tutor notes",
+                query_hits={"english teachers"},
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_search_tiktok_candidates_raw",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("provider timeout")),
     )
 
     outcome = platform_onboarding.discover_competitors_for_onboarding(
-        keywords=["english teachers"],
-        seed=SeedResolution(
+        keywords=["english teachers", "teacher groups"],
+        seed=_seed(
             platform=Platform.INSTAGRAM,
-            external_id="ig-1",
-            handle="teacher",
-            url="https://www.instagram.com/teacher/",
-            title="Teacher",
-            description="English teaching",
-            uploads_playlist_id=None,
+            external_id="ig-seed",
+            handle="dariapancho",
+            title="Дарья Панчо",
+            description="English tutor",
+            url="https://www.instagram.com/dariapancho/",
         ),
+        competitors=[],
         linked_accounts=[
-            SeedResolution(
-                platform=Platform.INSTAGRAM,
-                external_id="ig-1",
-                handle="teacher",
-                url="https://www.instagram.com/teacher/",
-                title="Teacher",
-                description="English teaching",
-                uploads_playlist_id=None,
+            _seed(
+                platform=Platform.YOUTUBE,
+                external_id="yt-seed",
+                handle="dariapancho",
+                title="Daria Pancho",
+                description="Seed account",
+                url="https://www.youtube.com/@dariapancho",
             )
         ],
-        competitors=[],
         max_youtube_search_calls=3,
         max_candidates_per_platform=20,
     )
 
-    assert outcome.candidates == []
+    assert [(candidate.platform, candidate.external_id) for candidate in outcome.candidates] == [
+        (Platform.YOUTUBE, "yt-1"),
+        (Platform.INSTAGRAM, "ig-1"),
+    ]
     assert outcome.notes == [
-        "YouTube: EMPTY — по текущим ключевым фразам кандидаты не найдены.",
-        "Instagram: ERROR — provider timeout",
-        "TikTok: EMPTY — нет подтвержденного TikTok-профиля для автоподбора.",
+        "YouTube: FOUND (1)",
+        "Instagram: FOUND (1)",
+        "TikTok: ERROR — provider timeout",
     ]

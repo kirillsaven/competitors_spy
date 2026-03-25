@@ -126,3 +126,30 @@ def test_fetch_profiles_includes_usernames_for_profile_urls():
         "directUrls": ["https://www.instagram.com/apifytech/"],
         "usernames": ["apifytech"],
     }
+
+
+def test_search_profiles_uses_configured_search_actor():
+    from tracking.adapters.instagram import ApifyInstagramClient
+
+    seen: dict[str, object] = {}
+
+    class FakeHttpClient:
+        def post(self, url, headers, json):
+            seen["url"] = url
+            seen["headers"] = headers
+            seen["json"] = json
+            return SimpleNamespace(status_code=200, json=lambda: [])
+
+        def close(self):
+            return None
+
+    client = ApifyInstagramClient(access_token="token", actor_id="profile-actor", search_actor_id="search-actor")
+    client._client = FakeHttpClient()
+
+    try:
+        client.search_profiles(query="english teachers")
+    finally:
+        client.close()
+
+    assert seen["url"].endswith("/acts/search-actor/run-sync-get-dataset-items")
+    assert seen["json"] == {"query": "english teachers"}

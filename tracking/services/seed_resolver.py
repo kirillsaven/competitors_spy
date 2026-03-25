@@ -36,34 +36,40 @@ class SeedResolveAttempt:
 
 def _get_tiktok_client() -> ApifyTikTokClient:
     config = get_tiktok_apify_config()
+    profile_actor_id = str(getattr(config, "profile_actor_id", getattr(config, "actor_id", "")) or "")
+    search_actor_id = str(getattr(config, "search_actor_id", "") or "")
     if config.provider != "apify":
         raise SeedResolveError(f"Unsupported TikTok provider: {config.provider}")
     if not config.access_token:
         raise SeedResolveError("TIKTOK_PROVIDER_ACCESS_TOKEN is not set")
-    if not config.actor_id:
+    if not profile_actor_id:
         raise SeedResolveError("TIKTOK_APIFY_PROFILE_ACTOR_ID is not set")
     if not config.base_url:
         raise SeedResolveError("TIKTOK_PROVIDER_BASE_URL is not set")
     return ApifyTikTokClient(
         access_token=config.access_token,
-        actor_id=config.actor_id,
+        actor_id=profile_actor_id,
+        search_actor_id=search_actor_id,
         base_url=config.base_url,
     )
 
 
 def _get_instagram_client() -> ApifyInstagramClient:
     config = get_instagram_apify_config()
+    profile_actor_id = str(getattr(config, "profile_actor_id", getattr(config, "actor_id", "")) or "")
+    search_actor_id = str(getattr(config, "search_actor_id", "") or "")
     if config.provider != "apify":
         raise SeedResolveError(f"Unsupported Instagram provider: {config.provider}")
     if not config.access_token:
         raise SeedResolveError("INSTAGRAM_PROVIDER_ACCESS_TOKEN is not set")
-    if not config.actor_id:
+    if not profile_actor_id:
         raise SeedResolveError("INSTAGRAM_APIFY_PROFILE_ACTOR_ID is not set")
     if not config.base_url:
         raise SeedResolveError("INSTAGRAM_PROVIDER_BASE_URL is not set")
     return ApifyInstagramClient(
         access_token=config.access_token,
-        actor_id=config.actor_id,
+        actor_id=profile_actor_id,
+        search_actor_id=search_actor_id,
         base_url=config.base_url,
     )
 

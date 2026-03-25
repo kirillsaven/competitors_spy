@@ -69,11 +69,13 @@ class ApifyInstagramClient:
         *,
         access_token: str,
         actor_id: str,
+        search_actor_id: str | None = None,
         base_url: str = "https://api.apify.com/v2",
-        timeout_s: float = 30.0,
+        timeout_s: float = 60.0,
     ) -> None:
         self.access_token = access_token
         self.actor_id = actor_id
+        self.search_actor_id = str(search_actor_id or "").strip()
         self.base_url = base_url.rstrip("/")
         self._client = httpx.Client(timeout=timeout_s, follow_redirects=True)
 
@@ -119,6 +121,31 @@ class ApifyInstagramClient:
             raise InstagramApiError(f"Apify Instagram API error: status={response.status_code} body={data}")
         if not isinstance(data, list):
             raise InstagramApiError(f"Apify Instagram API returned unexpected payload: {data!r}")
+        return [item for item in data if isinstance(item, dict)]
+
+    def search_profiles(self, *, query: str) -> list[dict[str, Any]]:
+        search_query = str(query or "").strip()
+        if not search_query:
+            return []
+        if not self.search_actor_id:
+            raise InstagramApiError("Instagram search actor is not configured")
+        url = f"{self.base_url}/acts/{quote(self.search_actor_id, safe='')}/run-sync-get-dataset-items"
+        response = self._client.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {self.access_token}",
+                "Accept": "application/json",
+            },
+            json={"query": search_query},
+        )
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise InstagramApiError(f"Apify Instagram search API invalid JSON: status={response.status_code}") from exc
+        if response.status_code >= 400:
+            raise InstagramApiError(f"Apify Instagram search API error: status={response.status_code} body={data}")
+        if not isinstance(data, list):
+            raise InstagramApiError(f"Apify Instagram search API returned unexpected payload: {data!r}")
         return [item for item in data if isinstance(item, dict)]
 
 

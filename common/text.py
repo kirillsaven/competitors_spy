@@ -276,6 +276,39 @@ _LOW_INFORMATION = {
     "реально",
     "сегодня",
     "скоро",
+    "анкета",
+    "заполняй",
+    "запишись",
+    "заявка",
+    "меньше",
+    "подробности",
+    "позже",
+    "помогаю",
+    "присоединиться",
+    "своего",
+    "своим",
+    "ссылка",
+    "ссылке",
+    "смотри",
+    "оставляй",
+    "найди",
+    "найти",
+    "говорят",
+    "иногда",
+    "пройти",
+    "тг",
+    "тгк",
+    "уроке",
+    "уроки",
+    "английскийонлайн",
+    "коллег",
+    "открываю",
+    "помогла",
+    "растет",
+    "свою",
+    "учеба",
+    "чудесных",
+    "моей",
 }
 
 _PHRASE_CONNECTORS = {
@@ -333,9 +366,111 @@ _USEFUL_THEME_STEMS = {
     "школ",
 }
 
+_SEARCH_UTILITY_THEME_GROUPS = {
+    "audience": {
+        "beginner",
+        "coach",
+        "creator",
+        "founder",
+        "marketer",
+        "parent",
+        "student",
+        "teacher",
+        "tutor",
+        "ученик",
+        "учител",
+        "преподав",
+        "репетитор",
+        "эксперт",
+    },
+    "subject": {
+        "business",
+        "english",
+        "grammar",
+        "language",
+        "lesson",
+        "marketing",
+        "pronunciation",
+        "science",
+        "speaking",
+        "английск",
+        "граммат",
+        "разговор",
+        "язык",
+    },
+    "format": {
+        "breakdown",
+        "clips",
+        "explainer",
+        "group",
+        "guide",
+        "notes",
+        "review",
+        "worksheet",
+        "групп",
+        "замет",
+        "материал",
+        "план",
+        "разбор",
+        "урок",
+    },
+    "offer": {
+        "course",
+        "community",
+        "practice",
+        "program",
+        "school",
+        "training",
+        "коммюнит",
+        "курс",
+        "обуч",
+        "онлайн",
+        "практик",
+        "школ",
+    },
+    "problem": {
+        "goal",
+        "improve",
+        "motivation",
+        "problem",
+        "results",
+        "подготов",
+        "повыс",
+        "результ",
+        "цель",
+    },
+}
+
+_ACTION_QUERY_STEMS = {
+    "begin",
+    "book",
+    "check",
+    "click",
+    "explain",
+    "find",
+    "help",
+    "join",
+    "leave",
+    "look",
+    "sign",
+    "watch",
+    "boят",
+    "замеча",
+    "заполня",
+    "записа",
+    "нача",
+    "объясня",
+    "оставля",
+    "помога",
+    "посмотр",
+    "присоедин",
+    "смотр",
+}
+
 _SOURCE_TYPE_WEIGHTS = {
     "description": 2.8,
     "recent": 1.6,
+    "title": 2.1,
     "competitor": 0.9,
     "generic": 1.0,
 }
@@ -430,6 +565,13 @@ class KeywordSource:
     source_type: str = "generic"
 
 
+@dataclass(frozen=True)
+class _IdentityProfile:
+    phrases: set[str] = field(default_factory=set)
+    tokens: set[str] = field(default_factory=set)
+    stems: set[str] = field(default_factory=set)
+
+
 @dataclass
 class _CandidateStats:
     content_count: int
@@ -441,6 +583,9 @@ class _CandidateStats:
     stem_tokens: tuple[str, ...] = ()
     useful_hits: int = 0
     generic_hits: int = 0
+    action_hits: int = 0
+    source_types: set[str] = field(default_factory=set)
+    utility_groups: set[str] = field(default_factory=set)
 
 
 def _normalize_token(token: str) -> str:
@@ -475,6 +620,23 @@ def _normalize_blocked_terms(blocked_terms: Iterable[str] | None) -> tuple[set[s
     return tokens, stems
 
 
+def _build_identity_profile(identity_terms: Iterable[str] | None) -> _IdentityProfile:
+    phrases: set[str] = set()
+    tokens: set[str] = set()
+    stems: set[str] = set()
+    for raw in identity_terms or []:
+        raw_text = str(raw or "").strip()
+        if not raw_text:
+            continue
+        phrase_tokens = [_normalize_token(token) for token in _TOKEN_RE.findall(raw_text) if len(_normalize_token(token)) >= 3]
+        if phrase_tokens:
+            phrases.add(" ".join(phrase_tokens))
+        for token in phrase_tokens:
+            tokens.add(token)
+            stems.add(_stem_token(token))
+    return _IdentityProfile(phrases=phrases, tokens=tokens, stems=stems)
+
+
 def _is_connector(token: str) -> bool:
     return _normalize_token(token) in _PHRASE_CONNECTORS
 
@@ -505,6 +667,10 @@ def _build_candidate_phrase(phrase_tokens: list[str]) -> str:
     return re.sub(r"\s+", " ", " ".join(phrase_tokens)).strip()
 
 
+def _phrase_key(phrase: str) -> str:
+    return _build_candidate_phrase([_normalize_token(token) for token in _TOKEN_RE.findall(phrase)])
+
+
 def _token_script(token: str) -> str:
     norm = _normalize_token(token)
     if re.search(r"[а-я]", norm):
@@ -519,8 +685,8 @@ def _iter_candidates(
     *,
     blocked_tokens: set[str],
     blocked_stems: set[str],
-) -> Counter[tuple[str, tuple[str, ...], int, int, int]]:
-    candidates: Counter[tuple[str, tuple[str, ...], int, int, int]] = Counter()
+) -> Counter[tuple[str, tuple[str, ...], int, int, int, int, tuple[str, ...]]]:
+    candidates: Counter[tuple[str, tuple[str, ...], int, int, int, int, tuple[str, ...]]] = Counter()
     content_positions = [
         idx
         for idx, token in enumerate(tokens)
@@ -534,7 +700,13 @@ def _iter_candidates(
         stem = _stem_token(content_token)
         generic_hits = 1 if stem in _GENERIC_SINGLETON_STEMS else 0
         useful_hits = 1 if stem in _USEFUL_THEME_STEMS else 0
-        candidates[(_build_candidate_phrase([content_token]), (stem,), 1, useful_hits, generic_hits)] += 1
+        action_hits = 1 if stem in _ACTION_QUERY_STEMS else 0
+        utility_groups = tuple(
+            group
+            for group, stems in _SEARCH_UTILITY_THEME_GROUPS.items()
+            if stem in stems
+        )
+        candidates[(_build_candidate_phrase([content_token]), (stem,), 1, useful_hits, generic_hits, action_hits, utility_groups)] += 1
 
     for start in content_positions:
         phrase_tokens: list[str] = []
@@ -542,6 +714,8 @@ def _iter_candidates(
         content_stems: list[str] = []
         useful_hits = 0
         generic_hits = 0
+        action_hits = 0
+        utility_groups: set[str] = set()
         connector_open = False
         for idx in range(start, len(tokens)):
             token = tokens[idx]
@@ -552,8 +726,12 @@ def _iter_candidates(
                 content_stems.append(stem)
                 useful_hits += int(stem in _USEFUL_THEME_STEMS)
                 generic_hits += int(stem in _GENERIC_SINGLETON_STEMS)
+                action_hits += int(stem in _ACTION_QUERY_STEMS)
+                for group, stems in _SEARCH_UTILITY_THEME_GROUPS.items():
+                    if stem in stems:
+                        utility_groups.add(group)
                 connector_open = False
-                if 2 <= len(content_tokens) <= 4:
+                if 2 <= len(content_tokens) <= 5:
                     if len({_token_script(item) for item in content_tokens}) == 1:
                         candidates[
                             (
@@ -562,9 +740,11 @@ def _iter_candidates(
                                 len(content_tokens),
                                 useful_hits,
                                 generic_hits,
+                                action_hits,
+                                tuple(sorted(utility_groups)),
                             )
                         ] += 1
-                if len(content_tokens) >= 4:
+                if len(content_tokens) >= 5:
                     break
                 continue
 
@@ -590,13 +770,69 @@ def _coerce_sources(text: str | Iterable[KeywordSource | str]) -> list[KeywordSo
 
 
 def _candidate_score(stats: _CandidateStats) -> float:
-    phrase_bonus = {1: -2.6, 2: 4.3, 3: 5.8, 4: 6.4}.get(stats.content_count, 0.0)
-    source_spread = max(len(stats.source_ids) - 1, 0) * 2.6
-    chunk_spread = max(len(stats.chunk_ids) - 1, 0) * 1.2
-    frequency_bonus = min(stats.total_count, 5) * 0.35
-    useful_bonus = min(stats.useful_hits, 2) * 1.3
-    generic_penalty = stats.generic_hits * 1.4 if stats.content_count == 1 else 0.0
-    return stats.source_weight + phrase_bonus + source_spread + chunk_spread + frequency_bonus + useful_bonus - generic_penalty
+    raise NotImplementedError("_candidate_score requires identity profile")
+
+
+def _identity_penalty(stats: _CandidateStats, identity: _IdentityProfile) -> float:
+    if not identity.stems:
+        return 0.0
+    overlap = set(stats.stem_tokens) & identity.stems
+    if not overlap:
+        return 0.0
+    overlap_ratio = len(overlap) / max(len(set(stats.stem_tokens)), 1)
+    penalty = overlap_ratio * (2.0 + len(overlap) * 0.7)
+    if _phrase_key(_best_display_phrase(stats)) in identity.phrases:
+        penalty += 5.4 if len(stats.utility_groups) == 0 else 2.4
+    if overlap_ratio >= 0.65 and len(stats.source_ids) <= 1:
+        penalty += 2.2
+    if overlap_ratio == 1.0 and len(stats.utility_groups) < 2 and len(stats.chunk_ids) <= 2:
+        penalty += 3.0
+    support_relief = max(len(stats.source_ids) - 1, 0) * 1.4 + max(len(stats.chunk_ids) - 1, 0) * 0.55
+    return max(penalty - support_relief, 0.0)
+
+
+def _candidate_score_with_identity(
+    stats: _CandidateStats,
+    identity: _IdentityProfile,
+    stem_contexts: dict[str, set[tuple[str, ...]]],
+) -> float:
+    phrase_bonus = {1: -9.5, 2: 5.2, 3: 7.0, 4: 7.4, 5: 6.8}.get(stats.content_count, 0.0)
+    source_spread = max(len(stats.source_ids) - 1, 0) * 2.8
+    chunk_spread = max(len(stats.chunk_ids) - 1, 0) * 1.0
+    frequency_bonus = min(stats.total_count, 6) * (0.2 if stats.content_count == 1 else 0.45)
+    weighted_source_bonus = min(stats.source_weight, 10.0) * 0.25
+    source_type_bonus = 2.4 if "recent" in stats.source_types and ({"description", "title"} & stats.source_types) else 0.0
+    utility_group_bonus = len(stats.utility_groups) * 1.45
+    combo_bonus = 2.6 if len(stats.utility_groups) >= 2 else 0.0
+    useful_bonus = min(stats.useful_hits, 3) * 0.9
+    generic_penalty = stats.generic_hits * (1.8 if stats.content_count == 1 else 0.7)
+    action_penalty = stats.action_hits * (1.5 if len(stats.utility_groups) < 2 else 0.35)
+    identity_penalty = _identity_penalty(stats, identity)
+    weak_query_penalty = 2.2 if len(stats.utility_groups) < 2 and len(stats.source_ids) <= 1 and len(stats.chunk_ids) <= 2 else 0.0
+    context_sizes = [
+        len(stem_contexts.get(stem, {stats.stem_tokens}))
+        for stem in set(stats.stem_tokens)
+    ]
+    context_diversity = sum(context_sizes) / len(context_sizes) if context_sizes else 1.0
+    context_bonus = 1.4 if context_diversity >= 2.0 else 0.0
+    narrow_identity_penalty = 4.5 if context_diversity <= 1.05 and len(stats.utility_groups) == 0 and len(stats.source_ids) <= 2 else 0.0
+    return (
+        weighted_source_bonus
+        + phrase_bonus
+        + source_spread
+        + chunk_spread
+        + frequency_bonus
+        + source_type_bonus
+        + utility_group_bonus
+        + combo_bonus
+        + useful_bonus
+        + context_bonus
+        - generic_penalty
+        - action_penalty
+        - identity_penalty
+        - weak_query_penalty
+        - narrow_identity_penalty
+    )
 
 
 def _best_display_phrase(stats: _CandidateStats) -> str:
@@ -629,14 +865,17 @@ def extract_keywords(
     max_keywords: int = 8,
     *,
     blocked_terms: Iterable[str] | None = None,
+    identity_terms: Iterable[str] | None = None,
 ) -> list[str]:
     sources = _coerce_sources(text)
     if not sources:
         return []
 
     blocked_tokens, blocked_stems = _normalize_blocked_terms(blocked_terms)
+    identity = _build_identity_profile(identity_terms)
 
     candidates: dict[tuple[str, ...], _CandidateStats] = {}
+    stem_contexts: dict[str, set[tuple[str, ...]]] = {}
     chunk_index = 0
     for source_index, source in enumerate(sources):
         source_text = str(source.text or "").strip()
@@ -651,7 +890,7 @@ def extract_keywords(
                 blocked_tokens=blocked_tokens,
                 blocked_stems=blocked_stems,
             ).items():
-                phrase, stem_tokens, content_count, useful_hits, generic_hits = candidate
+                phrase, stem_tokens, content_count, useful_hits, generic_hits, action_hits, utility_groups = candidate
                 stats = candidates.setdefault(
                     stem_tokens,
                     _CandidateStats(
@@ -665,12 +904,17 @@ def extract_keywords(
                 stats.source_ids.add(source_id)
                 stats.useful_hits = max(stats.useful_hits, useful_hits)
                 stats.generic_hits = max(stats.generic_hits, generic_hits)
+                stats.action_hits = max(stats.action_hits, action_hits)
+                stats.source_types.add(source.source_type or "generic")
+                stats.utility_groups.update(utility_groups)
                 stats.phrase_counts[phrase] += count
+                for stem in set(stem_tokens):
+                    stem_contexts.setdefault(stem, set()).add(stem_tokens)
 
     ranked = sorted(
         candidates.values(),
         key=lambda stats: (
-            -_candidate_score(stats),
+            -_candidate_score_with_identity(stats, identity, stem_contexts),
             -stats.content_count,
             -len(_best_display_phrase(stats)),
             _best_display_phrase(stats),
@@ -679,26 +923,48 @@ def extract_keywords(
 
     selected: list[str] = []
     selected_stems: list[tuple[str, ...]] = []
+    selected_scores: list[float] = []
     top_score: float | None = None
     for stats in ranked:
-        score = _candidate_score(stats)
+        score = _candidate_score_with_identity(stats, identity, stem_contexts)
         if top_score is None:
             top_score = score
+        display = _best_display_phrase(stats)
+        if _phrase_key(display) in identity.phrases and len(stats.utility_groups) == 0:
+            continue
         if stats.content_count == 1:
             single_stem = stats.stem_tokens[0]
             if single_stem in _GENERIC_SINGLETON_STEMS:
                 continue
             if len(stats.source_ids) < 2 and len(stats.chunk_ids) < 3:
                 continue
-        if len(selected) >= 2 and score < max(4.8, (top_score or score) * 0.42):
+            if len(stats.utility_groups) < 2 or score < 13.0 or len(stats.chunk_ids) < 4:
+                continue
+        if len(selected) >= 4 and score < max(5.2, (top_score or score) * 0.34):
             break
 
-        if any(_is_subphrase(stats.stem_tokens, existing) for existing in selected_stems):
+        replaced_existing = False
+        for idx, (existing, existing_score) in enumerate(zip(selected_stems, selected_scores, strict=False)):
+            existing_set = set(existing)
+            candidate_set = set(stats.stem_tokens)
+            if existing_set.issubset(candidate_set) and len(candidate_set) > len(existing_set) and score >= existing_score - 2.5:
+                selected[idx] = _best_display_phrase(stats)
+                selected_stems[idx] = stats.stem_tokens
+                selected_scores[idx] = score
+                replaced_existing = True
+                break
+        if replaced_existing:
             continue
 
-        display = _best_display_phrase(stats)
+        if any(
+            _is_subphrase(stats.stem_tokens, existing) and score <= existing_score + 1.0
+            for existing, existing_score in zip(selected_stems, selected_scores, strict=False)
+        ):
+            continue
+
         selected.append(display)
         selected_stems.append(stats.stem_tokens)
+        selected_scores.append(score)
         if len(selected) >= max_keywords:
             break
     return selected

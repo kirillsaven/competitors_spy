@@ -69,11 +69,13 @@ class ApifyTikTokClient:
         *,
         access_token: str,
         actor_id: str,
+        search_actor_id: str | None = None,
         base_url: str = "https://api.apify.com/v2",
         timeout_s: float = 60.0,
     ) -> None:
         self.access_token = access_token
         self.actor_id = actor_id
+        self.search_actor_id = str(search_actor_id or "").strip()
         self.base_url = base_url.rstrip("/")
         self._client = httpx.Client(timeout=timeout_s, follow_redirects=True)
 
@@ -113,6 +115,31 @@ class ApifyTikTokClient:
 
     def fetch_profile_feed(self, *, handle: str, results_per_page: int) -> list[dict[str, Any]]:
         return self.fetch_profile_feeds(handles=[handle], results_per_profile=results_per_page)
+
+    def search_profiles(self, *, query: str) -> list[dict[str, Any]]:
+        search_query = str(query or "").strip()
+        if not search_query:
+            return []
+        if not self.search_actor_id:
+            raise TikTokApiError("TikTok search actor is not configured")
+        url = f"{self.base_url}/acts/{quote(self.search_actor_id, safe='')}/run-sync-get-dataset-items"
+        response = self._client.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {self.access_token}",
+                "Accept": "application/json",
+            },
+            json={"searchQueries": [search_query]},
+        )
+        try:
+            data = response.json()
+        except Exception as exc:
+            raise TikTokApiError(f"Apify TikTok search API invalid JSON: status={response.status_code}") from exc
+        if response.status_code >= 400:
+            raise TikTokApiError(f"Apify TikTok search API error: status={response.status_code} body={data}")
+        if not isinstance(data, list):
+            raise TikTokApiError(f"Apify TikTok search API returned unexpected payload: {data!r}")
+        return [item for item in data if isinstance(item, dict)]
 
 
 def resolve_seed_input(client: ApifyTikTokClient, raw_input: str) -> SeedResolution | None:

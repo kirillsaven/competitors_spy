@@ -204,6 +204,10 @@ TIKTOK_APIFY_PROFILE_ACTOR_ID = (
     _env("TIKTOK_APIFY_PROFILE_ACTOR_ID", "clockworks/tiktok-profile-scraper")
     or "clockworks/tiktok-profile-scraper"
 )
+TIKTOK_APIFY_SEARCH_ACTOR_ID = (
+    _env("TIKTOK_APIFY_SEARCH_ACTOR_ID", "clockworks/tiktok-user-search-scraper")
+    or "clockworks/tiktok-user-search-scraper"
+)
 TIKTOK_APIFY_RESULTS_PER_PROFILE = _env_int("TIKTOK_APIFY_RESULTS_PER_PROFILE", 10)
 INSTAGRAM_PROVIDER = _env("INSTAGRAM_PROVIDER", "stub") or "stub"
 INSTAGRAM_PROVIDER_BASE_URL = _env("INSTAGRAM_PROVIDER_BASE_URL", "") or ""
@@ -213,6 +217,10 @@ INSTAGRAM_PROVIDER_ACCESS_TOKEN = _env("INSTAGRAM_PROVIDER_ACCESS_TOKEN", "") or
 INSTAGRAM_APIFY_PROFILE_ACTOR_ID = (
     _env("INSTAGRAM_APIFY_PROFILE_ACTOR_ID", "apify/instagram-profile-scraper")
     or "apify/instagram-profile-scraper"
+)
+INSTAGRAM_APIFY_SEARCH_ACTOR_ID = (
+    _env("INSTAGRAM_APIFY_SEARCH_ACTOR_ID", "iron-crawler/instagram-search-users")
+    or "iron-crawler/instagram-search-users"
 )
 
 # Redis / Celery

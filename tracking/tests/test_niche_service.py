@@ -164,7 +164,7 @@ def test_infer_niche_keywords_auto_prefers_phrase_like_teacher_topics(monkeypatc
     keywords, source = niche_service.infer_niche_keywords(seed=seed, competitors=[], prefer_llm=False)
 
     assert source == "auto"
-    assert 1 <= len(keywords) <= 6
+    assert 4 <= len(keywords) <= 8
     assert all(len(keyword.split()) >= 2 for keyword in keywords)
     assert any("английск" in keyword for keyword in keywords)
     assert any("преподав" in keyword or "репетитор" in keyword for keyword in keywords)
@@ -220,8 +220,8 @@ def test_infer_niche_keywords_dedupes_same_stem_phrase_reordering(monkeypatch):
 
     keywords, _ = niche_service.infer_niche_keywords(seed=seed, competitors=[], prefer_llm=False)
 
-    two_word_variants = [keyword for keyword in keywords if set(keyword.split()) == {"space", "news"}]
-    assert len(two_word_variants) == 1
+    assert len([keyword for keyword in keywords if "space" in keyword and "news" in keyword]) == 1
+    assert any("analysis" in keyword for keyword in keywords)
 
 
 def test_infer_niche_keywords_auto_weights_repeated_topics_across_linked_accounts(monkeypatch):
@@ -274,7 +274,66 @@ def test_infer_niche_keywords_auto_weights_repeated_topics_across_linked_account
 
     assert "space news" in keywords
     assert any("mars mission" in keyword for keyword in keywords)
-    assert "mission explainers" in keywords
+    assert any("mission" in keyword and "explain" in keyword for keyword in keywords)
+
+
+def test_infer_niche_keywords_discards_identity_phrase_in_multi_platform_bundle(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: {
+            Platform.YOUTUBE: [
+                "Как начать преподавать взрослым",
+                "Урок английского для преподавателей",
+            ],
+            Platform.TIKTOK: [
+                "Сейчас открыт набор в разговорные группы для преподавателей",
+                "Заметки репетитора и teacher groups",
+            ],
+            Platform.INSTAGRAM: [],
+        }.get(seed.platform, []),
+    )
+    seed = SeedResolution(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-1",
+        handle="dariapancho",
+        url="https://www.instagram.com/dariapancho/",
+        title="Дарья Панчо | онлайн-репетитор | онлайн-школа английского",
+        description="Заметки для преподавателей английского и teacher groups.",
+        uploads_playlist_id=None,
+    )
+    linked_accounts = [
+        SeedResolution(
+            platform=Platform.YOUTUBE,
+            external_id="yt-1",
+            handle="dariapancho",
+            url="https://www.youtube.com/@dariapancho",
+            title="Daria Pancho",
+            description="Онлайн-репетитор по английскому",
+            uploads_playlist_id="UU1",
+        ),
+        SeedResolution(
+            platform=Platform.TIKTOK,
+            external_id="tt-1",
+            handle="dariapancho",
+            url="https://www.tiktok.com/@dariapancho",
+            title="Дарья Панчо | английский",
+            description="Онлайн репетитор и заметки репетитора",
+            uploads_playlist_id=None,
+        ),
+    ]
+
+    keywords, _ = niche_service.infer_niche_keywords(
+        seed=seed,
+        competitors=[],
+        prefer_llm=False,
+        linked_accounts=linked_accounts,
+    )
+
+    assert any("преподав" in keyword for keyword in keywords)
+    assert any("репетитор" in keyword for keyword in keywords)
+    assert any("английск" in keyword for keyword in keywords)
+    assert all("дарья" not in keyword and "панчо" not in keyword for keyword in keywords)
 
 
 def test_build_niche_context_text_includes_multi_platform_bundle(monkeypatch):

@@ -80,3 +80,30 @@ def test_item_to_video_details_maps_apify_fields():
     assert details.likes == 725
     assert details.comments == 10
     assert details.shares == 30
+
+
+def test_search_profiles_uses_search_queries_payload():
+    from tracking.adapters.tiktok import ApifyTikTokClient
+
+    seen: dict[str, object] = {}
+
+    class FakeHttpClient:
+        def post(self, url, headers, json):
+            seen["url"] = url
+            seen["headers"] = headers
+            seen["json"] = json
+            return type("Response", (), {"status_code": 200, "json": staticmethod(lambda: [])})()
+
+        def close(self):
+            return None
+
+    client = ApifyTikTokClient(access_token="token", actor_id="profile-actor", search_actor_id="search-actor")
+    client._client = FakeHttpClient()
+
+    try:
+        client.search_profiles(query="english teacher")
+    finally:
+        client.close()
+
+    assert seen["url"].endswith("/acts/search-actor/run-sync-get-dataset-items")
+    assert seen["json"] == {"searchQueries": ["english teacher"]}
