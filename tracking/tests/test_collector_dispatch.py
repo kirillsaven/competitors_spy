@@ -8,6 +8,7 @@ import pytest
 from tracking.adapters import registry
 from tracking.models import Competitor, ContentItem, MetricSnapshot, Platform
 from tracking.services import collector
+from tracking.services.provider_runtime import ProviderFetchCache
 
 
 def test_registry_returns_registered_handler(monkeypatch):
@@ -38,11 +39,13 @@ def test_refresh_competitor_dispatches_by_platform(monkeypatch):
     competitor = Competitor(platform=Platform.YOUTUBE, external_id="cid")
     captured_at = datetime.now(tz=UTC)
     seen: dict[str, object] = {}
+    provider_fetch_cache = ProviderFetchCache()
 
-    def handler(*, competitor, mode, captured_at):
+    def handler(*, competitor, mode, captured_at, provider_fetch_cache):
         seen["competitor"] = competitor
         seen["mode"] = mode
         seen["captured_at"] = captured_at
+        seen["provider_fetch_cache"] = provider_fetch_cache
         return ["ok"]
 
     monkeypatch.setattr(collector, "get_refresh_competitor_handler", lambda platform: handler)
@@ -51,6 +54,7 @@ def test_refresh_competitor_dispatches_by_platform(monkeypatch):
         competitor=competitor,
         mode="full",
         captured_at=captured_at,
+        provider_fetch_cache=provider_fetch_cache,
     )
 
     assert result == ["ok"]
@@ -58,6 +62,7 @@ def test_refresh_competitor_dispatches_by_platform(monkeypatch):
         "competitor": competitor,
         "mode": "full",
         "captured_at": captured_at,
+        "provider_fetch_cache": provider_fetch_cache,
     }
 
 
@@ -184,6 +189,48 @@ def test_refresh_tiktok_competitor_persists_items_and_shares(db, monkeypatch):
     assert snapshot.likes == 725
     assert snapshot.comments == 10
     assert snapshot.shares == 30
+
+
+def test_refresh_tiktok_competitor_uses_cached_feed_without_provider_call(db, monkeypatch):
+    competitor = Competitor.objects.create(platform=Platform.TIKTOK, external_id="tt-user", handle="apifytech")
+    sample_item = {
+        "id": "7353646097262202145",
+        "text": "Cached TikTok caption",
+        "createTimeISO": "2024-04-03T14:22:40.000Z",
+        "authorMeta": {
+            "id": "7353570794285417504",
+            "name": "apifytech",
+            "nickName": "Apify Tech",
+        },
+        "webVideoUrl": "https://www.tiktok.com/@apifytech/video/7353646097262202145",
+        "videoMeta": {"duration": 59},
+        "diggCount": 725,
+        "shareCount": 30,
+        "playCount": 83900,
+        "commentCount": 10,
+    }
+    cache = ProviderFetchCache()
+    cache.store_tiktok_feed(handle="apifytech", items=[sample_item])
+
+    def fail_tiktok_client():
+        raise AssertionError("provider should not be called")
+
+    monkeypatch.setattr(collector, "_get_tiktok_client", fail_tiktok_client)
+    monkeypatch.setattr(
+        collector,
+        "get_tiktok_apify_config",
+        lambda: SimpleNamespace(provider="apify", access_token="token", actor_id="actor", base_url="url", results_per_profile=10),
+    )
+
+    items = collector.refresh_tiktok_competitor(
+        competitor=competitor,
+        mode="incremental",
+        captured_at=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        provider_fetch_cache=cache,
+    )
+
+    assert len(items) == 1
+    assert ContentItem.objects.filter(platform=Platform.TIKTOK, external_id="7353646097262202145").exists()
 
 
 def test_refresh_tiktok_competitor_truncates_overlong_title_but_keeps_full_description(db, monkeypatch):
@@ -361,6 +408,47 @@ def test_refresh_instagram_competitor_persists_items_and_shares(db, monkeypatch)
     assert snapshot.likes == 930
     assert snapshot.comments == 18
     assert snapshot.shares is None
+
+
+def test_refresh_instagram_competitor_uses_cached_profile_without_provider_call(db, monkeypatch):
+    competitor = Competitor.objects.create(platform=Platform.INSTAGRAM, external_id="ig-user", handle="apifytech")
+    sample_profile = {
+        "id": "7333333333333333333",
+        "username": "apifytech",
+        "fullName": "Apify Tech",
+        "url": "https://www.instagram.com/apifytech/",
+        "latestPosts": [
+            {
+                "id": "3555555555555555555",
+                "type": "Video",
+                "shortCode": "C9abc123xyz",
+                "url": "https://www.instagram.com/reel/C9abc123xyz/",
+                "caption": "Cached Instagram caption",
+                "timestamp": "2024-07-03T10:30:00.000Z",
+                "videoDuration": 31,
+                "videoViewCount": 124000,
+                "likesCount": 930,
+                "commentsCount": 18,
+            }
+        ],
+    }
+    cache = ProviderFetchCache()
+    cache.store_instagram_profile(profile=sample_profile, lookups=["apifytech"])
+
+    def fail_instagram_client():
+        raise AssertionError("provider should not be called")
+
+    monkeypatch.setattr(collector, "_get_instagram_client", fail_instagram_client)
+
+    items = collector.refresh_instagram_competitor(
+        competitor=competitor,
+        mode="incremental",
+        captured_at=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        provider_fetch_cache=cache,
+    )
+
+    assert len(items) == 1
+    assert ContentItem.objects.filter(platform=Platform.INSTAGRAM, external_id="3555555555555555555").exists()
 
 
 def test_refresh_instagram_competitor_truncates_overlong_title_but_keeps_full_description(db, monkeypatch):

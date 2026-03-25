@@ -108,7 +108,12 @@ TikTok Apify setup:
 - Set `TIKTOK_PROVIDER_ACCESS_TOKEN` to your Apify API token
 - Optional: set `TIKTOK_PROVIDER_BASE_URL` (defaults to `https://api.apify.com/v2`)
 - Optional: override `TIKTOK_APIFY_PROFILE_ACTOR_ID` (default `clockworks/tiktok-profile-scraper`)
-- Optional: cap per-profile fetch size with `TIKTOK_APIFY_RESULTS_PER_PROFILE`
+- Optional: cap per-profile fetch size with `TIKTOK_APIFY_RESULTS_PER_PROFILE` (default `10`)
+
+Cross-platform competitor cap:
+
+- Set `MAX_COMPETITORS_PER_PLATFORM` to keep the same per-user cap on YouTube, TikTok, and Instagram
+- Legacy `MAX_COMPETITORS_YOUTUBE` is still honored as a compatibility alias if the new setting is not present
 
 Instagram Apify setup:
 

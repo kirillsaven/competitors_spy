@@ -732,7 +732,7 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
     )
     await state.set_state(SetupStates.PRUNE_COMPETITORS)
 
-    limit = int(getattr(settings, "MAX_COMPETITORS_YOUTUBE", 20))
+    limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
     excluded: set[int] = set()
     competitor_rows = [(i, _candidate_display_name(c)) for i, c in enumerate(candidates)]
     selected_total = len(candidates) - len(excluded)
@@ -812,7 +812,7 @@ async def on_prune_done(cb: CallbackQuery, state: FSMContext) -> None:
         await cb.answer("Нужно оставить хотя бы одного конкурента.", show_alert=True)
         return
 
-    limit = int(getattr(settings, "MAX_COMPETITORS_YOUTUBE", 20))
+    limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
     selected_youtube = sum(
         1 for i in selected_indices if str((candidates[i] or {}).get("platform") or "") == Platform.YOUTUBE
     )
@@ -848,7 +848,7 @@ async def _render_prune(message: Message, state: FSMContext) -> None:
     excluded = set(int(x) for x in (data.get("excluded_candidate_ids") or []))
     page = int(data.get("prune_page") or 0)
 
-    limit = int(getattr(settings, "MAX_COMPETITORS_YOUTUBE", 20))
+    limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
     competitor_rows = [(i, _candidate_display_name(c)) for i, c in enumerate(candidates)]
     selected_total = len(candidates) - len(excluded)
     total_youtube = sum(1 for c in candidates if str(c.get("platform") or "") == Platform.YOUTUBE)

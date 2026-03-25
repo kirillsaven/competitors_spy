@@ -59,7 +59,12 @@ class Command(BaseCommand):
 
         period_end = timezone.now()
         period_start = period_end - timedelta(hours=24)
-        preview = build_report_preview(user=prepared.user, period_start=period_start, period_end=period_end)
+        preview = build_report_preview(
+            user=prepared.user,
+            period_start=period_start,
+            period_end=period_end,
+            provider_fetch_cache=prepared.provider_fetch_cache,
+        )
         try:
             assert_required_platform_sections(preview=preview, required_platforms=prepared.required_platforms)
         except ReportPipelineError as exc:

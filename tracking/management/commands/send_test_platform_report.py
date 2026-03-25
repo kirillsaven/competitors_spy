@@ -59,6 +59,7 @@ class Command(BaseCommand):
                 period_start=period_start,
                 period_end=period_end,
                 required_platforms=prepared.required_platforms,
+                provider_fetch_cache=prepared.provider_fetch_cache,
             )
         except ReportPipelineError as exc:
             raise CommandError(str(exc)) from exc

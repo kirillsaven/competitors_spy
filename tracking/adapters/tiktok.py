@@ -117,6 +117,13 @@ def resolve_seed_input(client: ApifyTikTokClient, raw_input: str) -> SeedResolut
         return None
 
     items = client.fetch_profile_feed(handle=handle, results_per_page=1)
+    return seed_from_feed_items(raw_input=raw_input, items=items)
+
+
+def seed_from_feed_items(*, raw_input: str, items: list[dict[str, Any]]) -> SeedResolution | None:
+    handle = extract_handle(raw_input)
+    if not handle:
+        return None
     if not items:
         return None
 
