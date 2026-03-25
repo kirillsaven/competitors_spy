@@ -7,8 +7,8 @@ Users do NOT log into social networks. Users only provide a profile URL or handl
 MVP scope:
 - YouTube end-to-end (setup -> discovery -> collection -> scoring -> scheduled reporting).
 - YouTube coverage includes both long-form videos and Shorts (anything in channel uploads feed).
-- TikTok + Instagram adapters exist as stubs only (same interface, return empty).
-- Report format always supports 3 networks (Top 5 per network), but only YouTube is populated in MVP.
+- TikTok + Instagram support live Apify-backed collection, scoring, and report sections.
+- YouTube is still the only platform with automatic competitor discovery during setup; TikTok and Instagram competitors are added from explicit links/handles.
 - Bot UI/messages: Russian.
 
 ## Tech stack
@@ -34,8 +34,8 @@ Onboarding in Telegram:
    - schedule: 1 or 2 times per day (prefer presets; manual time as fallback)
 
 Reporting:
-- Send a report for the period (since last run) with TOP 5 YouTube videos that went “viral” relative to each competitor baseline.
-- Report message must include 3 sections: YouTube (filled), TikTok (stub), Instagram (stub).
+- Send a report for the period (since last run) with TOP 5 items per platform that went “viral” relative to each competitor baseline.
+- Report message must include 3 sections: YouTube, TikTok, Instagram.
 
 ## Defaults / limits (env-configurable)
 - BASELINE_N = 30
@@ -71,5 +71,5 @@ Provide README with exact commands to run:
 - docker compose exec web python manage.py createsuperuser
 
 ## Acceptance criteria
-- A user can complete setup and receive a scheduled YouTube report in Telegram.
+- A user can complete setup and receive a scheduled multi-platform report in Telegram.
 - Admin can inspect users, competitors, reports, job runs in Django Admin.

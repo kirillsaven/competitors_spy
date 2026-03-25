@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from tracking.adapters.instagram import build_profile_url, extract_handle, profile_to_video_details, resolve_seed_input
 
 
@@ -95,3 +97,32 @@ def test_resolve_seed_input_builds_profile_url_when_missing():
 
     assert seed is not None
     assert seed.url == build_profile_url("apifytech")
+
+
+def test_fetch_profiles_includes_usernames_for_profile_urls():
+    from tracking.adapters.instagram import ApifyInstagramClient
+
+    seen: dict[str, object] = {}
+
+    class FakeHttpClient:
+        def post(self, url, headers, json):
+            seen["url"] = url
+            seen["headers"] = headers
+            seen["json"] = json
+            return SimpleNamespace(status_code=200, json=lambda: [])
+
+        def close(self):
+            return None
+
+    client = ApifyInstagramClient(access_token="token", actor_id="actor")
+    client._client = FakeHttpClient()
+
+    try:
+        client.fetch_profiles(inputs=["https://www.instagram.com/apifytech/"])
+    finally:
+        client.close()
+
+    assert seen["json"] == {
+        "directUrls": ["https://www.instagram.com/apifytech/"],
+        "usernames": ["apifytech"],
+    }

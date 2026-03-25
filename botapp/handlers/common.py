@@ -34,7 +34,8 @@ async def cmd_start(message: Message) -> None:
 @router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     await message.answer(
-        "MVP поддерживает только YouTube.\n\n"
+        "Сейчас отчеты поддерживают YouTube, TikTok и Instagram.\n"
+        "Автоподбор конкурентов пока есть только для YouTube, а TikTok/Instagram добавляются вручную ссылками или хендлами.\n\n"
         "/setup - настроить нишу, конкурентов и расписание\n"
         "/status - показать конкурентов и следующее время отчета\n"
         "/report - запросить отчет прямо сейчас\n"

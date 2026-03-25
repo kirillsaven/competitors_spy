@@ -29,6 +29,11 @@ def test_registry_returns_registered_instagram_handler():
     assert handler is collector.refresh_instagram_competitor
 
 
+def test_registry_raises_for_unregistered_platform():
+    with pytest.raises(registry.AdapterRegistryError, match="No refresh handler registered for platform: unknown"):
+        registry.get_refresh_competitor_handler("unknown")
+
+
 def test_refresh_competitor_dispatches_by_platform(monkeypatch):
     competitor = Competitor(platform=Platform.YOUTUBE, external_id="cid")
     captured_at = datetime.now(tz=UTC)
