@@ -70,7 +70,7 @@ def get_tiktok_apify_config() -> TikTokApifyConfig:
             getattr(settings, "TIKTOK_APIFY_PROFILE_ACTOR_ID", "clockworks/tiktok-profile-scraper")
             or "clockworks/tiktok-profile-scraper"
         ),
-        results_per_profile=max(1, int(getattr(settings, "TIKTOK_APIFY_RESULTS_PER_PROFILE", 15) or 15)),
+        results_per_profile=max(1, int(getattr(settings, "TIKTOK_APIFY_RESULTS_PER_PROFILE", 10) or 10)),
     )
 
 

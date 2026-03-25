@@ -19,6 +19,7 @@ from tracking.adapters.youtube import (
 )
 from tracking.models import Competitor, ContentItem, MetricSnapshot, Platform
 from tracking.services.provider_config import get_instagram_apify_config, get_tiktok_apify_config
+from tracking.services.provider_runtime import ProviderFetchCache
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +85,7 @@ def refresh_youtube_competitor(
     competitor: Competitor,
     mode: str,
     captured_at: datetime,
+    provider_fetch_cache: ProviderFetchCache | None = None,
 ) -> list[ContentItem]:
     if competitor.platform != Platform.YOUTUBE:
         return []
@@ -182,11 +184,11 @@ def refresh_tiktok_competitor(
     competitor: Competitor,
     mode: str,
     captured_at: datetime,
+    provider_fetch_cache: ProviderFetchCache | None = None,
 ) -> list[ContentItem]:
     if competitor.platform != Platform.TIKTOK:
         return []
 
-    client = _get_tiktok_client()
     config = get_tiktok_apify_config()
     max_results = int(getattr(settings, "YT_RECENT_N_FOR_METRICS", 15))
     if mode == "full":
@@ -204,8 +206,12 @@ def refresh_tiktok_competitor(
     if not handle:
         raise CollectorError(f"TikTok competitor {competitor.id or competitor.external_id} has no resolvable handle")
 
+    items = provider_fetch_cache.get_tiktok_feed(handle=handle) if provider_fetch_cache else None
+    client = None
     try:
-        items = client.fetch_profile_feed(handle=handle, results_per_page=max_results)
+        if items is None:
+            client = _get_tiktok_client()
+            items = client.fetch_profile_feed(handle=handle, results_per_page=max_results)
         if not items:
             raise CollectorError(f"TikTok profile returned no items: handle={handle}")
 
@@ -301,7 +307,8 @@ def refresh_tiktok_competitor(
 
         return updated_items
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 def refresh_instagram_competitor(
@@ -309,11 +316,11 @@ def refresh_instagram_competitor(
     competitor: Competitor,
     mode: str,
     captured_at: datetime,
+    provider_fetch_cache: ProviderFetchCache | None = None,
 ) -> list[ContentItem]:
     if competitor.platform != Platform.INSTAGRAM:
         return []
 
-    client = _get_instagram_client()
     lookup = (competitor.handle or "").strip()
     if not lookup:
         lookup = competitor.url.strip()
@@ -322,8 +329,14 @@ def refresh_instagram_competitor(
     if not lookup:
         raise CollectorError(f"Instagram competitor {competitor.id or competitor.external_id} has no resolvable lookup value")
 
+    cached_profile = provider_fetch_cache.get_instagram_profile(lookup=lookup) if provider_fetch_cache else None
+    client = None
     try:
-        profiles = client.fetch_profiles(inputs=[lookup])
+        if cached_profile is not None:
+            profiles = [cached_profile]
+        else:
+            client = _get_instagram_client()
+            profiles = client.fetch_profiles(inputs=[lookup])
         if not profiles:
             raise CollectorError(f"Instagram profile returned no items: lookup={lookup}")
 
@@ -420,7 +433,8 @@ def refresh_instagram_competitor(
 
         return updated_items
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 def refresh_competitor(
@@ -428,9 +442,15 @@ def refresh_competitor(
     competitor: Competitor,
     mode: str,
     captured_at: datetime,
+    provider_fetch_cache: ProviderFetchCache | None = None,
 ) -> list[ContentItem]:
     handler = get_refresh_competitor_handler(competitor.platform)
-    return handler(competitor=competitor, mode=mode, captured_at=captured_at)
+    return handler(
+        competitor=competitor,
+        mode=mode,
+        captured_at=captured_at,
+        provider_fetch_cache=provider_fetch_cache,
+    )
 
 
 register_refresh_competitor_handler(Platform.YOUTUBE, refresh_youtube_competitor)

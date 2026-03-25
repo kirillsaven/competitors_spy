@@ -129,6 +129,14 @@ def resolve_seed_input(client: ApifyInstagramClient, raw_input: str) -> SeedReso
         return None
 
     profiles = client.fetch_profiles(inputs=[lookup])
+    return seed_from_profiles(raw_input=raw_input, profiles=profiles)
+
+
+def seed_from_profiles(*, raw_input: str, profiles: list[dict[str, Any]]) -> SeedResolution | None:
+    lookup = (raw_input or "").strip()
+    handle = extract_handle(raw_input)
+    if not lookup or (not handle and not lookup.lower().startswith(("http://", "https://"))):
+        return None
     if not profiles:
         return None
 

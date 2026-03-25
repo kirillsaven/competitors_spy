@@ -9,6 +9,7 @@ from django.utils import timezone
 from botapp.telegram_api import send_message
 from tracking.models import Competitor, Platform, Report, ReportStatus, TgUser, UserCompetitor
 from tracking.services.collector import refresh_competitor
+from tracking.services.provider_runtime import ProviderFetchCache
 from tracking.services.reporting import build_report_payload, render_report_text
 from tracking.services.scoring import compute_competitor_baseline, score_items_for_period
 
@@ -32,7 +33,7 @@ class SentReportResult:
 
 
 def get_active_competitors(*, user: TgUser) -> list[Competitor]:
-    max_competitors = int(getattr(settings, "MAX_COMPETITORS_YOUTUBE", 20))
+    max_competitors = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
     competitors: list[Competitor] = []
     for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM):
         links = (
@@ -45,7 +46,13 @@ def get_active_competitors(*, user: TgUser) -> list[Competitor]:
     return competitors
 
 
-def build_report_preview(*, user: TgUser, period_start, period_end) -> ReportPreview:
+def build_report_preview(
+    *,
+    user: TgUser,
+    period_start,
+    period_end,
+    provider_fetch_cache: ProviderFetchCache | None = None,
+) -> ReportPreview:
     competitors = get_active_competitors(user=user)
 
     updated_items = []
@@ -55,6 +62,7 @@ def build_report_preview(*, user: TgUser, period_start, period_end) -> ReportPre
                 competitor=competitor,
                 mode="incremental",
                 captured_at=period_end,
+                provider_fetch_cache=provider_fetch_cache,
             )
         )
 
@@ -92,8 +100,14 @@ def create_and_send_report(
     period_start,
     period_end,
     required_platforms: set[str] | None = None,
+    provider_fetch_cache: ProviderFetchCache | None = None,
 ) -> SentReportResult:
-    preview = build_report_preview(user=user, period_start=period_start, period_end=period_end)
+    preview = build_report_preview(
+        user=user,
+        period_start=period_start,
+        period_end=period_end,
+        provider_fetch_cache=provider_fetch_cache,
+    )
     if required_platforms:
         assert_required_platform_sections(preview=preview, required_platforms=required_platforms)
 

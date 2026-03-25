@@ -59,9 +59,25 @@ def test_provider_config_returns_builtin_for_non_stubbed_platform():
     TIKTOK_PROVIDER_BASE_URL="",
     TIKTOK_PROVIDER_ACCESS_TOKEN="apify-token",
     TIKTOK_APIFY_PROFILE_ACTOR_ID="clockworks/custom-actor",
+)
+def test_tiktok_apify_config_uses_default_fetch_limit():
+    config = get_tiktok_apify_config()
+
+    assert config.provider == "apify"
+    assert config.base_url == "https://api.apify.com/v2"
+    assert config.access_token == "apify-token"
+    assert config.actor_id == "clockworks/custom-actor"
+    assert config.results_per_profile == 10
+
+
+@override_settings(
+    TIKTOK_PROVIDER="apify",
+    TIKTOK_PROVIDER_BASE_URL="",
+    TIKTOK_PROVIDER_ACCESS_TOKEN="apify-token",
+    TIKTOK_APIFY_PROFILE_ACTOR_ID="clockworks/custom-actor",
     TIKTOK_APIFY_RESULTS_PER_PROFILE=25,
 )
-def test_tiktok_apify_config_uses_defaults_and_actor_settings():
+def test_tiktok_apify_config_uses_custom_fetch_limit():
     config = get_tiktok_apify_config()
 
     assert config.provider == "apify"
