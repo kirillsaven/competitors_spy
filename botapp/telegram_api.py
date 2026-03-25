@@ -12,7 +12,7 @@ class TelegramApiError(RuntimeError):
     pass
 
 
-def send_message(*, chat_id: int, text: str, disable_preview: bool = True) -> None:
+def send_message(*, chat_id: int, text: str, disable_preview: bool = True) -> dict:
     token = getattr(settings, "TELEGRAM_BOT_TOKEN", "") or ""
     if not token:
         raise TelegramApiError("TELEGRAM_BOT_TOKEN is not set")
@@ -29,4 +29,8 @@ def send_message(*, chat_id: int, text: str, disable_preview: bool = True) -> No
         raise TelegramApiError(f"Telegram API invalid JSON: status={r.status_code}")
     if r.status_code >= 400 or not data.get("ok"):
         raise TelegramApiError(f"Telegram API error: status={r.status_code} body={data}")
+    result = data.get("result")
+    if not isinstance(result, dict):
+        raise TelegramApiError(f"Telegram API missing result payload: status={r.status_code} body={data}")
+    return result
 
