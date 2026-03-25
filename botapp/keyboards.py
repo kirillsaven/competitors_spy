@@ -68,6 +68,22 @@ def kb_competitors_next() -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
+def kb_link_candidates(*, candidates: list[dict]) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for idx, candidate in enumerate((candidates or [])[:5]):
+        title = (candidate.get("title") or "").strip()
+        handle = (candidate.get("handle") or "").strip()
+        if not title:
+            title = handle or (candidate.get("external_id") or "")
+        text = title
+        if handle:
+            text = f"{title} (@{handle})"
+        b.row(InlineKeyboardButton(text=text[:64], callback_data=f"link_pick:{idx}"))
+    b.row(InlineKeyboardButton(text="Ввести вручную", callback_data="link_manual"))
+    b.row(InlineKeyboardButton(text="Пропустить", callback_data="link_skip"))
+    return b.as_markup()
+
+
 def kb_competitors_next_or_ignore() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.add(InlineKeyboardButton(text="Дальше", callback_data="comp_done"))
