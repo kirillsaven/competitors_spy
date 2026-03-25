@@ -6,7 +6,7 @@ from common.text import extract_keywords
 
 from tracking.adapters.base import SeedResolution
 from tracking.services.llm_gemini import GeminiError, infer_keywords_ru
-from tracking.services.youtube_service import get_recent_video_titles
+from tracking.services.platform_onboarding import get_recent_seed_content_texts
 
 logger = logging.getLogger(__name__)
 
@@ -24,15 +24,9 @@ def build_niche_context_text(*, seed: SeedResolution, competitors: list[SeedReso
     if seed.description:
         lines.append(f"Description: {seed.description}")
 
-    recent: list[str] = []
-    if seed.platform == "youtube":
-        try:
-            recent = get_recent_video_titles(seed, n=10)
-        except Exception as e:
-            logger.warning("Failed to load recent video titles for context: %s", e)
-            recent = []
+    recent = get_recent_seed_content_texts(seed=seed, n=10)
     if recent:
-        lines.append("Recent video titles:")
+        lines.append("Recent content:")
         for t in recent:
             lines.append(f"- {t}")
 
@@ -50,6 +44,19 @@ def build_niche_context_text(*, seed: SeedResolution, competitors: list[SeedReso
                 lines.append(f"Description: {c.description}")
 
     return "\n".join(lines).strip()
+
+
+def build_keyword_source_text(*, seed: SeedResolution, competitors: list[SeedResolution]) -> str:
+    parts: list[str] = []
+    if seed.description:
+        parts.append(seed.description)
+    parts.extend(get_recent_seed_content_texts(seed=seed, n=10))
+
+    for competitor in competitors[:20]:
+        if competitor.description:
+            parts.append(competitor.description)
+
+    return "\n".join(part for part in parts if part).strip()
 
 
 def infer_niche_keywords(
@@ -73,5 +80,5 @@ def infer_niche_keywords(
         except Exception as e:
             logger.exception("Unexpected LLM niche inference error: %s", e)
 
-    kws = extract_keywords(context, max_keywords=8)
+    kws = extract_keywords(build_keyword_source_text(seed=seed, competitors=competitors), max_keywords=8)
     return kws, "auto"
