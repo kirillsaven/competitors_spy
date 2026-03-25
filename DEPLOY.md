@@ -132,3 +132,46 @@ bash scripts/prod-health.sh
 - Internal app port: `web:8000` on the Docker network only
 - Current scope: plain HTTP only
 - Missing piece for HTTPS: an explicit TLS termination plan such as host-level Nginx/Caddy or manually managed certificates
+
+## First deployment record
+Date: `2026-03-25`
+
+Target host: `YOUR_SERVER_IP`
+
+Deployed ref:
+- `origin/main`
+- resolved on server to commit `8d5c1c79b6c7f06842c87e361896a3e53cf92b8c`
+
+Exact commands run:
+
+```bash
+ssh deploy@YOUR_SERVER_IP "docker stop PRIVATE_CONTAINER_PLACEHOLDER"
+ssh deploy@YOUR_SERVER_IP "cd YOUR_APP_DIR && bash scripts/prod-update.sh origin/main"
+ssh deploy@YOUR_SERVER_IP "cd YOUR_APP_DIR && bash scripts/prod-health.sh"
+ssh deploy@YOUR_SERVER_IP "cd YOUR_APP_DIR && docker compose -f docker-compose.prod.yml exec web python manage.py migrate --check"
+ssh deploy@YOUR_SERVER_IP "cd YOUR_APP_DIR && docker compose -f docker-compose.prod.yml exec web python manage.py send_test_platform_report --tg-user-id YOUR_TELEGRAM_USER_ID --tg-chat-id YOUR_TELEGRAM_USER_ID --tiktok nba --instagram nasa"
+```
+
+Observed results:
+- Containers started successfully for `db`, `redis`, `web`, `proxy`, `bot`, `worker`, and `beat`
+- Proxy health endpoint returned `{"status": "ok"}` from `http://YOUR_SERVER_IP/healthz/`
+- `python manage.py migrate --check` succeeded, so no unapplied migrations remained after deploy
+- Live Telegram smoke send succeeded with real provider data:
+  - TikTok section count: `5`
+  - Instagram section count: `3`
+  - Telegram `message_id`: `251`
+
+Final container status:
+- `competitors_spy-db-1`: healthy
+- `competitors_spy-redis-1`: healthy
+- `competitors_spy-web-1`: healthy
+- `competitors_spy-proxy-1`: healthy, bound to `0.0.0.0:80->80/tcp`
+- `competitors_spy-bot-1`: running
+- `competitors_spy-worker-1`: running
+- `competitors_spy-beat-1`: running
+
+Remaining operational gaps:
+- Port `80` was occupied by unrelated container `PRIVATE_CONTAINER_PLACEHOLDER` before the first deploy. That conflict must stay resolved for future deploys.
+- `bash scripts/prod-health.sh` still exits non-zero on this plain-HTTP baseline because `python manage.py check --deploy --fail-level WARNING` reports hardening warnings for missing TLS and secure-cookie settings.
+- The current deployment is HTTP-only. HTTPS termination and the related secure Django settings are still pending.
+- `DJANGO_SECRET_KEY` should be rotated to a strong production-only value before broader public exposure.
