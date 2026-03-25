@@ -18,6 +18,7 @@ from botapp.db import db_call, db_run
 from botapp.keyboards import (
     kb_competitors_next,
     kb_competitors_next_or_ignore,
+    kb_link_candidates,
     kb_prune_competitors,
     kb_prune_keywords,
     kb_reports_per_day,
@@ -38,12 +39,28 @@ from common.time import (
     parse_hhmm,
 )
 from tracking.adapters.base import SeedResolution
-from tracking.models import AddedBy, Competitor, Platform, Schedule, SeedProfile, SeedStatus, TgUser, TzSource, UserCompetitor
+from tracking.models import (
+    AddedBy,
+    LinkedAccountSource,
+    Platform,
+    Schedule,
+    SeedProfile,
+    SeedStatus,
+    TgUser,
+    TzSource,
+    UserCompetitor,
+)
+from tracking.services.account_linking import replace_user_linked_accounts, suggest_accounts_for_platform
 from tracking.services.competitor_service import upsert_competitor
 from tracking.services.llm_usage import decide_and_consume_llm_call
 from tracking.services.niche_service import infer_niche_keywords
 from tracking.services.platform_onboarding import PlatformOnboardingError, discover_competitors_for_onboarding
-from tracking.services.seed_resolver import SeedResolveError, can_search_youtube_seed_candidates, resolve_exact_seed
+from tracking.services.seed_resolver import (
+    SeedResolveError,
+    can_search_youtube_seed_candidates,
+    resolve_exact_seed,
+    resolve_seed_for_platform,
+)
 from tracking.services.youtube_service import search_youtube_seed_candidates
 from tracking.tasks import run_user_report_now
 
@@ -83,6 +100,14 @@ def _seed_from_dict(data: dict) -> SeedResolution:
         description=data.get("description"),
         uploads_playlist_id=data.get("uploads_playlist_id"),
     )
+
+
+def _platform_label(platform: str | None) -> str:
+    return {
+        Platform.YOUTUBE: "YouTube",
+        Platform.TIKTOK: "TikTok",
+        Platform.INSTAGRAM: "Instagram",
+    }.get(str(platform or ""), str(platform or "Platform"))
 
 
 def _parse_keywords(text: str) -> list[str]:
@@ -131,13 +156,98 @@ def _detect_platform_from_url(raw: str) -> str | None:
     return None
 
 
+def _linked_account_to_dict(
+    seed: SeedResolution,
+    *,
+    source: str,
+    signals: list[str] | None = None,
+    is_seed: bool = False,
+) -> dict:
+    data = _seed_to_dict(seed)
+    data["source"] = source
+    data["signals"] = list(signals or [])
+    data["is_seed"] = is_seed
+    return data
+
+
+def _format_match_signal(signal: str) -> str:
+    raw = str(signal or "").strip()
+    if raw == "exact_handle":
+        return "совпал хендл"
+    if raw == "exact_display_name":
+        return "совпало название профиля"
+    if raw.startswith("shared_name_tokens:"):
+        tokens = [token for token in raw.split(":", 1)[1].split(",") if token]
+        if tokens:
+            return "совпали слова в названии: " + ", ".join(tokens[:3])
+    if raw == "seed_exact_resolve":
+        return "исходный профиль подтвержден точно"
+    if raw == "manual_input":
+        return "подтверждено вручную"
+    return raw
+
+
+def _build_link_prompt(*, platform: str, candidates: list[dict], note: str | None) -> str:
+    label = _platform_label(platform)
+    lines = [f"Проверяю, есть ли у тебя {label}.", "Я не связываю аккаунты автоматически без подтверждения."]
+    if candidates:
+        lines.append("")
+        for idx, candidate in enumerate(candidates, start=1):
+            title = str(candidate.get("title") or candidate.get("handle") or candidate.get("external_id") or "Без названия")
+            handle = str(candidate.get("handle") or "").strip()
+            url = str(candidate.get("url") or "").strip()
+            signals = [_format_match_signal(item) for item in (candidate.get("signals") or []) if str(item).strip()]
+            line = f"{idx}. {title}"
+            if handle:
+                line += f" (@{handle})"
+            lines.append(line)
+            if url:
+                lines.append(url)
+            if signals:
+                lines.append("Сигналы: " + "; ".join(signals) + ".")
+            lines.append("")
+        lines.append(f"Это ваш {label}? Выбери вариант ниже. Если это не тот аккаунт, введи {label} вручную или пропусти.")
+        return "\n".join(lines)
+
+    lines.append("")
+    if note:
+        lines.append(f"Автопоиск не дал подтвержденного совпадения.\nПричина: {note}")
+    else:
+        lines.append("Автопоиск не дал подтвержденного совпадения.")
+    lines.append(f"Пришли ссылку или хендл {label} вручную, либо нажми «Пропустить».")
+    return "\n".join(lines)
+
+
+def _manual_link_prompt(platform: str) -> str:
+    label = _platform_label(platform)
+    examples = {
+        Platform.YOUTUBE: "https://www.youtube.com/@creator или @creator",
+        Platform.TIKTOK: "https://www.tiktok.com/@creator или @creator",
+        Platform.INSTAGRAM: "https://www.instagram.com/creator/ или creator",
+    }
+    return f"Пришли ссылку или хендл для {label}.\nНапример: {examples.get(platform, '@creator')}"
+
+
+def _build_linked_accounts_summary(*, linked_accounts: dict[str, dict], skipped_platforms: list[str]) -> str:
+    lines = ["Подтвердил профили для дальнейшего анализа:"]
+    for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM):
+        account = linked_accounts.get(platform) if isinstance(linked_accounts, dict) else None
+        if account:
+            title = str(account.get("title") or account.get("handle") or account.get("external_id") or "Без названия")
+            handle = str(account.get("handle") or "").strip()
+            suffix = f" (@{handle})" if handle else ""
+            lines.append(f"{_platform_label(platform)}: {title}{suffix}")
+            continue
+        if platform in skipped_platforms:
+            lines.append(f"{_platform_label(platform)}: не подтвержден")
+        else:
+            lines.append(f"{_platform_label(platform)}: не задан")
+    return "\n".join(lines)
+
+
 def _candidate_display_name(c: dict) -> str:
     platform = str(c.get("platform") or "").strip()
-    platform_label = {
-        Platform.YOUTUBE: "YouTube",
-        Platform.TIKTOK: "TikTok",
-        Platform.INSTAGRAM: "Instagram",
-    }.get(platform, platform or "Platform")
+    platform_label = _platform_label(platform)
     name = (c.get("display_name") or c.get("handle") or c.get("external_id") or "").strip() or "Без названия"
     return f"[{platform_label}] {name}"
 
@@ -183,6 +293,96 @@ def _build_keywords_edit_text(*, keywords: list[str], excluded: set[str]) -> str
 async def _ask_seed(message: Message, state: FSMContext) -> None:
     await state.set_state(SetupStates.WAIT_SEED_INPUT)
     await message.answer("Пришли ссылку или хендл/никнейм профиля.")
+
+
+async def _persist_linked_accounts(state: FSMContext) -> None:
+    data = await state.get_data()
+    user = await db_call(TgUser.objects.get, id=data["user_id"])
+    linked_accounts = data.get("linked_accounts") or {}
+    await db_run(lambda: replace_user_linked_accounts(user=user, accounts_by_platform=linked_accounts))
+
+
+async def _ask_next_linked_account(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    queue = [str(item) for item in (data.get("link_platform_queue") or []) if str(item).strip()]
+    seed_dict = data.get("seed") or None
+    seed = _seed_from_dict(seed_dict) if isinstance(seed_dict, dict) else None
+    if seed is None:
+        await message.answer("Потерял подтвержденный исходный профиль. Запусти /setup еще раз.")
+        return
+
+    if not queue:
+        await _persist_linked_accounts(state)
+        linked_accounts = data.get("linked_accounts") or {}
+        skipped_platforms = [str(item) for item in (data.get("skipped_link_platforms") or []) if str(item).strip()]
+        await message.answer(_build_linked_accounts_summary(linked_accounts=linked_accounts, skipped_platforms=skipped_platforms))
+        await _enter_competitor_step(
+            message,
+            state,
+            seed_profile_id=int(data.get("seed_profile_id") or 0),
+            seed=seed,
+        )
+        return
+
+    platform = queue[0]
+    suggestions_by_platform = dict(data.get("link_suggestions") or {})
+    suggestion = suggestions_by_platform.get(platform)
+    if not isinstance(suggestion, dict):
+        result = await asyncio.to_thread(
+            suggest_accounts_for_platform,
+            seed=seed,
+            target_platform=platform,
+            max_candidates=3,
+        )
+        suggestion = {
+            "candidates": [
+                _linked_account_to_dict(candidate.seed, source=LinkedAccountSource.AUTO, signals=candidate.signals)
+                for candidate in result.candidates
+            ],
+            "note": result.note,
+        }
+        suggestions_by_platform[platform] = suggestion
+        await state.update_data(link_suggestions=suggestions_by_platform)
+
+    await state.update_data(current_link_platform=platform)
+    await state.set_state(SetupStates.PICK_LINKED_ACCOUNT)
+    await message.answer(
+        _build_link_prompt(
+            platform=platform,
+            candidates=list(suggestion.get("candidates") or []),
+            note=str(suggestion.get("note") or "").strip() or None,
+        ),
+        reply_markup=kb_link_candidates(candidates=list(suggestion.get("candidates") or [])),
+    )
+
+
+async def _begin_account_linking(
+    message: Message,
+    state: FSMContext,
+    *,
+    seed_profile_id: int,
+    seed: SeedResolution,
+) -> None:
+    linked_accounts = {
+        seed.platform: _linked_account_to_dict(
+            seed,
+            source=LinkedAccountSource.SEED,
+            signals=["seed_exact_resolve"],
+            is_seed=True,
+        )
+    }
+    queue = [platform for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM) if platform != seed.platform]
+    await state.update_data(
+        seed_profile_id=seed_profile_id,
+        seed=_seed_to_dict(seed),
+        linked_accounts=linked_accounts,
+        link_platform_queue=queue,
+        link_suggestions={},
+        skipped_link_platforms=[],
+        competitor_seeds=[],
+    )
+    await message.answer("Подтверждаю аккаунты на остальных платформах, чтобы связать их в один набор.")
+    await _ask_next_linked_account(message, state)
 
 
 async def _enter_competitor_step(
@@ -284,7 +484,7 @@ async def on_seed_input(message: Message, state: FSMContext) -> None:
                 status=SeedStatus.RESOLVED,
             )
         )
-        await _enter_competitor_step(message, state, seed_profile_id=sp.id, seed=seed)
+        await _begin_account_linking(message, state, seed_profile_id=sp.id, seed=seed)
         return
 
     if not can_search_youtube_seed_candidates(raw):
@@ -357,7 +557,108 @@ async def on_seed_pick(cb: CallbackQuery, state: FSMContext) -> None:
             )
         )
 
-    await _enter_competitor_step(cb.message, state, seed_profile_id=sp_id, seed=seed)
+    await _begin_account_linking(cb.message, state, seed_profile_id=sp_id, seed=seed)
+
+
+@router.callback_query(SetupStates.PICK_LINKED_ACCOUNT, F.data.startswith("link_pick:"))
+async def on_link_pick(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    if not cb.message:
+        return
+    data = await state.get_data()
+    platform = str(data.get("current_link_platform") or "")
+    if not platform:
+        await cb.message.answer("Не понял, для какой платформы подтверждать профиль. Пришли /setup еще раз.")
+        return
+    try:
+        idx = int(str(cb.data).split(":", 1)[1])
+    except Exception:
+        idx = -1
+
+    suggestions = data.get("link_suggestions") or {}
+    suggestion = suggestions.get(platform) if isinstance(suggestions, dict) else None
+    candidates = list((suggestion or {}).get("candidates") or [])
+    if not (0 <= idx < len(candidates)):
+        await cb.message.answer("Не понял выбор. Выбери вариант ниже или введи профиль вручную.")
+        return
+
+    linked_accounts = dict(data.get("linked_accounts") or {})
+    linked_accounts[platform] = candidates[idx]
+    queue = [item for item in (data.get("link_platform_queue") or []) if str(item) != platform]
+    await state.update_data(linked_accounts=linked_accounts, link_platform_queue=queue, current_link_platform=None)
+    await _ask_next_linked_account(cb.message, state)
+
+
+@router.callback_query(SetupStates.PICK_LINKED_ACCOUNT, F.data == "link_manual")
+async def on_link_manual(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    if not cb.message:
+        return
+    data = await state.get_data()
+    platform = str(data.get("current_link_platform") or "")
+    if not platform:
+        await cb.message.answer("Не понял, для какой платформы нужен ручной ввод. Пришли /setup еще раз.")
+        return
+    await state.set_state(SetupStates.WAIT_LINKED_ACCOUNT_MANUAL)
+    await cb.message.answer(_manual_link_prompt(platform))
+
+
+@router.callback_query(SetupStates.PICK_LINKED_ACCOUNT, F.data == "link_skip")
+async def on_link_skip(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    if not cb.message:
+        return
+    data = await state.get_data()
+    platform = str(data.get("current_link_platform") or "")
+    if not platform:
+        await cb.message.answer("Не понял, какую платформу пропустить. Пришли /setup еще раз.")
+        return
+    queue = [item for item in (data.get("link_platform_queue") or []) if str(item) != platform]
+    skipped = [str(item) for item in (data.get("skipped_link_platforms") or []) if str(item).strip()]
+    if platform not in skipped:
+        skipped.append(platform)
+    await state.update_data(link_platform_queue=queue, skipped_link_platforms=skipped, current_link_platform=None)
+    await _ask_next_linked_account(cb.message, state)
+
+
+@router.message(SetupStates.WAIT_LINKED_ACCOUNT_MANUAL)
+async def on_link_manual_input(message: Message, state: FSMContext) -> None:
+    raw = (message.text or "").strip()
+    if not raw:
+        await message.answer("Пришли ссылку или хендл/никнейм.")
+        return
+    data = await state.get_data()
+    platform = str(data.get("current_link_platform") or "")
+    if not platform:
+        await message.answer("Не понял, для какой платформы подтверждать профиль. Пришли /setup еще раз.")
+        return
+
+    try:
+        seed = await asyncio.to_thread(resolve_seed_for_platform, platform=platform, raw_input=raw)
+    except SeedResolveError as exc:
+        await message.answer(f"Не получилось подтвердить {_platform_label(platform)}.\nПричина: {exc}")
+        return
+    except Exception as exc:
+        logger.warning("Manual linked account resolve failed: %s", exc)
+        await message.answer(f"Не получилось подтвердить {_platform_label(platform)}.\nПричина: {exc}")
+        return
+
+    if not seed:
+        await message.answer(
+            f"Не получилось подтвердить {_platform_label(platform)} по этому вводу.\n"
+            "Пришли точную ссылку на профиль или корректный хендл."
+        )
+        return
+
+    linked_accounts = dict(data.get("linked_accounts") or {})
+    linked_accounts[platform] = _linked_account_to_dict(
+        seed,
+        source=LinkedAccountSource.MANUAL,
+        signals=["manual_input"],
+    )
+    queue = [item for item in (data.get("link_platform_queue") or []) if str(item) != platform]
+    await state.update_data(linked_accounts=linked_accounts, link_platform_queue=queue, current_link_platform=None)
+    await _ask_next_linked_account(message, state)
 
 
 @router.callback_query(SetupStates.WAIT_COMPETITOR_LIST, F.data.in_(["comp_done", "comp_clear"]))

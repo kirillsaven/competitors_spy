@@ -33,6 +33,12 @@ class AddedBy(models.TextChoices):
     AUTO = "auto", "Auto"
 
 
+class LinkedAccountSource(models.TextChoices):
+    SEED = "seed", "Seed"
+    AUTO = "auto", "Auto"
+    MANUAL = "manual", "Manual"
+
+
 class JobStatus(models.TextChoices):
     RUNNING = "running", "Running"
     SUCCESS = "success", "Success"
@@ -119,6 +125,29 @@ class UserCompetitor(models.Model):
 
     def __str__(self) -> str:
         return f"UserCompetitor({self.user_id}, {self.competitor_id}, active={self.is_active})"
+
+
+class UserLinkedAccount(models.Model):
+    user = models.ForeignKey(TgUser, on_delete=models.CASCADE, related_name="linked_accounts")
+    platform = models.CharField(max_length=16, choices=Platform.choices)
+    external_id = models.CharField(max_length=128)
+    handle = models.CharField(max_length=128, blank=True, default="")
+    url = models.URLField(blank=True, default="")
+    display_name = models.CharField(max_length=255, blank=True, default="")
+    source = models.CharField(max_length=16, choices=LinkedAccountSource.choices, default=LinkedAccountSource.MANUAL)
+    is_seed = models.BooleanField(default=False)
+    match_signals = models.JSONField(default=list, blank=True)
+    meta = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(fields=["user", "platform"], name="uniq_user_linked_platform"),
+        ]
+
+    def __str__(self) -> str:
+        return f"UserLinkedAccount({self.user_id}, {self.platform}, seed={self.is_seed})"
 
 
 class ContentItem(models.Model):

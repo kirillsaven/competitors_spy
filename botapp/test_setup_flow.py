@@ -7,7 +7,9 @@ from asgiref.sync import async_to_sync, sync_to_async
 
 from botapp.handlers import setup
 from botapp.state import SetupStates
+from tracking.adapters.base import SeedResolution
 from tracking.models import SeedProfile, SeedStatus, TgUser
+from tracking.services.account_linking import LinkedAccountSuggestion
 
 
 class DummyState:
@@ -150,3 +152,99 @@ def test_start_keywords_step_uses_tiktok_seed_without_manual_prompt(monkeypatch)
     assert state.state == SetupStates.EDIT_NICHE
     assert state.data["niche_keywords"] == ["basketball", "highlights"]
     assert all("Пришли ключевые слова" not in text for text in message.answers)
+
+
+def test_begin_account_linking_prompts_confirmation(monkeypatch):
+    state = DummyState({"user_id": 1})
+    message = DummyMessage()
+    seed = SeedResolution(
+        platform="youtube",
+        external_id="yt-1",
+        handle="creator",
+        url="https://www.youtube.com/@creator",
+        title="Creator",
+        description="Creator channel",
+        uploads_playlist_id="UU123",
+    )
+
+    monkeypatch.setattr(
+        setup,
+        "suggest_accounts_for_platform",
+        lambda **kwargs: LinkedAccountSuggestion(
+            platform="tiktok",
+            candidates=[
+                SimpleNamespace(
+                    seed=SeedResolution(
+                        platform="tiktok",
+                        external_id="tt-1",
+                        handle="creator",
+                        url="https://www.tiktok.com/@creator",
+                        title="Creator",
+                        description="Creator profile",
+                        uploads_playlist_id=None,
+                    ),
+                    signals=["exact_handle"],
+                    score=100,
+                )
+            ],
+            note=None,
+        ),
+    )
+
+    async_to_sync(setup._begin_account_linking)(message, state, seed_profile_id=11, seed=seed)
+
+    assert state.state == SetupStates.PICK_LINKED_ACCOUNT
+    assert state.data["current_link_platform"] == "tiktok"
+    assert "Это ваш" in message.answers[-1]
+    assert "TikTok" in message.answers[-1]
+
+
+def test_manual_link_input_updates_linked_accounts(monkeypatch):
+    state = DummyState(
+        {
+            "user_id": 1,
+            "current_link_platform": "instagram",
+            "link_platform_queue": ["instagram"],
+            "linked_accounts": {
+                "youtube": {
+                    "platform": "youtube",
+                    "external_id": "yt-1",
+                    "handle": "creator",
+                    "url": "https://www.youtube.com/@creator",
+                    "title": "Creator",
+                    "source": "seed",
+                    "signals": ["seed_exact_resolve"],
+                    "is_seed": True,
+                }
+            },
+        }
+    )
+    message = DummyMessage()
+    message.text = "https://www.instagram.com/creator/"
+
+    monkeypatch.setattr(
+        setup,
+        "resolve_seed_for_platform",
+        lambda **kwargs: SeedResolution(
+            platform="instagram",
+            external_id="ig-1",
+            handle="creator",
+            url="https://www.instagram.com/creator/",
+            title="Creator",
+            description="Creator profile",
+            uploads_playlist_id=None,
+        ),
+    )
+    called = {}
+
+    async def fake_ask_next_linked_account(message, state):
+        called["called"] = True
+
+    monkeypatch.setattr(setup, "_ask_next_linked_account", fake_ask_next_linked_account)
+
+    async_to_sync(setup.on_link_manual_input)(message, state)
+
+    assert called == {"called": True}
+    assert state.data["link_platform_queue"] == []
+    assert state.data["linked_accounts"]["instagram"]["external_id"] == "ig-1"
+    assert state.data["linked_accounts"]["instagram"]["signals"] == ["manual_input"]
