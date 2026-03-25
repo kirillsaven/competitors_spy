@@ -615,10 +615,12 @@ def _best_display_phrase(stats: _CandidateStats) -> str:
 def _is_subphrase(candidate_stems: tuple[str, ...], existing_stems: tuple[str, ...]) -> bool:
     if candidate_stems == existing_stems:
         return True
-    if len(candidate_stems) >= len(existing_stems):
-        return False
     candidate_set = set(candidate_stems)
     existing_set = set(existing_stems)
+    if candidate_set == existing_set:
+        return True
+    if len(candidate_stems) >= len(existing_stems):
+        return False
     return candidate_set.issubset(existing_set)
 
 

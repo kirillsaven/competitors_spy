@@ -172,6 +172,58 @@ def test_infer_niche_keywords_auto_prefers_phrase_like_teacher_topics(monkeypatc
         assert all(banned not in keyword for keyword in keywords)
 
 
+def test_infer_niche_keywords_keeps_topical_handle_words_when_supported_by_content(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: [
+            "English teacher lesson plans",
+            "Teacher notes for english lessons",
+            "English tutor worksheets",
+        ],
+    )
+    seed = SeedResolution(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-1",
+        handle="english_teacher",
+        url="https://www.instagram.com/english_teacher/",
+        title="English Teacher",
+        description="English teacher notes and lesson plans",
+        uploads_playlist_id=None,
+    )
+
+    keywords, _ = niche_service.infer_niche_keywords(seed=seed, competitors=[], prefer_llm=False)
+
+    assert any("english" in keyword for keyword in keywords)
+    assert any("teacher" in keyword or "lesson" in keyword for keyword in keywords)
+
+
+def test_infer_niche_keywords_dedupes_same_stem_phrase_reordering(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: [
+            "space news",
+            "news space",
+            "space news analysis",
+        ],
+    )
+    seed = SeedResolution(
+        platform=Platform.YOUTUBE,
+        external_id="yt-1",
+        handle="space-news",
+        url="https://www.youtube.com/@space-news",
+        title="Space News",
+        description="Space news and analysis",
+        uploads_playlist_id="UU1",
+    )
+
+    keywords, _ = niche_service.infer_niche_keywords(seed=seed, competitors=[], prefer_llm=False)
+
+    two_word_variants = [keyword for keyword in keywords if set(keyword.split()) == {"space", "news"}]
+    assert len(two_word_variants) == 1
+
+
 def test_infer_niche_keywords_auto_weights_repeated_topics_across_linked_accounts(monkeypatch):
     monkeypatch.setattr(
         niche_service,

@@ -181,7 +181,7 @@ def build_keyword_blocked_terms(
     for account in _ordered_accounts(seed=seed, linked_accounts=linked_accounts):
         for token in re.findall(r"[0-9a-zа-яё]+", str(account.handle or ""), flags=re.IGNORECASE):
             norm = token.strip().lower().replace("ё", "е")
-            if len(norm) >= 3:
+            if len(norm) >= 3 and norm not in supporting_tokens:
                 blocked.add(norm)
 
         title_tokens = [
