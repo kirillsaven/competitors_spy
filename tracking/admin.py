@@ -12,6 +12,7 @@ from .models import (
     Schedule,
     SeedProfile,
     TgUser,
+    UserLinkedAccount,
     UserCompetitor,
 )
 
@@ -47,6 +48,13 @@ class UserCompetitorAdmin(admin.ModelAdmin):
     @admin.display(description="Platform")
     def platform(self, obj: UserCompetitor) -> str:
         return obj.competitor.platform
+
+
+@admin.register(UserLinkedAccount)
+class UserLinkedAccountAdmin(admin.ModelAdmin):
+    list_display = ("id", "user", "platform", "external_id", "handle", "display_name", "source", "is_seed")
+    search_fields = ("user__tg_user_id", "external_id", "handle", "display_name", "url")
+    list_filter = ("platform", "source", "is_seed")
 
 
 @admin.register(ContentItem)

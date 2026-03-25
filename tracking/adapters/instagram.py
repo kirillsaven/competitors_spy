@@ -132,20 +132,11 @@ def resolve_seed_input(client: ApifyInstagramClient, raw_input: str) -> SeedReso
     return seed_from_profiles(raw_input=raw_input, profiles=profiles)
 
 
-def seed_from_profiles(*, raw_input: str, profiles: list[dict[str, Any]]) -> SeedResolution | None:
-    lookup = (raw_input or "").strip()
-    handle = extract_handle(raw_input)
-    if not lookup or (not handle and not lookup.lower().startswith(("http://", "https://"))):
-        return None
-    if not profiles:
-        return None
-
-    profile = profiles[0]
+def seed_from_profile(profile: dict[str, Any]) -> SeedResolution | None:
     username = str(profile.get("username") or "").strip()
     profile_id = str(profile.get("id") or "").strip()
     if not username or not profile_id:
         return None
-
     return SeedResolution(
         platform="instagram",
         external_id=profile_id,
@@ -155,6 +146,17 @@ def seed_from_profiles(*, raw_input: str, profiles: list[dict[str, Any]]) -> See
         description=profile.get("biography"),
         uploads_playlist_id=None,
     )
+
+
+def seed_from_profiles(*, raw_input: str, profiles: list[dict[str, Any]]) -> SeedResolution | None:
+    lookup = (raw_input or "").strip()
+    handle = extract_handle(raw_input)
+    if not lookup or (not handle and not lookup.lower().startswith(("http://", "https://"))):
+        return None
+    if not profiles:
+        return None
+
+    return seed_from_profile(profiles[0])
 
 
 def profile_to_video_details(profile: dict[str, Any]) -> list[VideoDetails]:

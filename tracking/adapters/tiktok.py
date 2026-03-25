@@ -80,13 +80,14 @@ class ApifyTikTokClient:
     def close(self) -> None:
         self._client.close()
 
-    def fetch_profile_feed(self, *, handle: str, results_per_page: int) -> list[dict[str, Any]]:
-        if not handle:
+    def fetch_profile_feeds(self, *, handles: list[str], results_per_profile: int) -> list[dict[str, Any]]:
+        sanitized_handles = [handle.strip() for handle in handles if handle and handle.strip()]
+        if not sanitized_handles:
             return []
         url = f"{self.base_url}/acts/{quote(self.actor_id, safe='')}/run-sync-get-dataset-items"
         payload = {
-            "profiles": [handle],
-            "resultsPerPage": max(1, int(results_per_page)),
+            "profiles": sanitized_handles,
+            "resultsPerPage": max(1, int(results_per_profile)),
             "shouldDownloadCovers": False,
             "shouldDownloadSlideshowImages": False,
             "shouldDownloadSubtitles": False,
@@ -110,6 +111,9 @@ class ApifyTikTokClient:
             raise TikTokApiError(f"Apify TikTok API returned unexpected payload: {data!r}")
         return [item for item in data if isinstance(item, dict)]
 
+    def fetch_profile_feed(self, *, handle: str, results_per_page: int) -> list[dict[str, Any]]:
+        return self.fetch_profile_feeds(handles=[handle], results_per_profile=results_per_page)
+
 
 def resolve_seed_input(client: ApifyTikTokClient, raw_input: str) -> SeedResolution | None:
     handle = extract_handle(raw_input)
@@ -120,14 +124,8 @@ def resolve_seed_input(client: ApifyTikTokClient, raw_input: str) -> SeedResolut
     return seed_from_feed_items(raw_input=raw_input, items=items)
 
 
-def seed_from_feed_items(*, raw_input: str, items: list[dict[str, Any]]) -> SeedResolution | None:
-    handle = extract_handle(raw_input)
-    if not handle:
-        return None
-    if not items:
-        return None
-
-    author_meta = items[0].get("authorMeta") or {}
+def seed_from_item(item: dict[str, Any]) -> SeedResolution | None:
+    author_meta = item.get("authorMeta") or {}
     author_handle = str(author_meta.get("name") or "").strip()
     author_id = str(author_meta.get("id") or "").strip()
     if not author_handle or not author_id:
@@ -141,6 +139,19 @@ def seed_from_feed_items(*, raw_input: str, items: list[dict[str, Any]]) -> Seed
         description=author_meta.get("signature"),
         uploads_playlist_id=None,
     )
+
+
+def seed_from_feed_items(*, raw_input: str, items: list[dict[str, Any]]) -> SeedResolution | None:
+    handle = extract_handle(raw_input)
+    if not handle:
+        return None
+    if not items:
+        return None
+
+    resolved = seed_from_item(items[0])
+    if resolved is None:
+        return None
+    return resolved
 
 
 def item_to_video_details(item: dict[str, Any]) -> VideoDetails:
