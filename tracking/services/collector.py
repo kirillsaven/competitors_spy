@@ -27,6 +27,17 @@ class CollectorError(RuntimeError):
     pass
 
 
+def _normalize_content_text_fields(*, title: str | None, description: str | None) -> tuple[str, str]:
+    title_text = str(title or "")
+    description_text = str(description or "")
+    title_limit = int(ContentItem._meta.get_field("title").max_length or 500)
+    if len(title_text) <= title_limit:
+        return title_text, description_text
+    if not description_text:
+        description_text = title_text
+    return title_text[:title_limit], description_text
+
+
 def _get_youtube_client() -> YouTubeClient:
     api_key = getattr(settings, "YOUTUBE_API_KEY", "") or ""
     if not api_key:
@@ -113,14 +124,15 @@ def refresh_youtube_competitor(
         with transaction.atomic():
             for v in details:
                 content_type = "short" if v.duration_seconds is not None and v.duration_seconds <= 60 else "video"
+                title_text, description_text = _normalize_content_text_fields(title=v.title, description=v.description)
                 obj, created = ContentItem.objects.get_or_create(
                     platform=Platform.YOUTUBE,
                     external_id=v.video_id,
                     defaults={
                         "competitor": competitor,
                         "url": v.url,
-                        "title": v.title,
-                        "description": v.description,
+                        "title": title_text,
+                        "description": description_text,
                         "published_at": v.published_at,
                         "duration_seconds": v.duration_seconds,
                         "meta": {"content_type": content_type},
@@ -133,8 +145,8 @@ def refresh_youtube_competitor(
                     changed = True
                 for field, value in [
                     ("url", v.url),
-                    ("title", v.title),
-                    ("description", v.description),
+                    ("title", title_text),
+                    ("description", description_text),
                     ("published_at", v.published_at),
                     ("duration_seconds", v.duration_seconds),
                 ]:
@@ -235,6 +247,10 @@ def refresh_tiktok_competitor(
         with transaction.atomic():
             for item in items:
                 details = item_to_video_details(item)
+                title_text, description_text = _normalize_content_text_fields(
+                    title=details.title,
+                    description=details.description,
+                )
                 content_meta = {
                     "content_type": "slideshow" if bool(item.get("isSlideshow")) else "video",
                     "provider": "apify",
@@ -245,8 +261,8 @@ def refresh_tiktok_competitor(
                     defaults={
                         "competitor": competitor,
                         "url": details.url,
-                        "title": details.title,
-                        "description": details.description,
+                        "title": title_text,
+                        "description": description_text,
                         "published_at": details.published_at,
                         "duration_seconds": details.duration_seconds,
                         "meta": content_meta,
@@ -258,8 +274,8 @@ def refresh_tiktok_competitor(
                     changed = True
                 for field, value in [
                     ("url", details.url),
-                    ("title", details.title),
-                    ("description", details.description),
+                    ("title", title_text),
+                    ("description", description_text),
                     ("published_at", details.published_at),
                     ("duration_seconds", details.duration_seconds),
                 ]:
@@ -353,6 +369,10 @@ def refresh_instagram_competitor(
         updated_items: list[ContentItem] = []
         with transaction.atomic():
             for item in details:
+                title_text, description_text = _normalize_content_text_fields(
+                    title=item.title,
+                    description=item.description,
+                )
                 content_meta = {"content_type": "video", "provider": "apify"}
                 obj, created = ContentItem.objects.get_or_create(
                     platform=Platform.INSTAGRAM,
@@ -360,8 +380,8 @@ def refresh_instagram_competitor(
                     defaults={
                         "competitor": competitor,
                         "url": item.url,
-                        "title": item.title,
-                        "description": item.description,
+                        "title": title_text,
+                        "description": description_text,
                         "published_at": item.published_at,
                         "duration_seconds": item.duration_seconds,
                         "meta": content_meta,
@@ -373,8 +393,8 @@ def refresh_instagram_competitor(
                     changed = True
                 for field, value in [
                     ("url", item.url),
-                    ("title", item.title),
-                    ("description", item.description),
+                    ("title", title_text),
+                    ("description", description_text),
                     ("published_at", item.published_at),
                     ("duration_seconds", item.duration_seconds),
                 ]:

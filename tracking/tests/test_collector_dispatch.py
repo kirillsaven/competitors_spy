@@ -186,6 +186,53 @@ def test_refresh_tiktok_competitor_persists_items_and_shares(db, monkeypatch):
     assert snapshot.shares == 30
 
 
+def test_refresh_tiktok_competitor_truncates_overlong_title_but_keeps_full_description(db, monkeypatch):
+    competitor = Competitor.objects.create(platform=Platform.TIKTOK, external_id="tt-user", handle="apifytech")
+    long_caption = "T" * 700
+
+    sample_item = {
+        "id": "7353646097262202145",
+        "text": long_caption,
+        "createTimeISO": "2024-04-03T14:22:40.000Z",
+        "authorMeta": {
+            "id": "7353570794285417504",
+            "name": "apifytech",
+            "nickName": "Apify Tech",
+        },
+        "webVideoUrl": "https://www.tiktok.com/@apifytech/video/7353646097262202145",
+        "videoMeta": {"duration": 59},
+        "diggCount": 725,
+        "shareCount": 30,
+        "playCount": 83900,
+        "commentCount": 10,
+    }
+
+    class FakeClient:
+        def fetch_profile_feed(self, *, handle, results_per_page):
+            return [sample_item]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        collector,
+        "get_tiktok_apify_config",
+        lambda: SimpleNamespace(provider="apify", access_token="token", actor_id="actor", base_url="url", results_per_profile=10),
+    )
+    monkeypatch.setattr(collector, "_get_tiktok_client", lambda: FakeClient())
+
+    collector.refresh_tiktok_competitor(
+        competitor=competitor,
+        mode="incremental",
+        captured_at=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+    )
+
+    content_item = ContentItem.objects.get(platform=Platform.TIKTOK, external_id="7353646097262202145")
+    assert len(content_item.title) == 500
+    assert content_item.title == long_caption[:500]
+    assert content_item.description == long_caption
+
+
 def test_refresh_instagram_competitor_raises_for_unsupported_provider(db, monkeypatch):
     competitor = Competitor.objects.create(platform=Platform.INSTAGRAM, external_id="ig-user", handle="ig-user")
     monkeypatch.setattr(
@@ -314,3 +361,59 @@ def test_refresh_instagram_competitor_persists_items_and_shares(db, monkeypatch)
     assert snapshot.likes == 930
     assert snapshot.comments == 18
     assert snapshot.shares is None
+
+
+def test_refresh_instagram_competitor_truncates_overlong_title_but_keeps_full_description(db, monkeypatch):
+    competitor = Competitor.objects.create(platform=Platform.INSTAGRAM, external_id="ig-user", handle="apifytech")
+    long_caption = "I" * 900
+
+    sample_profile = {
+        "id": "7333333333333333333",
+        "username": "apifytech",
+        "fullName": "Apify Tech",
+        "url": "https://www.instagram.com/apifytech/",
+        "latestPosts": [
+            {
+                "id": "3555555555555555555",
+                "type": "Video",
+                "shortCode": "C9abc123xyz",
+                "url": "https://www.instagram.com/reel/C9abc123xyz/",
+                "caption": long_caption,
+                "timestamp": "2024-07-03T10:30:00.000Z",
+                "videoDuration": 31,
+                "videoViewCount": 124000,
+                "likesCount": 930,
+                "commentsCount": 18,
+            }
+        ],
+    }
+
+    class FakeClient:
+        def fetch_profiles(self, *, inputs):
+            return [sample_profile]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        collector,
+        "get_instagram_apify_config",
+        lambda: SimpleNamespace(
+            provider="apify",
+            access_token="token",
+            actor_id="actor",
+            base_url="https://api.apify.com/v2",
+        ),
+    )
+    monkeypatch.setattr(collector, "_get_instagram_client", lambda: FakeClient())
+
+    collector.refresh_instagram_competitor(
+        competitor=competitor,
+        mode="incremental",
+        captured_at=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+    )
+
+    content_item = ContentItem.objects.get(platform=Platform.INSTAGRAM, external_id="3555555555555555555")
+    assert len(content_item.title) == 500
+    assert content_item.title == long_caption[:500]
+    assert content_item.description == long_caption

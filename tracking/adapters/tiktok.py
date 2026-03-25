@@ -70,7 +70,7 @@ class ApifyTikTokClient:
         access_token: str,
         actor_id: str,
         base_url: str = "https://api.apify.com/v2",
-        timeout_s: float = 30.0,
+        timeout_s: float = 60.0,
     ) -> None:
         self.access_token = access_token
         self.actor_id = actor_id
