@@ -3,7 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-from asgiref.sync import sync_to_async
+from asgiref.sync import async_to_sync, sync_to_async
 
 from botapp.handlers import setup
 from botapp.state import SetupStates
@@ -45,10 +45,9 @@ async def _db_run(func, *args, **kwargs):
 
 
 @pytest.mark.django_db
-@pytest.mark.asyncio
-async def test_start_keywords_step_uses_instagram_seed_without_manual_prompt(monkeypatch):
-    user = await sync_to_async(TgUser.objects.create, thread_sensitive=True)(tg_user_id=101, tg_chat_id=101)
-    seed_profile = await sync_to_async(SeedProfile.objects.create, thread_sensitive=True)(
+def test_start_keywords_step_uses_instagram_seed_without_manual_prompt(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=101, tg_chat_id=101)
+    seed_profile = async_to_sync(sync_to_async(SeedProfile.objects.create, thread_sensitive=True))(
         user=user,
         raw_input="https://www.instagram.com/nasa/",
         detected_platform="instagram",
@@ -91,7 +90,7 @@ async def test_start_keywords_step_uses_instagram_seed_without_manual_prompt(mon
 
     monkeypatch.setattr(setup, "_show_keywords_editor", fake_show_keywords_editor)
 
-    await setup._start_keywords_step(message, state)
+    async_to_sync(setup._start_keywords_step)(message, state)
 
     assert shown == {"called": True}
     assert state.state == SetupStates.EDIT_NICHE
@@ -100,10 +99,9 @@ async def test_start_keywords_step_uses_instagram_seed_without_manual_prompt(mon
 
 
 @pytest.mark.django_db
-@pytest.mark.asyncio
-async def test_start_keywords_step_uses_tiktok_seed_without_manual_prompt(monkeypatch):
-    user = await sync_to_async(TgUser.objects.create, thread_sensitive=True)(tg_user_id=202, tg_chat_id=202)
-    seed_profile = await sync_to_async(SeedProfile.objects.create, thread_sensitive=True)(
+def test_start_keywords_step_uses_tiktok_seed_without_manual_prompt(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=202, tg_chat_id=202)
+    seed_profile = async_to_sync(sync_to_async(SeedProfile.objects.create, thread_sensitive=True))(
         user=user,
         raw_input="https://www.tiktok.com/@nba",
         detected_platform="tiktok",
@@ -146,7 +144,7 @@ async def test_start_keywords_step_uses_tiktok_seed_without_manual_prompt(monkey
 
     monkeypatch.setattr(setup, "_show_keywords_editor", fake_show_keywords_editor)
 
-    await setup._start_keywords_step(message, state)
+    async_to_sync(setup._start_keywords_step)(message, state)
 
     assert shown == {"called": True}
     assert state.state == SetupStates.EDIT_NICHE
