@@ -10,6 +10,7 @@ from botapp.state import SetupStates
 from tracking.adapters.base import SeedResolution
 from tracking.models import SeedProfile, SeedStatus, TgUser
 from tracking.services.account_linking import LinkedAccountSuggestion
+from tracking.services.platform_onboarding import DiscoveryOutcome, PlatformDiscoveryStatus
 
 
 class DummyState:
@@ -327,3 +328,78 @@ def test_start_keywords_step_passes_confirmed_linked_accounts(monkeypatch):
 
     assert state.state == SetupStates.EDIT_NICHE
     assert [seed.platform for seed in captured["linked_accounts"]] == ["youtube", "instagram"]
+
+
+@pytest.mark.django_db
+def test_start_discovery_reports_per_platform_statuses_without_vague_failure(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=404, tg_chat_id=404)
+    state = DummyState(
+        {
+            "user_id": user.id,
+            "seed": {
+                "platform": "instagram",
+                "external_id": "ig-1",
+                "handle": "creator",
+                "url": "https://www.instagram.com/creator/",
+                "title": "Creator",
+                "description": "English teaching",
+                "uploads_playlist_id": None,
+            },
+            "niche_keywords": ["english teachers", "lesson plans"],
+            "competitor_seeds": [],
+        }
+    )
+    message = DummyMessage()
+    called = {}
+
+    monkeypatch.setattr(setup, "db_call", _db_call)
+    monkeypatch.setattr(
+        setup,
+        "_load_confirmed_linked_accounts",
+        lambda **kwargs: sync_to_async(
+            lambda: [
+                SeedResolution(
+                    platform="instagram",
+                    external_id="ig-1",
+                    handle="creator",
+                    url="https://www.instagram.com/creator/",
+                    title="Creator",
+                    description="English teaching",
+                    uploads_playlist_id=None,
+                )
+            ],
+            thread_sensitive=True,
+        )(),
+    )
+    monkeypatch.setattr(
+        setup,
+        "discover_competitors_for_onboarding",
+        lambda **kwargs: DiscoveryOutcome(
+            candidates=[],
+            platform_statuses=[
+                PlatformDiscoveryStatus(platform="youtube", status="EMPTY", reason="по текущим ключевым фразам кандидаты не найдены."),
+                PlatformDiscoveryStatus(platform="tiktok", status="EMPTY", reason="текущий провайдер не отдает связанные профили, поэтому автоподбор пока недоступен."),
+                PlatformDiscoveryStatus(platform="instagram", status="ERROR", reason="provider timeout"),
+            ],
+            notes=[
+                "YouTube: EMPTY — по текущим ключевым фразам кандидаты не найдены.",
+                "TikTok: EMPTY — текущий провайдер не отдает связанные профили, поэтому автоподбор пока недоступен.",
+                "Instagram: ERROR — provider timeout",
+            ],
+        ),
+    )
+
+    async def fake_ask_timezone_method(message, state):
+        called["timezone"] = True
+
+    monkeypatch.setattr(setup, "_ask_timezone_method", fake_ask_timezone_method)
+
+    async_to_sync(setup._start_discovery)(message, state)
+
+    assert called == {"timezone": True}
+    assert message.answers[0] == "Подбираю конкурентов по платформам…"
+    assert "Результат автоподбора по платформам:" in message.answers[-1]
+    assert "YouTube: EMPTY" in message.answers[-1]
+    assert "TikTok: EMPTY" in message.answers[-1]
+    assert "Instagram: ERROR — provider timeout" in message.answers[-1]
+    assert "Автоподбор не сработал:" not in message.answers[-1]

@@ -247,28 +247,180 @@ _STRUCTURAL_JUNK = {
 _LOW_INFORMATION = {
     "best",
     "daily",
+    "new",
     "official",
     "online",
     "real",
     "simple",
     "today",
     "world",
+    "уровень",
+    "рост",
+    "новый",
+    "новые",
+    "новая",
+    "новое",
+    "сложный",
+    "сложная",
+    "сложное",
+    "сложных",
+    "объяснять",
+    "объясню",
+    "бояться",
     "лучшее",
     "лучший",
-    "новое",
+    "лучшие",
     "новости",
     "официальный",
     "простой",
     "реально",
     "сегодня",
+    "скоро",
+}
+
+_PHRASE_CONNECTORS = {
+    "and",
+    "for",
+    "of",
+    "the",
+    "to",
+    "with",
+    "без",
+    "для",
+    "из",
+    "по",
+    "про",
+    "с",
+}
+
+_GENERIC_SINGLETON_STEMS = {
+    "bo",
+    "explain",
+    "fear",
+    "level",
+    "new",
+    "rise",
+    "рост",
+    "скор",
+    "сложн",
+    "уров",
+    "объясня",
+    "боят",
+    "нов",
+}
+
+_USEFUL_THEME_STEMS = {
+    "english",
+    "lesson",
+    "material",
+    "notes",
+    "school",
+    "student",
+    "teacher",
+    "tutor",
+    "worksheet",
+    "английск",
+    "граммат",
+    "групп",
+    "замет",
+    "материал",
+    "онлайн",
+    "преподав",
+    "репетитор",
+    "урок",
+    "ученик",
+    "учител",
+    "школ",
 }
 
 _SOURCE_TYPE_WEIGHTS = {
-    "description": 2.4,
-    "recent": 1.4,
-    "competitor": 0.8,
+    "description": 2.8,
+    "recent": 1.6,
+    "competitor": 0.9,
     "generic": 1.0,
 }
+
+_RU_SUFFIXES = (
+    "иями",
+    "ями",
+    "ами",
+    "ого",
+    "его",
+    "ему",
+    "ому",
+    "ыми",
+    "ими",
+    "иях",
+    "ах",
+    "ях",
+    "ия",
+    "ья",
+    "ий",
+    "ый",
+    "ой",
+    "ая",
+    "яя",
+    "ое",
+    "ее",
+    "ые",
+    "ие",
+    "ом",
+    "ем",
+    "ам",
+    "ям",
+    "ов",
+    "ев",
+    "ей",
+    "ой",
+    "ую",
+    "юю",
+    "иям",
+    "ием",
+    "ию",
+    "ию",
+    "ть",
+    "ти",
+    "ся",
+    "сь",
+    "а",
+    "я",
+    "ы",
+    "и",
+    "е",
+    "о",
+    "у",
+)
+
+_EN_SUFFIXES = (
+    "ments",
+    "ation",
+    "ities",
+    "ingly",
+    "ingly",
+    "ingly",
+    "ings",
+    "ment",
+    "ions",
+    "tion",
+    "ness",
+    "less",
+    "able",
+    "ible",
+    "edly",
+    "edly",
+    "edly",
+    "ers",
+    "ing",
+    "ies",
+    "ied",
+    "est",
+    "ers",
+    "er",
+    "ed",
+    "ly",
+    "es",
+    "s",
+)
 
 
 @dataclass(frozen=True)
@@ -280,20 +432,58 @@ class KeywordSource:
 
 @dataclass
 class _CandidateStats:
-    token_count: int
+    content_count: int
     source_weight: float = 0.0
     total_count: int = 0
     chunk_ids: set[int] = field(default_factory=set)
     source_ids: set[str] = field(default_factory=set)
+    phrase_counts: Counter[str] = field(default_factory=Counter)
+    stem_tokens: tuple[str, ...] = ()
+    useful_hits: int = 0
+    generic_hits: int = 0
 
 
 def _normalize_token(token: str) -> str:
     return str(token or "").strip().lower().replace("ё", "е")
 
 
-def _is_keyword_token(token: str) -> bool:
+def _stem_token(token: str) -> str:
+    norm = _normalize_token(token)
+    if len(norm) <= 4:
+        return norm
+    if re.search(r"[а-я]", norm):
+        for suffix in _RU_SUFFIXES:
+            if len(norm) - len(suffix) >= 4 and norm.endswith(suffix):
+                return norm[: -len(suffix)]
+        return norm
+    for suffix in _EN_SUFFIXES:
+        if len(norm) - len(suffix) >= 4 and norm.endswith(suffix):
+            return norm[: -len(suffix)]
+    return norm
+
+
+def _normalize_blocked_terms(blocked_terms: Iterable[str] | None) -> tuple[set[str], set[str]]:
+    tokens: set[str] = set()
+    stems: set[str] = set()
+    for raw in blocked_terms or []:
+        for token in _TOKEN_RE.findall(str(raw or "")):
+            norm = _normalize_token(token)
+            if len(norm) < 3:
+                continue
+            tokens.add(norm)
+            stems.add(_stem_token(norm))
+    return tokens, stems
+
+
+def _is_connector(token: str) -> bool:
+    return _normalize_token(token) in _PHRASE_CONNECTORS
+
+
+def _is_content_token(token: str, *, blocked_tokens: set[str], blocked_stems: set[str]) -> bool:
     norm = _normalize_token(token)
     if len(norm) < 3 or norm.isdigit():
+        return False
+    if norm in blocked_tokens or _stem_token(norm) in blocked_stems:
         return False
     if norm in _STOPWORDS_EN or norm in _STOPWORDS_RU or norm in _STRUCTURAL_JUNK or norm in _LOW_INFORMATION:
         return False
@@ -305,32 +495,85 @@ def _is_keyword_token(token: str) -> bool:
 def _segment_tokens(text: str) -> list[list[str]]:
     segments: list[list[str]] = []
     for raw_segment in _SEGMENT_RE.split(text or ""):
-        run: list[str] = []
-        for token in _TOKEN_RE.findall(raw_segment):
-            norm = _normalize_token(token)
-            if _is_keyword_token(norm):
-                run.append(norm)
-                continue
-            if run:
-                segments.append(run)
-                run = []
-        if run:
-            segments.append(run)
+        tokens = [_normalize_token(token) for token in _TOKEN_RE.findall(raw_segment)]
+        if tokens:
+            segments.append(tokens)
     return segments
 
 
-def _iter_phrases(tokens: list[str]) -> Counter[str]:
-    phrases: Counter[str] = Counter()
-    for size in (3, 2, 1):
-        if len(tokens) < size:
-            continue
-        for start in range(0, len(tokens) - size + 1):
-            phrase_tokens = tokens[start : start + size]
-            if len(set(phrase_tokens)) != len(phrase_tokens):
+def _build_candidate_phrase(phrase_tokens: list[str]) -> str:
+    return re.sub(r"\s+", " ", " ".join(phrase_tokens)).strip()
+
+
+def _token_script(token: str) -> str:
+    norm = _normalize_token(token)
+    if re.search(r"[а-я]", norm):
+        return "ru"
+    if re.search(r"[a-z]", norm):
+        return "en"
+    return "other"
+
+
+def _iter_candidates(
+    tokens: list[str],
+    *,
+    blocked_tokens: set[str],
+    blocked_stems: set[str],
+) -> Counter[tuple[str, tuple[str, ...], int, int, int]]:
+    candidates: Counter[tuple[str, tuple[str, ...], int, int, int]] = Counter()
+    content_positions = [
+        idx
+        for idx, token in enumerate(tokens)
+        if _is_content_token(token, blocked_tokens=blocked_tokens, blocked_stems=blocked_stems)
+    ]
+    if not content_positions:
+        return candidates
+
+    for content_idx in content_positions:
+        content_token = tokens[content_idx]
+        stem = _stem_token(content_token)
+        generic_hits = 1 if stem in _GENERIC_SINGLETON_STEMS else 0
+        useful_hits = 1 if stem in _USEFUL_THEME_STEMS else 0
+        candidates[(_build_candidate_phrase([content_token]), (stem,), 1, useful_hits, generic_hits)] += 1
+
+    for start in content_positions:
+        phrase_tokens: list[str] = []
+        content_tokens: list[str] = []
+        content_stems: list[str] = []
+        useful_hits = 0
+        generic_hits = 0
+        connector_open = False
+        for idx in range(start, len(tokens)):
+            token = tokens[idx]
+            if _is_content_token(token, blocked_tokens=blocked_tokens, blocked_stems=blocked_stems):
+                stem = _stem_token(token)
+                phrase_tokens.append(token)
+                content_tokens.append(token)
+                content_stems.append(stem)
+                useful_hits += int(stem in _USEFUL_THEME_STEMS)
+                generic_hits += int(stem in _GENERIC_SINGLETON_STEMS)
+                connector_open = False
+                if 2 <= len(content_tokens) <= 4:
+                    if len({_token_script(item) for item in content_tokens}) == 1:
+                        candidates[
+                            (
+                                _build_candidate_phrase(phrase_tokens),
+                                tuple(content_stems),
+                                len(content_tokens),
+                                useful_hits,
+                                generic_hits,
+                            )
+                        ] += 1
+                if len(content_tokens) >= 4:
+                    break
                 continue
-            phrase = " ".join(phrase_tokens)
-            phrases[phrase] += 1
-    return phrases
+
+            if _is_connector(token) and content_tokens and not connector_open:
+                phrase_tokens.append(token)
+                connector_open = True
+                continue
+            break
+    return candidates
 
 
 def _coerce_sources(text: str | Iterable[KeywordSource | str]) -> list[KeywordSource]:
@@ -347,32 +590,53 @@ def _coerce_sources(text: str | Iterable[KeywordSource | str]) -> list[KeywordSo
 
 
 def _candidate_score(stats: _CandidateStats) -> float:
-    phrase_bonus = {1: 0.0, 2: 1.8, 3: 2.7}.get(stats.token_count, 0.0)
-    source_spread = max(len(stats.source_ids) - 1, 0) * 2.3
-    chunk_spread = max(len(stats.chunk_ids) - 1, 0) * 1.1
-    frequency_bonus = min(stats.total_count, 4) * 0.35
-    return stats.source_weight + source_spread + chunk_spread + frequency_bonus + phrase_bonus
+    phrase_bonus = {1: -2.6, 2: 4.3, 3: 5.8, 4: 6.4}.get(stats.content_count, 0.0)
+    source_spread = max(len(stats.source_ids) - 1, 0) * 2.6
+    chunk_spread = max(len(stats.chunk_ids) - 1, 0) * 1.2
+    frequency_bonus = min(stats.total_count, 5) * 0.35
+    useful_bonus = min(stats.useful_hits, 2) * 1.3
+    generic_penalty = stats.generic_hits * 1.4 if stats.content_count == 1 else 0.0
+    return stats.source_weight + phrase_bonus + source_spread + chunk_spread + frequency_bonus + useful_bonus - generic_penalty
 
 
-def _should_skip_phrase(phrase: str, *, selected: list[str]) -> bool:
-    tokens = set(phrase.split())
-    for existing in selected:
-        existing_tokens = set(existing.split())
-        if phrase == existing:
-            return True
-        if len(tokens) == 1 and tokens.issubset(existing_tokens):
-            return True
-        if len(tokens) > 1 and tokens.issubset(existing_tokens):
-            return True
-    return False
+def _best_display_phrase(stats: _CandidateStats) -> str:
+    ranked = sorted(
+        stats.phrase_counts.items(),
+        key=lambda item: (
+            -item[1],
+            -len(item[0].split()),
+            -len(item[0]),
+            item[0],
+        ),
+    )
+    return ranked[0][0]
 
 
-def extract_keywords(text: str | Iterable[KeywordSource | str], max_keywords: int = 8) -> list[str]:
+def _is_subphrase(candidate_stems: tuple[str, ...], existing_stems: tuple[str, ...]) -> bool:
+    if candidate_stems == existing_stems:
+        return True
+    candidate_set = set(candidate_stems)
+    existing_set = set(existing_stems)
+    if candidate_set == existing_set:
+        return True
+    if len(candidate_stems) >= len(existing_stems):
+        return False
+    return candidate_set.issubset(existing_set)
+
+
+def extract_keywords(
+    text: str | Iterable[KeywordSource | str],
+    max_keywords: int = 8,
+    *,
+    blocked_terms: Iterable[str] | None = None,
+) -> list[str]:
     sources = _coerce_sources(text)
     if not sources:
         return []
 
-    candidates: dict[str, _CandidateStats] = {}
+    blocked_tokens, blocked_stems = _normalize_blocked_terms(blocked_terms)
+
+    candidates: dict[tuple[str, ...], _CandidateStats] = {}
     chunk_index = 0
     for source_index, source in enumerate(sources):
         source_text = str(source.text or "").strip()
@@ -382,30 +646,59 @@ def extract_keywords(text: str | Iterable[KeywordSource | str], max_keywords: in
         source_weight = _SOURCE_TYPE_WEIGHTS.get(source.source_type or "generic", 1.0)
         for tokens in _segment_tokens(source_text):
             chunk_index += 1
-            for phrase, count in _iter_phrases(tokens).items():
-                stats = candidates.setdefault(phrase, _CandidateStats(token_count=len(phrase.split())))
+            for candidate, count in _iter_candidates(
+                tokens,
+                blocked_tokens=blocked_tokens,
+                blocked_stems=blocked_stems,
+            ).items():
+                phrase, stem_tokens, content_count, useful_hits, generic_hits = candidate
+                stats = candidates.setdefault(
+                    stem_tokens,
+                    _CandidateStats(
+                        content_count=content_count,
+                        stem_tokens=stem_tokens,
+                    ),
+                )
                 stats.total_count += count
                 stats.source_weight += source_weight
                 stats.chunk_ids.add(chunk_index)
                 stats.source_ids.add(source_id)
+                stats.useful_hits = max(stats.useful_hits, useful_hits)
+                stats.generic_hits = max(stats.generic_hits, generic_hits)
+                stats.phrase_counts[phrase] += count
 
     ranked = sorted(
-        candidates.items(),
-        key=lambda item: (
-            -_candidate_score(item[1]),
-            -item[1].token_count,
-            -len(item[0]),
-            item[0],
+        candidates.values(),
+        key=lambda stats: (
+            -_candidate_score(stats),
+            -stats.content_count,
+            -len(_best_display_phrase(stats)),
+            _best_display_phrase(stats),
         ),
     )
 
     selected: list[str] = []
-    for phrase, stats in ranked:
-        if stats.token_count == 1 and len(stats.source_ids) == 1 and stats.total_count == 1:
+    selected_stems: list[tuple[str, ...]] = []
+    top_score: float | None = None
+    for stats in ranked:
+        score = _candidate_score(stats)
+        if top_score is None:
+            top_score = score
+        if stats.content_count == 1:
+            single_stem = stats.stem_tokens[0]
+            if single_stem in _GENERIC_SINGLETON_STEMS:
+                continue
+            if len(stats.source_ids) < 2 and len(stats.chunk_ids) < 3:
+                continue
+        if len(selected) >= 2 and score < max(4.8, (top_score or score) * 0.42):
+            break
+
+        if any(_is_subphrase(stats.stem_tokens, existing) for existing in selected_stems):
             continue
-        if _should_skip_phrase(phrase, selected=selected):
-            continue
-        selected.append(phrase)
+
+        display = _best_display_phrase(stats)
+        selected.append(display)
+        selected_stems.append(stats.stem_tokens)
         if len(selected) >= max_keywords:
             break
     return selected

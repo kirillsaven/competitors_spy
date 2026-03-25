@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from common.text import KeywordSource, extract_keywords
 
@@ -163,6 +164,37 @@ def build_keyword_sources(
     return sources
 
 
+def build_keyword_blocked_terms(
+    *,
+    seed: SeedResolution,
+    linked_accounts: list[SeedResolution] | None = None,
+    keyword_sources: list[KeywordSource] | None = None,
+) -> set[str]:
+    blocked: set[str] = set()
+    supporting_tokens: set[str] = set()
+    for source in keyword_sources or []:
+        for token in re.findall(r"[0-9a-zа-яё]+", str(source.text or ""), flags=re.IGNORECASE):
+            norm = token.strip().lower().replace("ё", "е")
+            if len(norm) >= 3:
+                supporting_tokens.add(norm)
+
+    for account in _ordered_accounts(seed=seed, linked_accounts=linked_accounts):
+        for token in re.findall(r"[0-9a-zа-яё]+", str(account.handle or ""), flags=re.IGNORECASE):
+            norm = token.strip().lower().replace("ё", "е")
+            if len(norm) >= 3 and norm not in supporting_tokens:
+                blocked.add(norm)
+
+        title_tokens = [
+            token.strip().lower().replace("ё", "е")
+            for token in re.findall(r"[0-9a-zа-яё]+", str(account.title or ""), flags=re.IGNORECASE)
+            if len(token.strip()) >= 3
+        ]
+        unsupported_title_tokens = [token for token in title_tokens if token not in supporting_tokens]
+        blocked.update(unsupported_title_tokens)
+
+    return blocked
+
+
 def infer_niche_keywords(
     *,
     seed: SeedResolution,
@@ -174,9 +206,15 @@ def infer_niche_keywords(
     Returns: (keywords, source) where source in {"llm","auto"}.
     """
     context = build_niche_context_text(seed=seed, competitors=competitors, linked_accounts=linked_accounts)
+    keyword_sources = build_keyword_sources(seed=seed, competitors=competitors, linked_accounts=linked_accounts)
     auto_keywords = extract_keywords(
-        build_keyword_sources(seed=seed, competitors=competitors, linked_accounts=linked_accounts),
-        max_keywords=8,
+        keyword_sources,
+        max_keywords=6,
+        blocked_terms=build_keyword_blocked_terms(
+            seed=seed,
+            linked_accounts=linked_accounts,
+            keyword_sources=keyword_sources,
+        ),
     )
     if len(auto_keywords) >= 3 or not prefer_llm:
         return auto_keywords, "auto"
