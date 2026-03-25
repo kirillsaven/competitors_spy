@@ -48,6 +48,7 @@ from tracking.models import (
     SeedStatus,
     TgUser,
     TzSource,
+    UserLinkedAccount,
     UserCompetitor,
 )
 from tracking.services.account_linking import replace_user_linked_accounts, suggest_accounts_for_platforms
@@ -167,6 +168,10 @@ def _linked_account_to_dict(
     data["source"] = source
     data["signals"] = list(signals or [])
     data["is_seed"] = is_seed
+    data["meta"] = {
+        "description": str(seed.description or ""),
+        "uploads_playlist_id": str(seed.uploads_playlist_id or ""),
+    }
     return data
 
 
@@ -314,6 +319,47 @@ async def _persist_linked_accounts(state: FSMContext) -> None:
     user = await db_call(TgUser.objects.get, id=data["user_id"])
     linked_accounts = data.get("linked_accounts") or {}
     await db_run(lambda: replace_user_linked_accounts(user=user, accounts_by_platform=linked_accounts))
+
+
+def _seed_from_linked_account_row(linked: UserLinkedAccount) -> SeedResolution:
+    meta = linked.meta if isinstance(linked.meta, dict) else {}
+    uploads_playlist_id = str(meta.get("uploads_playlist_id") or "").strip() or None
+    description = str(meta.get("description") or "").strip() or None
+    return SeedResolution(
+        platform=linked.platform,
+        external_id=linked.external_id,
+        handle=linked.handle or None,
+        url=linked.url or "",
+        title=linked.display_name or None,
+        description=description,
+        uploads_playlist_id=uploads_playlist_id,
+    )
+
+
+async def _load_confirmed_linked_accounts(*, user: TgUser, state: FSMContext) -> list[SeedResolution]:
+    data = await state.get_data()
+    linked_accounts = data.get("linked_accounts") or {}
+    state_accounts: list[SeedResolution] = []
+    for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM):
+        raw = linked_accounts.get(platform) if isinstance(linked_accounts, dict) else None
+        if not isinstance(raw, dict):
+            continue
+        try:
+            account = _seed_from_dict(raw)
+        except Exception:
+            continue
+        if account.external_id:
+            state_accounts.append(account)
+    if state_accounts:
+        return state_accounts
+
+    rows = await db_run(
+        lambda: list(
+            UserLinkedAccount.objects.filter(user=user)
+            .order_by("-is_seed", "platform")
+        )
+    )
+    return [_seed_from_linked_account_row(row) for row in rows if row.external_id]
 
 
 async def _ask_next_linked_account(message: Message, state: FSMContext) -> None:
@@ -757,6 +803,7 @@ async def _start_keywords_step(message: Message, state: FSMContext) -> None:
 
     seed_dict = data.get("seed") or None
     seed = _seed_from_dict(seed_dict) if isinstance(seed_dict, dict) else None
+    linked_accounts = await _load_confirmed_linked_accounts(user=user, state=state)
 
     comp_dicts = data.get("competitor_seeds") or []
     comp_seeds: list[SeedResolution] = []
@@ -767,7 +814,8 @@ async def _start_keywords_step(message: Message, state: FSMContext) -> None:
             except Exception:
                 continue
 
-    context_seed = seed if (seed and seed.external_id) else None
+    context_accounts = [account for account in linked_accounts if account.external_id]
+    context_seed = context_accounts[0] if context_accounts else (seed if (seed and seed.external_id) else None)
     if context_seed is None and comp_seeds:
         for idx, candidate in enumerate(comp_seeds):
             if candidate.external_id:
@@ -795,6 +843,7 @@ async def _start_keywords_step(message: Message, state: FSMContext) -> None:
             seed=context_seed,
             competitors=comp_seeds,
             prefer_llm=prefer_llm,
+            linked_accounts=context_accounts,
         )
     except Exception as e:
         logger.warning("infer_niche_keywords failed: %s", e)

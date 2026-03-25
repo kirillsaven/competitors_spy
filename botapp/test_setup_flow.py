@@ -251,3 +251,79 @@ def test_manual_link_input_updates_linked_accounts(monkeypatch):
     assert state.data["link_platform_queue"] == []
     assert state.data["linked_accounts"]["instagram"]["external_id"] == "ig-1"
     assert state.data["linked_accounts"]["instagram"]["signals"] == ["manual_input"]
+
+
+@pytest.mark.django_db
+def test_start_keywords_step_passes_confirmed_linked_accounts(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=303, tg_chat_id=303)
+    seed_profile = async_to_sync(sync_to_async(SeedProfile.objects.create, thread_sensitive=True))(
+        user=user,
+        raw_input="https://www.youtube.com/@nasa",
+        detected_platform="youtube",
+        canonical_url="https://www.youtube.com/@nasa",
+        niche_keywords=[],
+        niche_source="manual",
+        status=SeedStatus.PENDING,
+    )
+    state = DummyState(
+        {
+            "user_id": user.id,
+            "seed_profile_id": seed_profile.id,
+            "seed": {
+                "platform": "youtube",
+                "external_id": "yt-1",
+                "handle": "nasa",
+                "url": "https://www.youtube.com/@nasa",
+                "title": "NASA",
+                "description": "Space exploration",
+                "uploads_playlist_id": "UU123",
+            },
+            "linked_accounts": {
+                "youtube": {
+                    "platform": "youtube",
+                    "external_id": "yt-1",
+                    "handle": "nasa",
+                    "url": "https://www.youtube.com/@nasa",
+                    "title": "NASA",
+                    "description": "Space exploration",
+                    "uploads_playlist_id": "UU123",
+                },
+                "instagram": {
+                    "platform": "instagram",
+                    "external_id": "ig-1",
+                    "handle": "nasa",
+                    "url": "https://www.instagram.com/nasa/",
+                    "title": "NASA Instagram",
+                    "description": "Space photography",
+                    "uploads_playlist_id": None,
+                },
+            },
+            "competitor_seeds": [],
+        }
+    )
+    message = DummyMessage()
+    captured = {}
+
+    monkeypatch.setattr(setup, "db_call", _db_call)
+    monkeypatch.setattr(setup, "db_run", _db_run)
+    monkeypatch.setattr(
+        setup,
+        "decide_and_consume_llm_call",
+        lambda **kwargs: SimpleNamespace(allow=False, reason="disabled", used_today=0, max_calls_per_day=0),
+    )
+
+    def fake_infer_niche_keywords(**kwargs):
+        captured["linked_accounts"] = kwargs.get("linked_accounts")
+        return ["space", "science"], "auto"
+
+    monkeypatch.setattr(setup, "infer_niche_keywords", fake_infer_niche_keywords)
+
+    async def fake_show_keywords_editor(message, state):
+        await state.set_state(SetupStates.EDIT_NICHE)
+
+    monkeypatch.setattr(setup, "_show_keywords_editor", fake_show_keywords_editor)
+
+    async_to_sync(setup._start_keywords_step)(message, state)
+
+    assert state.state == SetupStates.EDIT_NICHE
+    assert [seed.platform for seed in captured["linked_accounts"]] == ["youtube", "instagram"]

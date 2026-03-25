@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from common.text import extract_keywords
+from common.text import KeywordSource, extract_keywords
 
 from tracking.adapters.base import SeedResolution
 from tracking.services.llm_gemini import GeminiError, infer_keywords_ru
@@ -11,24 +11,80 @@ from tracking.services.platform_onboarding import get_recent_seed_content_texts
 logger = logging.getLogger(__name__)
 
 
-def build_niche_context_text(*, seed: SeedResolution, competitors: list[SeedResolution]) -> str:
-    lines: list[str] = []
-    lines.append("SEED CHANNEL")
-    lines.append(f"Platform: {seed.platform}")
-    if seed.handle:
-        lines.append(f"Handle: {seed.handle}")
-    if seed.url:
-        lines.append(f"URL: {seed.url}")
-    if seed.title:
-        lines.append(f"Title: {seed.title}")
-    if seed.description:
-        lines.append(f"Description: {seed.description}")
+def _account_key(seed: SeedResolution) -> str:
+    return f"{seed.platform}:{seed.external_id}"
 
-    recent = get_recent_seed_content_texts(seed=seed, n=10)
-    if recent:
-        lines.append("Recent content:")
-        for t in recent:
-            lines.append(f"- {t}")
+
+def _ordered_accounts(*, seed: SeedResolution, linked_accounts: list[SeedResolution] | None = None) -> list[SeedResolution]:
+    accounts: list[SeedResolution] = []
+    seen: set[str] = set()
+    for candidate in [seed] + list(linked_accounts or []):
+        if not candidate or not candidate.external_id:
+            continue
+        key = _account_key(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        accounts.append(candidate)
+    return accounts
+
+
+def _append_unique(parts: list[str], value: str, seen: set[str]) -> None:
+    text = str(value or "").strip()
+    if not text:
+        return
+    key = text.lower()
+    if key in seen:
+        return
+    seen.add(key)
+    parts.append(text)
+
+
+def _append_keyword_source(
+    sources: list[KeywordSource],
+    *,
+    text: str,
+    source_id: str,
+    source_type: str,
+    seen: set[tuple[str, str]],
+) -> None:
+    value = str(text or "").strip()
+    if not value:
+        return
+    key = (source_id, value.lower())
+    if key in seen:
+        return
+    seen.add(key)
+    sources.append(KeywordSource(text=value, source_id=source_id, source_type=source_type))
+
+
+def build_niche_context_text(
+    *,
+    seed: SeedResolution,
+    competitors: list[SeedResolution],
+    linked_accounts: list[SeedResolution] | None = None,
+) -> str:
+    lines: list[str] = []
+    accounts = _ordered_accounts(seed=seed, linked_accounts=linked_accounts)
+    lines.append("CONFIRMED USER ACCOUNTS" if len(accounts) > 1 else "SEED CHANNEL")
+    for index, account in enumerate(accounts):
+        if index > 0:
+            lines.append("")
+        lines.append(f"Platform: {account.platform}")
+        if account.handle:
+            lines.append(f"Handle: {account.handle}")
+        if account.url:
+            lines.append(f"URL: {account.url}")
+        if account.title:
+            lines.append(f"Title: {account.title}")
+        if account.description:
+            lines.append(f"Description: {account.description}")
+
+        recent = get_recent_seed_content_texts(seed=account, n=10)
+        if recent:
+            lines.append("Recent content:")
+            for text in recent:
+                lines.append(f"- {text}")
 
     if competitors:
         lines.append("")
@@ -46,17 +102,65 @@ def build_niche_context_text(*, seed: SeedResolution, competitors: list[SeedReso
     return "\n".join(lines).strip()
 
 
-def build_keyword_source_text(*, seed: SeedResolution, competitors: list[SeedResolution]) -> str:
+def build_keyword_source_text(
+    *,
+    seed: SeedResolution,
+    competitors: list[SeedResolution],
+    linked_accounts: list[SeedResolution] | None = None,
+) -> str:
     parts: list[str] = []
-    if seed.description:
-        parts.append(seed.description)
-    parts.extend(get_recent_seed_content_texts(seed=seed, n=10))
+    seen_parts: set[str] = set()
+    for account in _ordered_accounts(seed=seed, linked_accounts=linked_accounts):
+        if account.description:
+            _append_unique(parts, account.description, seen_parts)
+        for text in get_recent_seed_content_texts(seed=account, n=10):
+            _append_unique(parts, text, seen_parts)
 
     for competitor in competitors[:20]:
         if competitor.description:
-            parts.append(competitor.description)
+            _append_unique(parts, competitor.description, seen_parts)
 
     return "\n".join(part for part in parts if part).strip()
+
+
+def build_keyword_sources(
+    *,
+    seed: SeedResolution,
+    competitors: list[SeedResolution],
+    linked_accounts: list[SeedResolution] | None = None,
+) -> list[KeywordSource]:
+    sources: list[KeywordSource] = []
+    seen_sources: set[tuple[str, str]] = set()
+    for account in _ordered_accounts(seed=seed, linked_accounts=linked_accounts):
+        source_id = _account_key(account)
+        if account.description:
+            _append_keyword_source(
+                sources,
+                text=account.description,
+                source_id=source_id,
+                source_type="description",
+                seen=seen_sources,
+            )
+        for text in get_recent_seed_content_texts(seed=account, n=10):
+            _append_keyword_source(
+                sources,
+                text=text,
+                source_id=source_id,
+                source_type="recent",
+                seen=seen_sources,
+            )
+
+    for competitor in competitors[:20]:
+        if competitor.description and competitor.external_id:
+            _append_keyword_source(
+                sources,
+                text=competitor.description,
+                source_id=f"{competitor.platform}:{competitor.external_id}",
+                source_type="competitor",
+                seen=seen_sources,
+            )
+
+    return sources
 
 
 def infer_niche_keywords(
@@ -64,11 +168,18 @@ def infer_niche_keywords(
     seed: SeedResolution,
     competitors: list[SeedResolution],
     prefer_llm: bool,
+    linked_accounts: list[SeedResolution] | None = None,
 ) -> tuple[list[str], str]:
     """
     Returns: (keywords, source) where source in {"llm","auto"}.
     """
-    context = build_niche_context_text(seed=seed, competitors=competitors)
+    context = build_niche_context_text(seed=seed, competitors=competitors, linked_accounts=linked_accounts)
+    auto_keywords = extract_keywords(
+        build_keyword_sources(seed=seed, competitors=competitors, linked_accounts=linked_accounts),
+        max_keywords=8,
+    )
+    if len(auto_keywords) >= 3 or not prefer_llm:
+        return auto_keywords, "auto"
 
     if prefer_llm:
         try:
@@ -80,5 +191,4 @@ def infer_niche_keywords(
         except Exception as e:
             logger.exception("Unexpected LLM niche inference error: %s", e)
 
-    kws = extract_keywords(build_keyword_source_text(seed=seed, competitors=competitors), max_keywords=8)
-    return kws, "auto"
+    return auto_keywords, "auto"
