@@ -17,10 +17,55 @@ class PlatformOnboardingError(RuntimeError):
     pass
 
 
+DISCOVERY_FOUND = "FOUND"
+DISCOVERY_EMPTY = "EMPTY"
+DISCOVERY_ERROR = "ERROR"
+
+
+@dataclass(frozen=True)
+class PlatformDiscoveryStatus:
+    platform: str
+    status: str
+    candidate_count: int = 0
+    reason: str = ""
+
+
 @dataclass(frozen=True)
 class DiscoveryOutcome:
     candidates: list[CompetitorCandidate]
+    platform_statuses: list[PlatformDiscoveryStatus]
     notes: list[str]
+
+
+def _platform_label(platform: str) -> str:
+    return {
+        Platform.YOUTUBE: "YouTube",
+        Platform.TIKTOK: "TikTok",
+        Platform.INSTAGRAM: "Instagram",
+    }.get(str(platform or ""), str(platform or "Platform"))
+
+
+def _render_platform_status(status: PlatformDiscoveryStatus) -> str:
+    line = f"{_platform_label(status.platform)}: {status.status}"
+    if status.status == DISCOVERY_FOUND:
+        line += f" ({status.candidate_count})"
+    if status.reason:
+        line += f" — {status.reason}"
+    return line
+
+
+def _pick_platform_seed(
+    *,
+    platform: str,
+    seed: SeedResolution | None,
+    linked_accounts: list[SeedResolution] | None,
+) -> SeedResolution | None:
+    for account in linked_accounts or []:
+        if account.platform == platform and account.external_id:
+            return account
+    if seed and seed.platform == platform and seed.external_id:
+        return seed
+    return None
 
 
 def _get_tiktok_client() -> ApifyTikTokClient:
@@ -183,29 +228,43 @@ def discover_competitors_for_onboarding(
     keywords: list[str],
     seed: SeedResolution | None,
     competitors: list[SeedResolution],
+    linked_accounts: list[SeedResolution] | None = None,
     max_youtube_search_calls: int,
     max_candidates_per_platform: int,
 ) -> DiscoveryOutcome:
     candidates: list[CompetitorCandidate] = []
-    notes: list[str] = []
+    platform_statuses: list[PlatformDiscoveryStatus] = []
 
-    youtube_seed = seed if seed and seed.platform == Platform.YOUTUBE and seed.external_id else None
+    youtube_seed = _pick_platform_seed(platform=Platform.YOUTUBE, seed=seed, linked_accounts=linked_accounts)
     youtube_competitors = [item for item in competitors if item.platform == Platform.YOUTUBE and item.external_id]
-    if youtube_seed or youtube_competitors:
-        try:
-            candidates.extend(
-                discover_youtube_competitors(
-                    keywords=keywords,
-                    seed=youtube_seed,
-                    max_search_calls=max_youtube_search_calls,
-                    max_candidates=max_candidates_per_platform,
-                    extra_featured_channel_ids=[item.external_id for item in youtube_competitors],
-                )
+    try:
+        youtube_candidates = discover_youtube_competitors(
+            keywords=keywords,
+            seed=youtube_seed,
+            max_search_calls=max_youtube_search_calls,
+            max_candidates=max_candidates_per_platform,
+            extra_featured_channel_ids=[item.external_id for item in youtube_competitors],
+        )
+    except Exception as exc:
+        platform_statuses.append(
+            PlatformDiscoveryStatus(
+                platform=Platform.YOUTUBE,
+                status=DISCOVERY_ERROR,
+                reason=str(exc),
             )
-        except Exception as exc:
-            notes.append(f"YouTube: автоподбор не сработал ({exc}).")
+        )
+    else:
+        candidates.extend(youtube_candidates)
+        platform_statuses.append(
+            PlatformDiscoveryStatus(
+                platform=Platform.YOUTUBE,
+                status=DISCOVERY_FOUND if youtube_candidates else DISCOVERY_EMPTY,
+                candidate_count=len(youtube_candidates),
+                reason="" if youtube_candidates else "по текущим ключевым фразам кандидаты не найдены.",
+            )
+        )
 
-    instagram_seed = seed if seed and seed.platform == Platform.INSTAGRAM and seed.external_id else None
+    instagram_seed = _pick_platform_seed(platform=Platform.INSTAGRAM, seed=seed, linked_accounts=linked_accounts)
     instagram_competitors = [item for item in competitors if item.platform == Platform.INSTAGRAM and item.external_id]
     if instagram_seed:
         try:
@@ -215,14 +274,57 @@ def discover_competitors_for_onboarding(
                 max_candidates=max_candidates_per_platform,
             )
         except Exception as exc:
-            notes.append(f"Instagram: автоподбор не сработал ({exc}).")
+            platform_statuses.append(
+                PlatformDiscoveryStatus(
+                    platform=Platform.INSTAGRAM,
+                    status=DISCOVERY_ERROR,
+                    reason=str(exc),
+                )
+            )
         else:
             if instagram_candidates:
                 candidates.extend(instagram_candidates)
+                platform_statuses.append(
+                    PlatformDiscoveryStatus(
+                        platform=Platform.INSTAGRAM,
+                        status=DISCOVERY_FOUND,
+                        candidate_count=len(instagram_candidates),
+                    )
+                )
             else:
-                notes.append("Instagram: провайдер не вернул связанные профили для автоподбора.")
+                platform_statuses.append(
+                    PlatformDiscoveryStatus(
+                        platform=Platform.INSTAGRAM,
+                        status=DISCOVERY_EMPTY,
+                        reason="провайдер не вернул связанные профили для автоподбора.",
+                    )
+                )
+    else:
+        platform_statuses.append(
+            PlatformDiscoveryStatus(
+                platform=Platform.INSTAGRAM,
+                status=DISCOVERY_EMPTY,
+                reason="нет подтвержденного Instagram-профиля для автоподбора.",
+            )
+        )
 
-    if seed and seed.platform == Platform.TIKTOK:
-        notes.append("TikTok: текущий провайдер не отдает связанные профили, поэтому автоподбор пока недоступен.")
+    tiktok_seed = _pick_platform_seed(platform=Platform.TIKTOK, seed=seed, linked_accounts=linked_accounts)
+    if tiktok_seed:
+        platform_statuses.append(
+            PlatformDiscoveryStatus(
+                platform=Platform.TIKTOK,
+                status=DISCOVERY_EMPTY,
+                reason="текущий провайдер не отдает связанные профили, поэтому автоподбор пока недоступен.",
+            )
+        )
+    else:
+        platform_statuses.append(
+            PlatformDiscoveryStatus(
+                platform=Platform.TIKTOK,
+                status=DISCOVERY_EMPTY,
+                reason="нет подтвержденного TikTok-профиля для автоподбора.",
+            )
+        )
 
-    return DiscoveryOutcome(candidates=candidates, notes=notes)
+    notes = [_render_platform_status(status) for status in platform_statuses]
+    return DiscoveryOutcome(candidates=candidates, platform_statuses=platform_statuses, notes=notes)

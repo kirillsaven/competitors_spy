@@ -140,6 +140,38 @@ def test_infer_niche_keywords_auto_filters_ru_en_junk_words(monkeypatch):
         assert junk not in keywords
 
 
+def test_infer_niche_keywords_auto_prefers_phrase_like_teacher_topics(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: [
+            "Уроки английского для преподавателей и teacher groups",
+            "Материалы для репетиторов английского: tutor notes и разборы уроков",
+            "Дарья Панчо: как объяснять грамматику без скуки",
+            "Планы уроков английского для онлайн-репетиторов",
+        ],
+    )
+    seed = SeedResolution(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-1",
+        handle="dariapancho",
+        url="https://www.instagram.com/dariapancho/",
+        title="Дарья Панчо | онлайн-репетитор | онлайн-школа английского",
+        description="Заметки для преподавателей английского, teacher groups и материалы для репетиторов.",
+        uploads_playlist_id=None,
+    )
+
+    keywords, source = niche_service.infer_niche_keywords(seed=seed, competitors=[], prefer_llm=False)
+
+    assert source == "auto"
+    assert 1 <= len(keywords) <= 6
+    assert all(len(keyword.split()) >= 2 for keyword in keywords)
+    assert any("английск" in keyword for keyword in keywords)
+    assert any("преподав" in keyword or "репетитор" in keyword for keyword in keywords)
+    for banned in {"дарья", "панчо", "объяснять", "бояться", "новый", "сложных", "уровень", "рост"}:
+        assert all(banned not in keyword for keyword in keywords)
+
+
 def test_infer_niche_keywords_auto_weights_repeated_topics_across_linked_accounts(monkeypatch):
     monkeypatch.setattr(
         niche_service,

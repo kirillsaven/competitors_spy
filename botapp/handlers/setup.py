@@ -1026,6 +1026,7 @@ async def on_add_niche(message: Message, state: FSMContext) -> None:
 async def _start_discovery(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     user = await db_call(TgUser.objects.get, id=data["user_id"])
+    linked_accounts = await _load_confirmed_linked_accounts(user=user, state=state)
 
     seed_dict = data.get("seed") or None
     seed = _seed_from_dict(seed_dict) if isinstance(seed_dict, dict) else None
@@ -1050,6 +1051,7 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
             keywords=keywords,
             seed=seed,
             competitors=comp_seeds,
+            linked_accounts=linked_accounts,
             max_youtube_search_calls=int(getattr(settings, "YT_MAX_SEARCH_CALLS_PER_SETUP", 3)),
             max_candidates_per_platform=int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20)),
         )
@@ -1112,7 +1114,7 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
     if not candidates:
         details = "\n".join(discovery_notes)
         await message.answer(
-            "Не смог собрать список конкурентов автоматически."
+            "Результат автоподбора по платформам:"
             + (f"\n{details}" if details else "")
         )
         await _ask_timezone_method(message, state)

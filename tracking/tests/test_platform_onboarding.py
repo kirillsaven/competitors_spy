@@ -159,7 +159,7 @@ def test_discover_competitors_for_onboarding_reports_tiktok_limitations(monkeypa
     monkeypatch.setattr(
         platform_onboarding,
         "discover_youtube_competitors",
-        lambda **kwargs: (_ for _ in ()).throw(AssertionError("YouTube discovery should not run for TikTok seeds")),
+        lambda **kwargs: [],
     )
 
     outcome = platform_onboarding.discover_competitors_for_onboarding(
@@ -179,6 +179,60 @@ def test_discover_competitors_for_onboarding_reports_tiktok_limitations(monkeypa
     )
 
     assert outcome.candidates == []
+    assert [(item.platform, item.status) for item in outcome.platform_statuses] == [
+        (Platform.YOUTUBE, platform_onboarding.DISCOVERY_EMPTY),
+        (Platform.INSTAGRAM, platform_onboarding.DISCOVERY_EMPTY),
+        (Platform.TIKTOK, platform_onboarding.DISCOVERY_EMPTY),
+    ]
     assert outcome.notes == [
-        "TikTok: текущий провайдер не отдает связанные профили, поэтому автоподбор пока недоступен."
+        "YouTube: EMPTY — по текущим ключевым фразам кандидаты не найдены.",
+        "Instagram: EMPTY — нет подтвержденного Instagram-профиля для автоподбора.",
+        "TikTok: EMPTY — текущий провайдер не отдает связанные профили, поэтому автоподбор пока недоступен.",
+    ]
+
+
+def test_discover_competitors_for_onboarding_reports_per_platform_error_and_empty(monkeypatch):
+    monkeypatch.setattr(
+        platform_onboarding,
+        "discover_youtube_competitors",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        platform_onboarding,
+        "discover_instagram_competitors",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("provider timeout")),
+    )
+
+    outcome = platform_onboarding.discover_competitors_for_onboarding(
+        keywords=["english teachers"],
+        seed=SeedResolution(
+            platform=Platform.INSTAGRAM,
+            external_id="ig-1",
+            handle="teacher",
+            url="https://www.instagram.com/teacher/",
+            title="Teacher",
+            description="English teaching",
+            uploads_playlist_id=None,
+        ),
+        linked_accounts=[
+            SeedResolution(
+                platform=Platform.INSTAGRAM,
+                external_id="ig-1",
+                handle="teacher",
+                url="https://www.instagram.com/teacher/",
+                title="Teacher",
+                description="English teaching",
+                uploads_playlist_id=None,
+            )
+        ],
+        competitors=[],
+        max_youtube_search_calls=3,
+        max_candidates_per_platform=20,
+    )
+
+    assert outcome.candidates == []
+    assert outcome.notes == [
+        "YouTube: EMPTY — по текущим ключевым фразам кандидаты не найдены.",
+        "Instagram: ERROR — provider timeout",
+        "TikTok: EMPTY — нет подтвержденного TikTok-профиля для автоподбора.",
     ]
