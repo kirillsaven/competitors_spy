@@ -12,78 +12,23 @@ from botapp.telegram_api import send_message
 from common.time import compute_next_run_at
 from tracking.models import (
     Competitor,
-    UserCompetitor,
     JobRun,
     JobStatus,
-    Platform,
-    Report,
     ReportStatus,
     Schedule,
     TgUser,
 )
-from tracking.services.collector import refresh_competitor
-from tracking.services.reporting import build_report_payload, render_report_text
-from tracking.services.scoring import compute_competitor_baseline, score_items_for_period
+from tracking.services.report_pipeline import create_and_send_report, get_active_competitors
 
 logger = logging.getLogger(__name__)
 
 
 def _get_active_competitors(*, user: TgUser) -> list[Competitor]:
-    max_competitors = int(getattr(settings, "MAX_COMPETITORS_YOUTUBE", 20))
-    competitors: list[Competitor] = []
-    for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM):
-        links = (
-            UserCompetitor.objects.select_related("competitor")
-            .filter(user=user, is_active=True, competitor__platform=platform)
-            .order_by("id")
-            .all()[:max_competitors]
-        )
-        competitors.extend(lnk.competitor for lnk in links)
-    return competitors
+    return get_active_competitors(user=user)
 
 
-def _generate_and_send_report(*, user: TgUser, period_start, period_end) -> Report:
-    competitors = _get_active_competitors(user=user)
-
-    updated_items = []
-    for comp in competitors:
-        updated_items.extend(
-            refresh_competitor(
-                competitor=comp,
-                mode="incremental",
-                captured_at=period_end,
-            )
-        )
-
-    competitor_by_item_id = {it.id: it.competitor for it in updated_items}
-    baseline_by_competitor_id = {}
-    for comp in competitors:
-        baseline_by_competitor_id[comp.id] = compute_competitor_baseline(competitor=comp, now=period_end)
-
-    scored = score_items_for_period(
-        items=updated_items,
-        competitor_by_item_id=competitor_by_item_id,
-        baseline_by_competitor_id=baseline_by_competitor_id,
-        period_start=period_start,
-        period_end=period_end,
-    )
-
-    payload = build_report_payload(scored=scored, period_start=period_start, period_end=period_end)
-    report = Report.objects.create(
-        user=user,
-        period_start=period_start,
-        period_end=period_end,
-        status=ReportStatus.CREATED,
-        payload=payload,
-    )
-
-    text = render_report_text(payload=payload, timezone_str=user.timezone_str)
-    send_message(chat_id=int(user.tg_chat_id), text=text)
-
-    report.status = ReportStatus.SENT
-    report.sent_at = timezone.now()
-    report.save(update_fields=["status", "sent_at"])
-    return report
+def _generate_and_send_report(*, user: TgUser, period_start, period_end):
+    return create_and_send_report(user=user, period_start=period_start, period_end=period_end).report
 
 
 @shared_task

@@ -44,6 +44,15 @@ docker compose exec web python manage.py verify_live_platform_report \
 ```
 The command resolves the supplied profiles through the real providers, refreshes snapshots, applies the current scoring pipeline, and fails if either requested platform still renders an empty report section.
 
+Send a real live TikTok/Instagram report to Telegram and print the exact sent text plus Telegram `message_id`:
+```bash
+docker compose exec web python manage.py send_test_platform_report \
+  --tg-user-id <your_telegram_user_id> \
+  --tiktok nba \
+  --instagram nasa
+```
+Use `--tg-chat-id` as well if the target chat id differs from the Telegram user id.
+
 Run tests:
 ```bash
 docker compose exec web pytest
