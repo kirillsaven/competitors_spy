@@ -40,19 +40,35 @@ from common.time import (
 from tracking.adapters.base import SeedResolution
 from tracking.models import AddedBy, Competitor, Platform, Schedule, SeedProfile, SeedStatus, TgUser, TzSource, UserCompetitor
 from tracking.services.competitor_service import upsert_competitor
-from tracking.adapters.youtube import extract_handle as yt_extract_handle
 from tracking.services.llm_usage import decide_and_consume_llm_call
 from tracking.services.niche_service import infer_niche_keywords
+from tracking.services.seed_resolver import SeedResolveError, can_search_youtube_seed_candidates, resolve_exact_seed
 from tracking.services.youtube_service import (
-    YouTubeNotConfigured,
     discover_youtube_competitors,
-    resolve_youtube_seed,
     search_youtube_seed_candidates,
 )
 from tracking.tasks import run_user_report_now
 
 logger = logging.getLogger(__name__)
 router = Router()
+
+
+def _candidate_key(seed: SeedResolution | dict) -> str:
+    if isinstance(seed, dict):
+        platform = str(seed.get("platform") or "")
+        external_id = str(seed.get("external_id") or "")
+    else:
+        platform = str(seed.platform or "")
+        external_id = str(seed.external_id or "")
+    return f"{platform}:{external_id}"
+
+
+def _build_active_competitor_summary(*, counts: dict[str, int]) -> list[str]:
+    return [
+        f"YouTube: {counts.get(Platform.YOUTUBE, 0)}",
+        f"TikTok: {counts.get(Platform.TIKTOK, 0)}",
+        f"Instagram: {counts.get(Platform.INSTAGRAM, 0)}",
+    ]
 
 
 def _seed_to_dict(seed: SeedResolution) -> dict:
@@ -117,48 +133,27 @@ def _detect_platform_from_url(raw: str) -> str | None:
     return None
 
 
-def _seed_from_profile_url(*, platform: str, url: str) -> SeedResolution:
-    handle = None
-    try:
-        u = urlparse(url)
-        parts = [p for p in (u.path or "").split("/") if p]
-    except Exception:
-        parts = []
-
-    if platform == Platform.INSTAGRAM:
-        if parts and parts[0] not in {"p", "reel", "tv", "stories"}:
-            handle = parts[0]
-    elif platform == Platform.TIKTOK:
-        if parts:
-            first = parts[0]
-            if first.startswith("@") and len(first) > 1:
-                handle = first[1:]
-            elif first and first not in {"t"}:
-                handle = first
-
-    return SeedResolution(
-        platform=platform,
-        external_id="",
-        handle=handle,
-        url=url,
-        title=None,
-        description=None,
-        uploads_playlist_id=None,
-    )
-
-
 def _candidate_display_name(c: dict) -> str:
-    return (c.get("display_name") or c.get("handle") or c.get("external_id") or "").strip() or "Без названия"
+    platform = str(c.get("platform") or "").strip()
+    platform_label = {
+        Platform.YOUTUBE: "YouTube",
+        Platform.TIKTOK: "TikTok",
+        Platform.INSTAGRAM: "Instagram",
+    }.get(platform, platform or "Platform")
+    name = (c.get("display_name") or c.get("handle") or c.get("external_id") or "").strip() or "Без названия"
+    return f"[{platform_label}] {name}"
 
 
-def _build_prune_text(*, selected: int, total: int, limit: int) -> str:
+def _build_prune_text(*, selected_total: int, total: int, selected_youtube: int, total_youtube: int, limit: int) -> str:
     lines = [
-        "Нашел конкурентов на YouTube.",
-        "Нажимай на каналы, чтобы исключить лишних. По умолчанию выбраны все.",
-        f"Выбрано: {selected}/{total} (лимит {limit}).",
+        "Нашел конкурентов.",
+        "Автоподбор сейчас есть только для YouTube. TikTok и Instagram берутся из того, что ты прислал вручную.",
+        "Нажимай на профили, чтобы исключить лишних. По умолчанию выбраны все.",
+        f"Выбрано всего: {selected_total}/{total}.",
+        f"YouTube выбрано: {selected_youtube}/{total_youtube} (лимит {limit}).",
     ]
-    if selected > limit:
-        lines.append(f"Нужно исключить еще: {selected - limit}.")
+    if selected_youtube > limit:
+        lines.append(f"Нужно исключить YouTube-конкурентов еще: {selected_youtube - limit}.")
     lines.append("Когда готово, нажми «Готово».")
     return "\n".join(lines)
 
@@ -194,7 +189,7 @@ async def _enter_competitor_step(
     await state.set_state(SetupStates.WAIT_COMPETITOR_LIST)
     await message.answer(
         "Если хочешь, пришли конкурентов: ссылки или хендлы/никнеймы, по одному в строке.\n"
-        "Это опционально: если ничего не пришлешь, я сам подберу.",
+        "Автоподбор сейчас есть только для YouTube. Для TikTok и Instagram конкурентов лучше прислать вручную.",
         reply_markup=kb_competitors_next(),
     )
 
@@ -211,7 +206,7 @@ async def cmd_setup(message: Message, state: FSMContext) -> None:
     )
 
     # Reset active competitors for a clean re-setup.
-    await db_run(lambda: UserCompetitor.objects.filter(user=user, competitor__platform=Platform.YOUTUBE).update(is_active=False))
+    await db_run(lambda: UserCompetitor.objects.filter(user=user).update(is_active=False))
 
     await state.clear()
     await state.update_data(user_id=user.id)
@@ -252,36 +247,28 @@ async def on_seed_input(message: Message, state: FSMContext) -> None:
         status=SeedStatus.PENDING,
     )
 
-    # Non-YouTube seed URL: accept and continue (MVP analysis is still YouTube-only).
     url_platform = _detect_platform_from_url(raw)
-    if url_platform and url_platform != Platform.YOUTUBE:
-        seed = _seed_from_profile_url(platform=url_platform, url=raw)
-        await db_run(
-            lambda: SeedProfile.objects.filter(id=sp.id).update(
-                detected_platform=url_platform,
-                canonical_url=seed.url,
-                status=SeedStatus.RESOLVED,
-            )
-        )
-        await _enter_competitor_step(message, state, seed_profile_id=sp.id, seed=seed)
-        return
     if raw.lower().startswith(("http://", "https://")) and url_platform is None:
         await db_run(lambda: SeedProfile.objects.filter(id=sp.id).update(status=SeedStatus.FAILED))
         await message.answer("Не понял эту ссылку. Пришли ссылку на профиль или хендл/никнейм.")
         return
 
     try:
-        seed = await asyncio.to_thread(resolve_youtube_seed, raw)
-    except YouTubeNotConfigured:
-        seed = None
+        seed = await asyncio.to_thread(resolve_exact_seed, raw)
+    except SeedResolveError as e:
+        await db_run(lambda: SeedProfile.objects.filter(id=sp.id).update(status=SeedStatus.FAILED))
+        await message.answer("Не получилось подтвердить профиль.\n" f"Причина: {e}")
+        return
     except Exception as e:
         logger.warning("Seed resolve failed: %s", e)
-        seed = None
+        await db_run(lambda: SeedProfile.objects.filter(id=sp.id).update(status=SeedStatus.FAILED))
+        await message.answer("Не получилось подтвердить профиль.\n" f"Причина: {e}")
+        return
 
     if seed:
         await db_run(
             lambda: SeedProfile.objects.filter(id=sp.id).update(
-                detected_platform=Platform.YOUTUBE,
+                detected_platform=seed.platform,
                 canonical_url=seed.url,
                 status=SeedStatus.RESOLVED,
             )
@@ -289,18 +276,14 @@ async def on_seed_input(message: Message, state: FSMContext) -> None:
         await _enter_competitor_step(message, state, seed_profile_id=sp.id, seed=seed)
         return
 
-    # If input looks like a handle / URL, we require an exact match.
-    raw_lower = raw.lower()
-    looks_like_exact = bool(yt_extract_handle(raw)) or raw_lower.startswith("http") or "youtube." in raw_lower or "youtu.be" in raw_lower
-    if looks_like_exact:
+    if not can_search_youtube_seed_candidates(raw):
         await db_run(lambda: SeedProfile.objects.filter(id=sp.id).update(status=SeedStatus.FAILED))
         await message.answer(
             "Не нашел точного совпадения по этому хендлу/ссылке.\n"
-            "Пришли ссылку на профиль или хендл еще раз.",
+            "Если одинаковый хендл есть на разных платформах, пришли полную ссылку на нужный профиль.",
         )
         return
 
-    # Otherwise treat as nickname and try a best-effort search (user will pick the correct channel).
     try:
         candidates = await asyncio.to_thread(search_youtube_seed_candidates, query=raw, max_results=8)
     except Exception as e:
@@ -357,7 +340,7 @@ async def on_seed_pick(cb: CallbackQuery, state: FSMContext) -> None:
     if sp_id:
         await db_run(
             lambda: SeedProfile.objects.filter(id=sp_id).update(
-                detected_platform=Platform.YOUTUBE,
+                detected_platform=seed.platform,
                 canonical_url=seed.url,
                 status=SeedStatus.RESOLVED,
             )
@@ -389,28 +372,33 @@ async def on_competitor_list(message: Message, state: FSMContext) -> None:
 
     data = await state.get_data()
     existing = list(data.get("competitor_seeds") or [])
-    existing_ids = {str(d.get("external_id") or "") for d in existing}
+    existing_ids = {_candidate_key(d) for d in existing}
 
     lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
     max_manual = 20
     added = 0
-    invalid = 0
     skipped = 0
+    errors: list[str] = []
 
     for ln in lines:
         if len(existing) >= max_manual:
             break
         try:
-            s = await asyncio.to_thread(resolve_youtube_seed, ln)
-        except Exception:
-            s = None
-        if not s:
-            invalid += 1
+            s = await asyncio.to_thread(resolve_exact_seed, ln)
+        except SeedResolveError as e:
+            errors.append(f"{ln}: {e}")
             continue
-        if s.external_id in existing_ids:
+        except Exception as e:
+            errors.append(f"{ln}: {e}")
+            continue
+        if not s:
+            errors.append(f"{ln}: профиль не подтвержден провайдером")
+            continue
+        key = _candidate_key(s)
+        if key in existing_ids:
             skipped += 1
             continue
-        existing_ids.add(s.external_id)
+        existing_ids.add(key)
         existing.append(_seed_to_dict(s))
         added += 1
 
@@ -421,14 +409,15 @@ async def on_competitor_list(message: Message, state: FSMContext) -> None:
         parts.append(f"Запомнил: {added}.")
     if skipped:
         parts.append(f"Повторы: {skipped}.")
-    if invalid:
-        parts.append(f"Не распознал: {invalid}.")
+    if errors:
+        parts.append("Ошибки:")
+        parts.extend(errors[:5])
     if not parts:
         parts.append("Не нашел валидных ссылок.")
 
     parts.append("Можно прислать еще, или нажми «Дальше».")
     kb = kb_competitors_next_or_ignore() if existing else kb_competitors_next()
-    await message.answer(" ".join(parts), reply_markup=kb)
+    await message.answer("\n".join(parts), reply_markup=kb)
 
 
 async def _start_keywords_step(message: Message, state: FSMContext) -> None:
@@ -449,11 +438,13 @@ async def _start_keywords_step(message: Message, state: FSMContext) -> None:
             except Exception:
                 continue
 
-    # Build a YouTube-only context seed (we can infer niche from it).
-    context_seed = seed if (seed and seed.platform == Platform.YOUTUBE and seed.external_id) else None
+    context_seed = seed if (seed and seed.external_id) else None
     if context_seed is None and comp_seeds:
-        context_seed = comp_seeds[0]
-        comp_seeds = comp_seeds[1:]
+        for idx, candidate in enumerate(comp_seeds):
+            if candidate.external_id:
+                context_seed = candidate
+                comp_seeds = comp_seeds[:idx] + comp_seeds[idx + 1 :]
+                break
 
     if context_seed is None:
         await state.update_data(niche_keywords=[], excluded_keywords=[])
@@ -653,8 +644,7 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
 
     seed_dict = data.get("seed") or None
     seed = _seed_from_dict(seed_dict) if isinstance(seed_dict, dict) else None
-    if seed and (seed.platform != Platform.YOUTUBE or not seed.external_id):
-        seed = None
+    youtube_seed = seed if (seed and seed.platform == Platform.YOUTUBE and seed.external_id) else None
 
     keywords = list(data.get("niche_keywords") or [])
 
@@ -666,6 +656,7 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
                 comp_seeds.append(_seed_from_dict(d))
             except Exception:
                 continue
+    youtube_comp_seeds = [item for item in comp_seeds if item.platform == Platform.YOUTUBE and item.external_id]
 
     await message.answer("Подбираю конкурентов на YouTube…")
 
@@ -674,29 +665,31 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
         auto_candidates = await asyncio.to_thread(
             discover_youtube_competitors,
             keywords=keywords,
-            seed=seed,
+            seed=youtube_seed,
             max_search_calls=int(getattr(settings, "YT_MAX_SEARCH_CALLS_PER_SETUP", 3)),
             max_candidates=20,
-            extra_featured_channel_ids=[c.external_id for c in comp_seeds],
+            extra_featured_channel_ids=[c.external_id for c in youtube_comp_seeds],
         )
     except Exception as e:
         logger.warning("Discovery failed: %s", e)
 
-    # Build combined candidates list (manual + auto), de-duplicated by channelId.
     candidates_by_id: dict[str, dict] = {}
 
     def add_candidate(d: dict, *, prefer: bool) -> None:
         cid = str(d.get("external_id") or "")
-        if not cid:
+        platform = str(d.get("platform") or "")
+        if not platform or not cid:
             return
-        if seed and cid == seed.external_id:
+        key = f"{platform}:{cid}"
+        if seed and platform == seed.platform and cid == seed.external_id:
             return
-        if cid not in candidates_by_id or prefer:
-            candidates_by_id[cid] = d
+        if key not in candidates_by_id or prefer:
+            candidates_by_id[key] = d
 
     for s in comp_seeds:
         add_candidate(
             {
+                "platform": s.platform,
                 "external_id": s.external_id,
                 "handle": s.handle,
                 "url": s.url,
@@ -711,6 +704,7 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
     for c in auto_candidates:
         add_candidate(
             {
+                "platform": c.platform,
                 "external_id": c.external_id,
                 "handle": c.handle,
                 "url": c.url,
@@ -724,7 +718,10 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
 
     candidates = list(candidates_by_id.values())
     if not candidates:
-        await message.answer("Не смог подобрать конкурентов автоматически. Можно добавить их позже через /setup.")
+        await message.answer(
+            "Не смог подобрать конкурентов автоматически.\n"
+            "Автоподбор сейчас работает только для YouTube, а TikTok/Instagram нужно добавить вручную через /setup."
+        )
         await _ask_timezone_method(message, state)
         return
 
@@ -738,8 +735,15 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
     limit = int(getattr(settings, "MAX_COMPETITORS_YOUTUBE", 20))
     excluded: set[int] = set()
     competitor_rows = [(i, _candidate_display_name(c)) for i, c in enumerate(candidates)]
-    selected = len(candidates) - len(excluded)
-    text = _build_prune_text(selected=selected, total=len(candidates), limit=limit)
+    selected_total = len(candidates) - len(excluded)
+    total_youtube = sum(1 for c in candidates if str(c.get("platform") or "") == Platform.YOUTUBE)
+    text = _build_prune_text(
+        selected_total=selected_total,
+        total=len(candidates),
+        selected_youtube=total_youtube,
+        total_youtube=total_youtube,
+        limit=limit,
+    )
     await message.answer(
         text,
         reply_markup=kb_prune_competitors(competitor_rows=competitor_rows, excluded_ids=excluded, page=0, page_size=8),
@@ -809,21 +813,24 @@ async def on_prune_done(cb: CallbackQuery, state: FSMContext) -> None:
         return
 
     limit = int(getattr(settings, "MAX_COMPETITORS_YOUTUBE", 20))
-    if len(selected_indices) > limit:
-        await cb.answer(f"Слишком много конкурентов. Исключи еще: {len(selected_indices) - limit}.", show_alert=True)
+    selected_youtube = sum(
+        1 for i in selected_indices if str((candidates[i] or {}).get("platform") or "") == Platform.YOUTUBE
+    )
+    if selected_youtube > limit:
+        await cb.answer(
+            f"Слишком много YouTube-конкурентов. Исключи еще: {selected_youtube - limit}.",
+            show_alert=True,
+        )
         return
 
-    # Persist competitors.
-    await db_run(
-        lambda: UserCompetitor.objects.filter(user=user, competitor__platform=Platform.YOUTUBE).update(is_active=False)
-    )
+    await db_run(lambda: UserCompetitor.objects.filter(user=user).update(is_active=False))
     for i in selected_indices:
         c = candidates[i]
         meta = c.get("meta") if isinstance(c.get("meta"), dict) else {}
         await db_call(
             upsert_competitor,
             user=user,
-            platform=Platform.YOUTUBE,
+            platform=str(c.get("platform") or ""),
             external_id=str(c.get("external_id") or ""),
             handle=c.get("handle"),
             url=str(c.get("url") or ""),
@@ -843,8 +850,20 @@ async def _render_prune(message: Message, state: FSMContext) -> None:
 
     limit = int(getattr(settings, "MAX_COMPETITORS_YOUTUBE", 20))
     competitor_rows = [(i, _candidate_display_name(c)) for i, c in enumerate(candidates)]
-    selected = len(candidates) - len(excluded)
-    text = _build_prune_text(selected=selected, total=len(candidates), limit=limit)
+    selected_total = len(candidates) - len(excluded)
+    total_youtube = sum(1 for c in candidates if str(c.get("platform") or "") == Platform.YOUTUBE)
+    selected_youtube = sum(
+        1
+        for idx, candidate in enumerate(candidates)
+        if idx not in excluded and str(candidate.get("platform") or "") == Platform.YOUTUBE
+    )
+    text = _build_prune_text(
+        selected_total=selected_total,
+        total=len(candidates),
+        selected_youtube=selected_youtube,
+        total_youtube=total_youtube,
+        limit=limit,
+    )
     kb = kb_prune_competitors(competitor_rows=competitor_rows, excluded_ids=excluded, page=page, page_size=8)
     try:
         await message.edit_text(text, reply_markup=kb)
@@ -1131,14 +1150,18 @@ async def _finalize_schedule(message: Message, state: FSMContext) -> None:
 
     await db_run(_upsert_schedule)
 
-    comp_count = await db_run(
-        lambda: UserCompetitor.objects.filter(user=user, is_active=True, competitor__platform=Platform.YOUTUBE).count()
+    counts = await db_run(
+        lambda: {
+            platform: UserCompetitor.objects.filter(user=user, is_active=True, competitor__platform=platform).count()
+            for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)
+        }
     )
     await state.clear()
 
     await message.answer(
         "Готово.\n\n"
-        f"Конкуренты (YouTube): {comp_count}\n"
+        + "\n".join(_build_active_competitor_summary(counts=counts))
+        + "\n"
         f"Расписание: {', '.join(times)}\n"
         f"Время: {tz_label}\n"
         f"Следующий отчет: {format_dt_local(next_run_at, user.timezone_str)}\n\n"

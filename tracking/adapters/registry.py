@@ -4,8 +4,6 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from tracking.models import Platform
-
 if TYPE_CHECKING:
     from tracking.models import Competitor, ContentItem
 
@@ -13,19 +11,19 @@ if TYPE_CHECKING:
 RefreshCompetitorHandler = Callable[..., list["ContentItem"]]
 
 
-def _noop_refresh_competitor(*, competitor: "Competitor", mode: str, captured_at: datetime) -> list["ContentItem"]:
-    return []
+class AdapterRegistryError(RuntimeError):
+    pass
 
 
-_REFRESH_COMPETITOR_REGISTRY: dict[str, RefreshCompetitorHandler] = {
-    Platform.TIKTOK: _noop_refresh_competitor,
-    Platform.INSTAGRAM: _noop_refresh_competitor,
-}
+_REFRESH_COMPETITOR_REGISTRY: dict[str, RefreshCompetitorHandler] = {}
 
 
-def register_refresh_competitor_handler(platform: Platform, handler: RefreshCompetitorHandler) -> None:
+def register_refresh_competitor_handler(platform: str, handler: RefreshCompetitorHandler) -> None:
     _REFRESH_COMPETITOR_REGISTRY[str(platform)] = handler
 
 
 def get_refresh_competitor_handler(platform: str) -> RefreshCompetitorHandler:
-    return _REFRESH_COMPETITOR_REGISTRY.get(platform, _noop_refresh_competitor)
+    handler = _REFRESH_COMPETITOR_REGISTRY.get(str(platform))
+    if handler is None:
+        raise AdapterRegistryError(f"No refresh handler registered for platform: {platform}")
+    return handler

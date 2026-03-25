@@ -87,7 +87,15 @@ class ApifyInstagramClient:
         url = f"{self.base_url}/acts/{quote(self.actor_id, safe='')}/run-sync-get-dataset-items"
         payload: dict[str, list[str]] = {}
         direct_urls = [value for value in sanitized_inputs if value.lower().startswith(("http://", "https://"))]
-        usernames = [value for value in sanitized_inputs if not value.lower().startswith(("http://", "https://")) and not value.isdigit()]
+        usernames: list[str] = []
+        for value in sanitized_inputs:
+            if value.lower().startswith(("http://", "https://")):
+                handle = extract_handle(value)
+                if handle:
+                    usernames.append(handle)
+                continue
+            if not value.isdigit():
+                usernames.append(value)
         user_ids = [value for value in sanitized_inputs if value.isdigit()]
         if direct_urls:
             payload["directUrls"] = direct_urls

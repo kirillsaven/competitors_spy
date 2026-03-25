@@ -36,6 +36,14 @@ Run report immediately for a user (by tg_user_id):
 docker compose exec web python manage.py run_user_report <tg_user_id>
 ```
 
+Verify live TikTok and Instagram report sections locally with real provider data:
+```bash
+docker compose exec web python manage.py verify_live_platform_report \
+  --tiktok https://www.tiktok.com/@example \
+  --instagram https://www.instagram.com/example/
+```
+The command resolves the supplied profiles through the real providers, refreshes snapshots, applies the current scoring pipeline, and fails if either requested platform still renders an empty report section.
+
 Run tests:
 ```bash
 docker compose exec web pytest
