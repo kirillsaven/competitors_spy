@@ -14,8 +14,8 @@ if [[ ! -f "$COMPOSE_FILE" ]]; then
   exit 1
 fi
 
-if [[ ! -f "deploy/nginx/default.conf" ]]; then
-  echo "Missing required file: deploy/nginx/default.conf" >&2
+if [[ ! -f "deploy/nginx/default.conf.template" ]]; then
+  echo "Missing required file: deploy/nginx/default.conf.template" >&2
   exit 1
 fi
 

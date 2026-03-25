@@ -53,10 +53,19 @@ services:
 
   proxy:
     image: nginx:1.27-alpine
+    env_file:
+      - .env
+    environment:
+      PROXY_SERVER_NAME: ${PROXY_SERVER_NAME}
+      NGINX_ENVSUBST_TEMPLATE_SUFFIX: .template
+      NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx/conf.d
     ports:
       - "80:80"
+      - "443:443"
     volumes:
-      - ./deploy/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./deploy/nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ${PROXY_TLS_CERT_PATH}:/etc/nginx/certs/server.crt:ro
+      - ${PROXY_TLS_KEY_PATH}:/etc/nginx/certs/server.key:ro
     restart: unless-stopped
     depends_on:
       web:
@@ -65,7 +74,7 @@ services:
       test:
         [
           "CMD-SHELL",
-          "wget -q -O - http://127.0.0.1/healthz/ >/dev/null 2>&1",
+          "wget --no-check-certificate -q -O - https://127.0.0.1/healthz/ >/dev/null 2>&1",
         ]
       interval: 30s
       timeout: 10s

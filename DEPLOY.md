@@ -16,24 +16,35 @@ sudo mkdir -p YOUR_APP_DIR
 sudo chown "$USER":"$USER" YOUR_APP_DIR
 ```
 
-4. Configure GitHub read access for the private repo on the server.
+4. Point a DNS name at `YOUR_SERVER_IP`.
+   A public certificate for HTTPS requires a real hostname. If DNS is not pointing at the VPS yet, HTTPS cannot be completed.
+5. Configure GitHub read access for the private repo on the server.
    Without a deploy key, machine user, or PAT-backed clone, server-side `git clone`, update, and rollback commands will fail.
-5. Clone the repo on the server:
+6. Clone the repo on the server:
 
 ```bash
 git clone git@github.com:kirillsaven/competitors_spy.git YOUR_APP_DIR
 cd YOUR_APP_DIR
 ```
 
-6. Copy the production env template and fill all required values:
+7. Copy the production env template and fill all required values:
 
 ```bash
 cp deploy/env.production.example .env
 ```
 
-7. Decide how traffic will reach the app.
-   This repo now includes an internal production reverse proxy container.
-   Open only port `80/tcp` publicly for the first deployment baseline.
+8. Obtain a certificate and private key for the chosen hostname on the server.
+   The simplest baseline is host-level `certbot` with manually managed renewals:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y certbot
+sudo certbot certonly --standalone -d app.example.com
+```
+
+9. Decide how traffic will reach the app.
+   This repo now includes an internal production reverse proxy container with HTTPS termination.
+   Open only `80/tcp` and `443/tcp` publicly.
    Do not expose `8000/tcp` publicly.
 
 ## Required production env vars
@@ -41,6 +52,9 @@ Minimum required values in `.env`:
 - `DJANGO_SECRET_KEY`
 - `DJANGO_ALLOWED_HOSTS`
 - `DJANGO_CSRF_TRUSTED_ORIGINS`
+- `PROXY_SERVER_NAME`
+- `PROXY_TLS_CERT_PATH`
+- `PROXY_TLS_KEY_PATH`
 - `POSTGRES_DB`
 - `POSTGRES_USER`
 - `POSTGRES_PASSWORD`
@@ -53,16 +67,22 @@ Optional provider envs:
 - `TIKTOK_PROVIDER=apify` plus `TIKTOK_PROVIDER_ACCESS_TOKEN` when TikTok is enabled
 - `INSTAGRAM_PROVIDER=apify` plus `INSTAGRAM_PROVIDER_ACCESS_TOKEN` when Instagram is enabled
 
-Recommended hardening vars for a reverse-proxied HTTPS setup:
+Required hardening vars for the HTTPS production baseline:
 - `DJANGO_TRUST_X_FORWARDED_PROTO=1`
 - `DJANGO_USE_X_FORWARDED_HOST=1`
 - `DJANGO_USE_X_FORWARDED_PORT=1`
 - `DJANGO_SECURE_SSL_REDIRECT=1`
 - `DJANGO_SESSION_COOKIE_SECURE=1`
 - `DJANGO_CSRF_COOKIE_SECURE=1`
-- `DJANGO_SECURE_HSTS_SECONDS=3600`
+- `DJANGO_SECURE_HSTS_SECONDS=31536000`
 - `DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS=1`
 - `DJANGO_SECURE_HSTS_PRELOAD=1`
+
+Generate a production-only Django secret before the first HTTPS deploy:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(64))"
+```
 
 ## Production start and update commands
 First start from the server checkout:
@@ -89,7 +109,9 @@ bash scripts/prod-update.sh <git-ref>
 `scripts/prod-update.sh` fails fast if:
 - required commands are missing
 - `.env` is missing
-- `deploy/nginx/default.conf` is missing
+- `deploy/nginx/default.conf.template` is missing
+- `PROXY_SERVER_NAME`, `PROXY_TLS_CERT_PATH`, or `PROXY_TLS_KEY_PATH` are missing
+- the configured TLS certificate or key file does not exist on the server
 - the server checkout is dirty
 - the requested git ref does not resolve
 
@@ -101,7 +123,7 @@ cd YOUR_APP_DIR
 bash scripts/prod-health.sh
 ```
 
-`scripts/prod-health.sh` verifies the public container path through the reverse proxy at `http://127.0.0.1/healthz/`.
+`scripts/prod-health.sh` verifies the real HTTPS entrypoint through the reverse proxy at `https://$PROXY_SERVER_NAME/healthz/` using `--resolve` against `127.0.0.1`, then runs `python manage.py check --deploy --fail-level WARNING`.
 
 If health checks fail or you need more context:
 
@@ -111,6 +133,22 @@ bash scripts/prod-logs.sh 200
 ```
 
 This includes `proxy` logs as well as `web`, `bot`, `worker`, and `beat`.
+
+## TLS renewal baseline
+Manual renewal path:
+
+```bash
+cd YOUR_APP_DIR
+docker compose -f docker-compose.prod.yml stop proxy
+sudo certbot renew
+docker compose -f docker-compose.prod.yml up -d proxy
+```
+
+Dry-run the renewal path before relying on it:
+
+```bash
+sudo certbot renew --dry-run
+```
 
 ## Rollback baseline
 1. Identify the previous good commit or tag.
@@ -128,10 +166,11 @@ bash scripts/prod-health.sh
 ```
 
 ## Reverse proxy baseline
-- Public entrypoint: `proxy` on port `80`
+- Public entrypoints: `proxy` on ports `80` and `443`
+- Port `80` redirects to HTTPS
+- TLS terminates inside the `proxy` container using certificate files from the host
 - Internal app port: `web:8000` on the Docker network only
-- Current scope: plain HTTP only
-- Missing piece for HTTPS: an explicit TLS termination plan such as host-level Nginx/Caddy or manually managed certificates
+- Current operational prerequisite: DNS and certificate issuance must exist before the secure baseline can pass
 
 ## First deployment record
 Date: `2026-03-25`
