@@ -142,9 +142,9 @@ _DISCOVERY_INITIAL_QUERY_BUDGET = {
     Platform.TIKTOK: 1,
 }
 _DISCOVERY_RESULT_BUDGET = {
-    Platform.YOUTUBE: 10,
+    Platform.YOUTUBE: 20,
     Platform.INSTAGRAM: 3,
-    Platform.TIKTOK: 10,
+    Platform.TIKTOK: 20,
 }
 _DISCOVERY_EARLY_STOP_CANDIDATES = {
     Platform.YOUTUBE: 20,
@@ -152,10 +152,11 @@ _DISCOVERY_EARLY_STOP_CANDIDATES = {
     Platform.TIKTOK: 20,
 }
 _DISCOVERY_VALIDATION_BUDGET = {
-    Platform.YOUTUBE: 10,
+    Platform.YOUTUBE: 15,
     Platform.INSTAGRAM: 20,
     Platform.TIKTOK: 20,
 }
+_DISCOVERY_VALIDATION_ITEMS = 5
 _GENERIC_DISCOVERY_STEMS = {
     "coach",
     "course",
@@ -954,7 +955,11 @@ def _theme_content_passes(*, candidate: _DiscoveryCandidate, texts: list[str], k
     candidate.metadata["content_theme_specific_overlap"] = metrics["specific_overlap"]
     if metrics["anchor_overlap"] <= 0 or metrics["strong_anchor_matches"] <= 0:
         return False
-    return metrics["matched_phrases"] >= 1 and metrics["strong_text_matches"] >= 1
+    return (
+        (metrics["matched_phrases"] >= 1 and metrics["strong_text_matches"] >= 1)
+        or metrics["specific_overlap"] >= 3
+        or metrics["strong_text_matches"] >= 2
+    )
 
 
 def _candidate_search_overlap(candidate: _DiscoveryCandidate) -> int:
@@ -1511,11 +1516,11 @@ def _fetch_candidate_collectible_texts(
     context: SetupRunContext | None = None,
 ) -> tuple[list[str], list[int]]:
     if candidate.platform == Platform.YOUTUBE:
-        return _fetch_recent_youtube_short_texts(candidate=candidate, n=3, context=context), []
+        return _fetch_recent_youtube_short_texts(candidate=candidate, n=_DISCOVERY_VALIDATION_ITEMS, context=context), []
     if candidate.platform == Platform.INSTAGRAM:
-        return _fetch_recent_instagram_reel_texts(candidate=candidate, n=3, context=context)
+        return _fetch_recent_instagram_reel_texts(candidate=candidate, n=_DISCOVERY_VALIDATION_ITEMS, context=context)
     if candidate.platform == Platform.TIKTOK:
-        return _fetch_recent_tiktok_texts(candidate=candidate, n=3, context=context)
+        return _fetch_recent_tiktok_texts(candidate=candidate, n=_DISCOVERY_VALIDATION_ITEMS, context=context)
     return [], []
 
 
@@ -1590,9 +1595,17 @@ def _collector_aware_candidates(
     candidate_batch = strong_profile_candidates[:budget]
     batch_texts: dict[str, tuple[list[str], list[int]]] = {}
     if platform == Platform.INSTAGRAM:
-        batch_texts = _batch_fetch_recent_instagram_reel_texts(candidates=candidate_batch, n=3, context=context)
+        batch_texts = _batch_fetch_recent_instagram_reel_texts(
+            candidates=candidate_batch,
+            n=_DISCOVERY_VALIDATION_ITEMS,
+            context=context,
+        )
     elif platform == Platform.TIKTOK:
-        batch_texts = _batch_fetch_recent_tiktok_texts(candidates=candidate_batch, n=3, context=context)
+        batch_texts = _batch_fetch_recent_tiktok_texts(
+            candidates=candidate_batch,
+            n=_DISCOVERY_VALIDATION_ITEMS,
+            context=context,
+        )
     for candidate in candidate_batch:
         if platform in {Platform.INSTAGRAM, Platform.TIKTOK}:
             texts, views = batch_texts.get(candidate.external_id, ([], []))
