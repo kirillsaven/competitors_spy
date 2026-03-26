@@ -122,14 +122,17 @@ class ApifyInstagramClient:
             payload["usernames"] = usernames
         if user_ids:
             payload["userIds"] = user_ids
-        response = self._client.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {self.access_token}",
-                "Accept": "application/json",
-            },
-            json=payload,
-        )
+        try:
+            response = self._client.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self.access_token}",
+                    "Accept": "application/json",
+                },
+                json=payload,
+            )
+        except httpx.HTTPError as exc:
+            raise InstagramApiError(f"Apify Instagram API transport error: {exc}") from exc
         try:
             data = response.json()
         except Exception as exc:
@@ -150,14 +153,17 @@ class ApifyInstagramClient:
         payload: dict[str, Any] = {"query": search_query}
         if limit is not None:
             payload["resultsLimit"] = max(1, int(limit))
-        response = self._client.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {self.access_token}",
-                "Accept": "application/json",
-            },
-            json=payload,
-        )
+        try:
+            response = self._client.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self.access_token}",
+                    "Accept": "application/json",
+                },
+                json=payload,
+            )
+        except httpx.HTTPError as exc:
+            raise InstagramApiError(f"Apify Instagram search API transport error: {exc}") from exc
         try:
             data = response.json()
         except Exception as exc:

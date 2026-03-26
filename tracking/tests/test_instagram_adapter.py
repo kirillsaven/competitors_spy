@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import httpx
+import pytest
 from types import SimpleNamespace
 
 from tracking.adapters.instagram import build_profile_url, extract_handle, profile_to_video_details, resolve_seed_input
@@ -157,3 +159,37 @@ def test_search_profiles_uses_configured_search_actor():
 
     assert seen["url"].endswith("/acts/search-actor/run-sync-get-dataset-items")
     assert seen["json"] == {"query": "english teachers"}
+
+
+def test_fetch_profiles_wraps_transport_errors():
+    from tracking.adapters.instagram import ApifyInstagramClient, InstagramApiError
+
+    class FakeHttpClient:
+        def post(self, url, headers, json):
+            raise httpx.ReadTimeout("The read operation timed out")
+
+        def close(self):
+            return None
+
+    client = ApifyInstagramClient(access_token="token", actor_id="profile-actor", search_actor_id="search-actor")
+    client._client = FakeHttpClient()
+
+    with pytest.raises(InstagramApiError, match="transport error"):
+        client.fetch_profiles(inputs=["https://www.instagram.com/apifytech/"])
+
+
+def test_search_profiles_wraps_transport_errors():
+    from tracking.adapters.instagram import ApifyInstagramClient, InstagramApiError
+
+    class FakeHttpClient:
+        def post(self, url, headers, json):
+            raise httpx.ReadTimeout("The read operation timed out")
+
+        def close(self):
+            return None
+
+    client = ApifyInstagramClient(access_token="token", actor_id="profile-actor", search_actor_id="search-actor")
+    client._client = FakeHttpClient()
+
+    with pytest.raises(InstagramApiError, match="transport error"):
+        client.search_profiles(query="english teachers")

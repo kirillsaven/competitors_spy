@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import httpx
+import pytest
+
 from tracking.adapters.tiktok import build_profile_url, extract_handle, item_to_video_details, resolve_seed_input
 
 
@@ -107,3 +110,37 @@ def test_search_profiles_uses_search_queries_payload():
 
     assert seen["url"].endswith("/acts/search-actor/run-sync-get-dataset-items")
     assert seen["json"] == {"searchQueries": ["english teacher"]}
+
+
+def test_fetch_profile_feeds_wraps_transport_errors():
+    from tracking.adapters.tiktok import ApifyTikTokClient, TikTokApiError
+
+    class FakeHttpClient:
+        def post(self, url, headers, json):
+            raise httpx.ReadTimeout("The read operation timed out")
+
+        def close(self):
+            return None
+
+    client = ApifyTikTokClient(access_token="token", actor_id="profile-actor", search_actor_id="search-actor")
+    client._client = FakeHttpClient()
+
+    with pytest.raises(TikTokApiError, match="transport error"):
+        client.fetch_profile_feeds(handles=["teacherhub"], results_per_profile=3)
+
+
+def test_search_profiles_wraps_transport_errors():
+    from tracking.adapters.tiktok import ApifyTikTokClient, TikTokApiError
+
+    class FakeHttpClient:
+        def post(self, url, headers, json):
+            raise httpx.ReadTimeout("The read operation timed out")
+
+        def close(self):
+            return None
+
+    client = ApifyTikTokClient(access_token="token", actor_id="profile-actor", search_actor_id="search-actor")
+    client._client = FakeHttpClient()
+
+    with pytest.raises(TikTokApiError, match="transport error"):
+        client.search_profiles(query="english teacher")

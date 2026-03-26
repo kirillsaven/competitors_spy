@@ -95,14 +95,17 @@ class ApifyTikTokClient:
             "shouldDownloadSubtitles": False,
             "shouldDownloadVideos": False,
         }
-        response = self._client.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {self.access_token}",
-                "Accept": "application/json",
-            },
-            json=payload,
-        )
+        try:
+            response = self._client.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self.access_token}",
+                    "Accept": "application/json",
+                },
+                json=payload,
+            )
+        except httpx.HTTPError as exc:
+            raise TikTokApiError(f"Apify TikTok API transport error: {exc}") from exc
         try:
             data = response.json()
         except Exception as exc:
@@ -126,14 +129,17 @@ class ApifyTikTokClient:
         payload: dict[str, Any] = {"searchQueries": [search_query]}
         if limit is not None:
             payload["maxProfilesPerQuery"] = max(1, int(limit))
-        response = self._client.post(
-            url,
-            headers={
-                "Authorization": f"Bearer {self.access_token}",
-                "Accept": "application/json",
-            },
-            json=payload,
-        )
+        try:
+            response = self._client.post(
+                url,
+                headers={
+                    "Authorization": f"Bearer {self.access_token}",
+                    "Accept": "application/json",
+                },
+                json=payload,
+            )
+        except httpx.HTTPError as exc:
+            raise TikTokApiError(f"Apify TikTok search API transport error: {exc}") from exc
         try:
             data = response.json()
         except Exception as exc:
