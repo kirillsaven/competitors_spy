@@ -49,7 +49,7 @@ from tracking.services.youtube_service import (
     resolve_youtube_seed,
     search_youtube_seed_candidates,
 )
-from tracking.tasks import run_user_report_now
+from tracking.tasks import bootstrap_user_data
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -1130,6 +1130,15 @@ async def _finalize_schedule(message: Message, state: FSMContext) -> None:
             )
 
     await db_run(_upsert_schedule)
+    logger.info(
+        "setup_schedule_saved user_id=%s tg_user_id=%s timezone=%s times=%s next_run_at=%s next_run_local=%s",
+        user.id,
+        user.tg_user_id,
+        user.timezone_str,
+        times,
+        next_run_at.isoformat(),
+        format_dt_local(next_run_at, user.timezone_str),
+    )
 
     comp_count = await db_run(
         lambda: UserCompetitor.objects.filter(user=user, is_active=True, competitor__platform=Platform.YOUTUBE).count()
@@ -1142,7 +1151,7 @@ async def _finalize_schedule(message: Message, state: FSMContext) -> None:
         f"Расписание: {', '.join(times)}\n"
         f"Время: {tz_label}\n"
         f"Следующий отчет: {format_dt_local(next_run_at, user.timezone_str)}\n\n"
-        "Сейчас соберу первый отчет, чтобы все проверить.",
+        "Сейчас соберу стартовые метрики, чтобы первый отчет пришел точно по расписанию.",
     )
 
-    run_user_report_now.delay(user.id)
+    bootstrap_user_data.delay(user.id)

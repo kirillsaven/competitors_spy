@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from celery import shared_task
 from django.conf import settings
@@ -9,7 +9,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from botapp.telegram_api import send_message
-from common.time import compute_next_run_at
+from common.time import compute_next_run_at, format_dt_local
 from tracking.models import (
     Competitor,
     UserCompetitor,
@@ -26,6 +26,22 @@ from tracking.services.reporting import build_report_payload, render_report_text
 from tracking.services.scoring import compute_competitor_baseline, score_items_for_period
 
 logger = logging.getLogger(__name__)
+
+
+def _dt_iso(value: datetime | None) -> str:
+    return value.isoformat() if value is not None else ""
+
+
+def _dt_local(value: datetime | None, timezone_str: str) -> str:
+    if value is None:
+        return ""
+    return format_dt_local(value, timezone_str)
+
+
+def _compute_bootstrap_last_run_at(*, schedule: Schedule, captured_at: datetime) -> datetime:
+    if schedule.next_run_at is None:
+        return captured_at
+    return min(captured_at, schedule.next_run_at - timedelta(seconds=1))
 
 
 def _generate_and_send_report(*, user: TgUser, period_start, period_end) -> Report:
@@ -106,12 +122,24 @@ def tick_due_schedules() -> int:
     for sched in due:
         # Move next_run_at forward to prevent enqueuing again on the next tick.
         try:
+            due_at = sched.next_run_at
             sched.next_run_at = compute_next_run_at(sched.user.timezone_str, list(sched.times or []), now)
             sched.save(update_fields=["next_run_at", "updated_at"])
         except Exception:
             logger.exception("Failed to advance schedule next_run_at (schedule_id=%s)", sched.id)
             continue
         run_user_report.delay(sched.user_id)
+        logger.info(
+            "schedule_enqueued user_id=%s schedule_id=%s due_at=%s due_at_local=%s next_run_at=%s next_run_local=%s timezone=%s times=%s",
+            sched.user_id,
+            sched.id,
+            _dt_iso(due_at),
+            _dt_local(due_at, sched.user.timezone_str),
+            _dt_iso(sched.next_run_at),
+            _dt_local(sched.next_run_at, sched.user.timezone_str),
+            sched.user.timezone_str,
+            list(sched.times or []),
+        )
         enqueued += 1
     return enqueued
 
@@ -306,9 +334,23 @@ def bootstrap_user_data(user_id: int) -> None:
         # Mark the baseline point for the first delta window.
         with transaction.atomic():
             schedule = Schedule.objects.select_for_update().get(user=user)
-            if schedule.last_run_at is None:
-                schedule.last_run_at = now
+            anchor_last_run_at = _compute_bootstrap_last_run_at(schedule=schedule, captured_at=now)
+            if schedule.last_run_at is None or anchor_last_run_at > schedule.last_run_at:
+                schedule.last_run_at = anchor_last_run_at
                 schedule.save(update_fields=["last_run_at", "updated_at"])
+            logger.info(
+                "bootstrap_baseline_ready user_id=%s tg_user_id=%s captured_at=%s captured_at_local=%s "
+                "anchored_last_run_at=%s anchored_last_run_local=%s next_run_at=%s next_run_local=%s timezone=%s",
+                user.id,
+                user.tg_user_id,
+                _dt_iso(now),
+                _dt_local(now, user.timezone_str),
+                _dt_iso(schedule.last_run_at),
+                _dt_local(schedule.last_run_at, user.timezone_str),
+                _dt_iso(schedule.next_run_at),
+                _dt_local(schedule.next_run_at, user.timezone_str),
+                user.timezone_str,
+            )
 
         job.status = JobStatus.SUCCESS
         job.finished_at = timezone.now()
