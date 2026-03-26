@@ -97,7 +97,12 @@ def build_report_preview(
         period_end=period_end,
     )
 
-    payload = build_report_payload(scored=scored, period_start=period_start, period_end=period_end)
+    payload = build_report_payload(
+        scored=scored,
+        period_start=period_start,
+        period_end=period_end,
+        baseline_by_competitor_id=baseline_by_competitor_id,
+    )
     text = render_report_text(payload=payload, timezone_str=user.timezone_str)
     section_counts = {
         str(section.get("platform")): len(section.get("items") or []) for section in (payload.get("sections") or [])

@@ -97,7 +97,7 @@ def test_start_keywords_step_uses_instagram_seed_without_manual_prompt(monkeypat
 
     assert shown == {"called": True}
     assert state.state == SetupStates.EDIT_NICHE
-    assert state.data["niche_keywords"] == ["space", "mars"]
+    assert set(state.data["niche_keywords"]) == {"space", "mars"}
     assert all("Пришли ключевые слова" not in text for text in message.answers)
 
 
@@ -151,7 +151,7 @@ def test_start_keywords_step_uses_tiktok_seed_without_manual_prompt(monkeypatch)
 
     assert shown == {"called": True}
     assert state.state == SetupStates.EDIT_NICHE
-    assert state.data["niche_keywords"] == ["basketball", "highlights"]
+    assert set(state.data["niche_keywords"]) == {"basketball", "highlights"}
     assert all("Пришли ключевые слова" not in text for text in message.answers)
 
 

@@ -1243,6 +1243,10 @@ def _progressive_queries(platform: str, keywords: list[str]) -> list[str]:
     return _search_queries(keywords, max_queries=_DISCOVERY_QUERY_BUDGET.get(platform, 2))
 
 
+def build_search_ready_keywords(*, keywords: list[str], max_keywords: int = 6) -> list[str]:
+    return _search_queries(keywords, max_queries=max_keywords)
+
+
 def _should_stop_discovery(*, platform: str, query_index: int, unique_candidates: int, max_candidates: int) -> bool:
     if platform in {Platform.INSTAGRAM, Platform.TIKTOK}:
         return False
@@ -1386,8 +1390,40 @@ def _fetch_recent_youtube_short_texts(
 
     client = get_youtube_client()
     try:
-        items = client.channels_list(part="contentDetails", ids=[candidate.external_id])
-        if not items:
+        try:
+            items = client.channels_list(part="contentDetails", ids=[candidate.external_id])
+            if not items:
+                return _store_cached_collectible_texts(
+                    platform=Platform.YOUTUBE,
+                    external_id=candidate.external_id,
+                    handle=candidate.handle,
+                    n=n,
+                    texts=[],
+                    context=context,
+                )
+            uploads = ((items[0].get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads")
+            if not uploads:
+                return _store_cached_collectible_texts(
+                    platform=Platform.YOUTUBE,
+                    external_id=candidate.external_id,
+                    handle=candidate.handle,
+                    n=n,
+                    texts=[],
+                    context=context,
+                )
+            playlist_items = client.playlist_items(playlist_id=str(uploads), max_results=max(6, n * 3))
+            video_ids = playlist_items_to_video_ids(playlist_items)
+            if not video_ids:
+                return _store_cached_collectible_texts(
+                    platform=Platform.YOUTUBE,
+                    external_id=candidate.external_id,
+                    handle=candidate.handle,
+                    n=n,
+                    texts=[],
+                    context=context,
+                )
+            video_items = client.videos_list(ids=video_ids[: max(6, n * 3)], part="snippet,contentDetails")
+        except YouTubeApiError:
             return _store_cached_collectible_texts(
                 platform=Platform.YOUTUBE,
                 external_id=candidate.external_id,
@@ -1396,28 +1432,6 @@ def _fetch_recent_youtube_short_texts(
                 texts=[],
                 context=context,
             )
-        uploads = ((items[0].get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads")
-        if not uploads:
-            return _store_cached_collectible_texts(
-                platform=Platform.YOUTUBE,
-                external_id=candidate.external_id,
-                handle=candidate.handle,
-                n=n,
-                texts=[],
-                context=context,
-            )
-        playlist_items = client.playlist_items(playlist_id=str(uploads), max_results=max(6, n * 3))
-        video_ids = playlist_items_to_video_ids(playlist_items)
-        if not video_ids:
-            return _store_cached_collectible_texts(
-                platform=Platform.YOUTUBE,
-                external_id=candidate.external_id,
-                handle=candidate.handle,
-                n=n,
-                texts=[],
-                context=context,
-            )
-        video_items = client.videos_list(ids=video_ids[: max(6, n * 3)], part="snippet,contentDetails")
         texts = [
             str(detail.title or "").strip()
             for detail in video_items_to_details(video_items)

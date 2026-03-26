@@ -40,6 +40,12 @@ def _make_scored_item(*, platform: str, suffix: str):
         score_type="delta",
         score=3.5,
         er_end=0.044,
+        reactions_end=225,
+        avg_views_same_age=3200,
+        avg_reactions_same_age=140,
+        views_delta_pct=56.25,
+        reactions_delta_pct=60.7,
+        virality=1.8,
     )
 
 
@@ -75,10 +81,18 @@ def test_render_report_text_preserves_youtube_section_and_stub_lines():
     text = render_report_text(payload=payload, timezone_str="UTC")
 
     assert "YouTube:" in text
-    assert "Title 1 [Shorts]" in text
+    assert "1) Title 1" in text
+    assert "Просмотры: 5000 vs 3200 (+56.2%)" in text
+    assert "Реакции:" in text
+    assert "140" in text
+    assert "(+60.7%)" in text
+    assert "ER: 4.4%" in text
+    assert "Вирусность: 1.8x" in text
     assert "TikTok:" in text
-    assert "За этот период ничего не выбилось выше обычного." in text
+    assert "Нет подходящих роликов." in text
     assert "Instagram:" in text
+    assert "Канал:" not in text
+    assert "Опубликовано:" not in text
 
 
 def test_render_report_text_renders_tiktok_items_with_share_counts():
@@ -92,7 +106,7 @@ def test_render_report_text_renders_tiktok_items_with_share_counts():
 
     assert "TikTok:" in text
     assert "Title 3" in text
-    assert "репосты: 5" in text
+    assert "Реакции: 225 vs 140 (+60.7%)" in text
     assert "https://example.com/3" in text
 
 
@@ -107,7 +121,7 @@ def test_render_report_text_renders_instagram_items():
 
     assert "Instagram:" in text
     assert "Title 4" in text
-    assert "репосты: 5" in text
+    assert "ER: 4.4%" in text
     assert "https://example.com/4" in text
 
 
@@ -156,6 +170,7 @@ def test_render_setup_verification_text_is_compact_and_strips_hashtags():
     assert "#english" not in text
     assert "Источник:" not in text
     assert "Опубликовано:" not in text
+    assert "Время: 2026-03-24 00:00" in text
 
 
 def test_split_telegram_text_splits_long_setup_report_safely():

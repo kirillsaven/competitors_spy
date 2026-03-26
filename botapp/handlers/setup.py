@@ -56,7 +56,11 @@ from tracking.services.account_linking import replace_user_linked_accounts, sugg
 from tracking.services.competitor_service import upsert_competitor
 from tracking.services.llm_usage import decide_and_consume_llm_call
 from tracking.services.niche_service import infer_niche_keywords
-from tracking.services.platform_onboarding import PlatformOnboardingError, discover_competitors_for_onboarding
+from tracking.services.platform_onboarding import (
+    PlatformOnboardingError,
+    build_search_ready_keywords,
+    discover_competitors_for_onboarding,
+)
 from tracking.services.seed_resolver import (
     SeedResolveAmbiguity,
     SeedResolveError,
@@ -1044,6 +1048,7 @@ async def _start_keywords_step(message: Message, state: FSMContext) -> None:
         return
 
     kws = [k.strip() for k in (kws or []) if isinstance(k, str) and k.strip()][:12]
+    kws = build_search_ready_keywords(keywords=kws, max_keywords=6) or kws[:6]
     if not kws:
         await state.update_data(niche_keywords=[], excluded_keywords=[])
         await state.set_state(SetupStates.ADD_NICHE)
