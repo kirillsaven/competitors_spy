@@ -1117,6 +1117,33 @@ def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
     return selected
 
 
+def _subject_core_phrase(query: str, *, anchor_stems: set[str]) -> str:
+    kept: list[str] = []
+    for token in _TOKEN_RE.findall(str(query or "")):
+        stem = _stem_token(token)
+        if anchor_stems:
+            if stem in anchor_stems:
+                kept.append(_normalize_token(token))
+            continue
+        if stem and stem not in _GENERIC_DISCOVERY_STEMS:
+            kept.append(_normalize_token(token))
+    return " ".join(kept[:3]).strip()
+
+
+def _generic_stem_hints(query: str, *, full_stems: set[str]) -> set[str]:
+    hints = set(full_stems & (_TEACHER_STEMS | _LESSON_STEMS | _GROUP_STEMS | _SCHOOL_STEMS))
+    lowered = _normalize_token(query)
+    if any(marker in lowered for marker in ("teacher", "tutor", "репетитор", "преподав", "учител")):
+        hints.add("teacher")
+    if any(marker in lowered for marker in ("lesson", "lessons", "урок", "обуч", "курс")):
+        hints.add("lesson")
+    if any(marker in lowered for marker in ("group", "groups", "групп", "ученик", "студент")):
+        hints.add("group")
+    if any(marker in lowered for marker in ("school", "academy", "школ")):
+        hints.add("school")
+    return hints
+
+
 def _synthetic_search_queries(keywords: list[str], *, anchor_stems: set[str]) -> list[str]:
     if not keywords:
         return []
@@ -1127,14 +1154,21 @@ def _synthetic_search_queries(keywords: list[str], *, anchor_stems: set[str]) ->
         if not query:
             continue
         full_stems = _theme_token_stems(query)
-        if len(query.split()) != 1:
-            generic_stems |= full_stems & (_TEACHER_STEMS | _LESSON_STEMS | _GROUP_STEMS | _SCHOOL_STEMS)
-            continue
         specific_stems = {stem for stem in full_stems if stem not in _GENERIC_DISCOVERY_STEMS}
-        if specific_stems and (not anchor_stems or specific_stems & anchor_stems):
-            subject_terms.append(query)
+        subject_core = _subject_core_phrase(query, anchor_stems=anchor_stems)
+        if len(query.split()) != 1:
+            if (
+                subject_core
+                and len(subject_core.split()) <= 3
+                and (not anchor_stems or specific_stems & anchor_stems)
+            ):
+                subject_terms.append(subject_core)
+            generic_stems |= _generic_stem_hints(query, full_stems=full_stems)
             continue
-        generic_stems |= full_stems & (_TEACHER_STEMS | _LESSON_STEMS | _GROUP_STEMS | _SCHOOL_STEMS)
+        if specific_stems and (not anchor_stems or specific_stems & anchor_stems):
+            subject_terms.append(subject_core or query)
+            continue
+        generic_stems |= _generic_stem_hints(query, full_stems=full_stems)
 
     out: list[str] = []
     seen: set[str] = set()
@@ -1186,6 +1220,11 @@ def _subject_query_variants(*, subject: str, generic_stems: set[str]) -> list[st
 
 def _russian_subject_object_form(term: str) -> str:
     value = str(term or "").strip().lower()
+    if " " in value:
+        parts = [part for part in value.split() if part]
+        if len(parts) == 2 and parts[1] in {"язык", "языка"}:
+            return f"{_russian_subject_object_form(parts[0])} языка"
+        return value
     if value.endswith("ий"):
         return value[:-2] + "ого"
     if value.endswith("ый") or value.endswith("ой"):

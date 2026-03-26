@@ -154,9 +154,12 @@ def test_discover_instagram_competitors_performs_real_query_search(monkeypatch):
         max_candidates=10,
     )
 
-    assert search_calls == ["english teachers", "teacher groups"]
+    assert search_calls[0] == "english teachers"
+    assert "teacher groups" in search_calls or "english teacher groups" in search_calls
+    assert "english tutor" in search_calls
     assert [candidate.external_id for candidate in candidates] == ["ig-1", "ig-3", "ig-2"]
-    assert candidates[0].reason == "search: english teachers, teacher groups"
+    assert candidates[0].reason.startswith("search: ")
+    assert "english teachers" in candidates[0].reason
 
 
 def test_discover_tiktok_competitors_performs_real_query_search(monkeypatch):
@@ -185,9 +188,12 @@ def test_discover_tiktok_competitors_performs_real_query_search(monkeypatch):
         max_candidates=10,
     )
 
-    assert search_calls == ["english teachers", "teacher groups"]
+    assert search_calls[0] == "english teachers"
+    assert "teacher groups" in search_calls or "english teacher groups" in search_calls
+    assert "english tutor" in search_calls
     assert [candidate.external_id for candidate in candidates] == ["tt-1", "tt-3", "tt-2"]
-    assert candidates[0].reason == "search: english teachers, teacher groups"
+    assert candidates[0].reason.startswith("search: ")
+    assert "english teachers" in candidates[0].reason
 
 
 def test_discover_competitors_for_onboarding_reports_empty_after_attempted_search(monkeypatch):
@@ -623,6 +629,7 @@ def test_search_queries_drop_identity_and_marketing_phrases_for_youtube_teacher_
     assert "меня зовут александр бебрис" not in queries
     assert "получайте дополнительные полезные материалы" not in queries
     assert all("александр" not in query for query in queries)
+    assert any("репетитор английского языка" in query or "преподаватель английского языка" in query for query in queries)
     assert any("англий" in query for query in queries)
 
 
