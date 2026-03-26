@@ -1379,7 +1379,12 @@ def _fetch_recent_tiktok_texts(
         context=context,
         purpose="candidate_validation",
     )
-    details = [item_to_video_details(item) for item in items]
+    details: list[Any] = []
+    for item in items:
+        try:
+            details.append(item_to_video_details(item))
+        except ValueError:
+            continue
     details = [item for item in details if int(item.views or 0) > 0]
     texts = [
         str(item.description or item.title or "").strip()
@@ -1491,7 +1496,12 @@ def _batch_fetch_recent_tiktok_texts(
     for candidate in missing:
         candidate_handle = str(candidate.handle or "").strip()
         items = grouped_items.get(candidate_handle, [])
-        details = [item_to_video_details(item) for item in items]
+        details: list[Any] = []
+        for item in items:
+            try:
+                details.append(item_to_video_details(item))
+            except ValueError:
+                continue
         details = [item for item in details if int(item.views or 0) > 0]
         texts = [
             str(item.description or item.title or "").strip()
@@ -1668,7 +1678,10 @@ def get_recent_seed_content_texts(
         )
         texts: list[str] = []
         for item in items[:n]:
-            details = item_to_video_details(item)
+            try:
+                details = item_to_video_details(item)
+            except ValueError:
+                continue
             text = details.description or details.title
             if text:
                 texts.append(text)
