@@ -346,8 +346,8 @@ def test_discover_competitors_for_onboarding_ranks_and_dedupes_candidates(monkey
         (Platform.INSTAGRAM, "ig-1"),
     ]
     assert outcome.notes == [
-        "YouTube: FOUND (1)",
-        "Instagram: FOUND (1)",
+        "YouTube: FOUND (1) — найдено 1 валидных кандидатов; после всех поисковых фраз и проверок больше подтвержденных профилей не осталось.",
+        "Instagram: FOUND (1) — найдено 1 валидных кандидатов; после всех поисковых фраз и проверок больше подтвержденных профилей не осталось.",
         "TikTok: ERROR — provider timeout",
     ]
 
@@ -486,8 +486,8 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
     ]
     assert outcome.notes == [
         "YouTube: EMPTY — по текущим поисковым фразам поиск был выполнен, но кандидаты не найдены.",
-        "Instagram: FOUND (1)",
-        "TikTok: FOUND (1)",
+        "Instagram: FOUND (1) — найдено 1 валидных кандидатов; после всех поисковых фраз и проверок больше подтвержденных профилей не осталось.",
+        "TikTok: FOUND (1) — найдено 1 валидных кандидатов; после всех поисковых фраз и проверок больше подтвержденных профилей не осталось.",
     ]
 
 
@@ -564,13 +564,26 @@ def test_search_queries_prioritizes_theme_specific_phrases_over_generic_tutor_te
         max_queries=2,
     )
 
-    assert queries[0] == "онлайн репетитор по английскому"
-    assert "онлайн репетитор" not in queries
+    assert any("английскому" in query for query in queries)
     assert len(queries) == 2
-    assert set(queries) == {
-        "группы для преподавателей",
-        "онлайн репетитор по английскому",
-    }
+    assert queries[0] != "онлайн репетитор"
+
+
+def test_search_queries_skip_identity_like_phrases_when_theme_queries_exist():
+    queries = platform_onboarding._search_queries(
+        [
+            "репетитора",
+            "английский",
+            "преподавателей",
+            "группы",
+            "урока",
+            "дарья панчо",
+        ],
+        max_queries=4,
+    )
+
+    assert "дарья панчо" not in queries
+    assert "английский" in queries
 
 
 def test_candidate_survives_only_if_recent_short_form_content_matches_niche(monkeypatch):

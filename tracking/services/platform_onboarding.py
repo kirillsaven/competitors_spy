@@ -144,7 +144,7 @@ _DISCOVERY_INITIAL_QUERY_BUDGET = {
 _DISCOVERY_RESULT_BUDGET = {
     Platform.YOUTUBE: 20,
     Platform.INSTAGRAM: 3,
-    Platform.TIKTOK: 20,
+    Platform.TIKTOK: 10,
 }
 _DISCOVERY_EARLY_STOP_CANDIDATES = {
     Platform.YOUTUBE: 20,
@@ -184,6 +184,7 @@ _GENERIC_DISCOVERY_STEMS = {
     "огэ",
     "онлайн",
     "преподав",
+    "преподавател",
     "репетитор",
     "студент",
     "урок",
@@ -841,10 +842,29 @@ def _theme_phrase_stems(keywords: list[str]) -> list[tuple[set[str], set[str]]]:
     return phrases
 
 
+def _is_identity_like_query(
+    query: str,
+    *,
+    full_stems: set[str],
+    specific_stems: set[str],
+    anchor_stems: set[str],
+) -> bool:
+    words = [part for part in str(query or "").split() if part]
+    if len(words) < 2 or len(specific_stems) < 2:
+        return False
+    if not anchor_stems:
+        return False
+    if len(full_stems) != len(specific_stems):
+        return False
+    return len(specific_stems & anchor_stems) <= 0
+
+
 def _theme_anchor_stems(keywords: list[str]) -> set[str]:
     counts: dict[str, int] = {}
     for query in _dedupe_keyword_queries(keywords, max_queries=8):
         specific_stems = {stem for stem in _theme_token_stems(query) if stem not in _GENERIC_DISCOVERY_STEMS}
+        if len(str(query or "").split()) >= 2 and len(specific_stems) >= 2:
+            continue
         for stem in specific_stems:
             counts[stem] = counts.get(stem, 0) + 1
     anchors = {stem for stem, count in counts.items() if count >= 2}
@@ -1004,10 +1024,19 @@ def _query_utility_score(query: str, *, anchor_stems: set[str]) -> int:
         return 0
     specific_stems = {stem for stem in stems if stem not in _GENERIC_DISCOVERY_STEMS}
     generic_stems = stems - specific_stems
-    word_count = len(str(query or "").split())
+    words = [part for part in str(query or "").split() if part]
+    word_count = len(words)
     anchor_overlap = len(specific_stems & anchor_stems)
     anchor_penalty = 14 if anchor_stems and anchor_overlap <= 0 else 0
-    return anchor_overlap * 18 + len(specific_stems) * 8 + word_count * 2 - len(generic_stems) * 3 - anchor_penalty
+    singleton_penalty = 6 if word_count == 1 and not specific_stems else 0
+    return (
+        anchor_overlap * 18
+        + len(specific_stems) * 8
+        + word_count * 2
+        - len(generic_stems) * 3
+        - anchor_penalty
+        - singleton_penalty
+    )
 
 
 def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
@@ -1024,30 +1053,41 @@ def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
         if key in seen:
             continue
         seen.add(key)
-        scored_queries.append((
-            _query_utility_score(query, anchor_stems=anchor_stems),
-            -index,
+        full_stems = _theme_token_stems(query)
+        filtered_specific_stems = {stem for stem in full_stems if stem not in _GENERIC_DISCOVERY_STEMS}
+        coverage_stems = filtered_specific_stems or full_stems
+        if _is_identity_like_query(
             query,
-            _theme_specific_stems([query]),
+            full_stems=full_stems,
+            specific_stems=filtered_specific_stems,
+            anchor_stems=anchor_stems,
+        ):
+            continue
+        score = _query_utility_score(query, anchor_stems=anchor_stems)
+        scored_queries.append((
+            score,
+            index,
+            query,
+            coverage_stems,
         ))
     remaining = sorted(scored_queries, key=lambda item: (-item[0], item[1], item[2]))
     selected: list[str] = []
     covered_stems: set[str] = set()
     if remaining:
-        score, neg_index, query, stems = remaining.pop(0)
+        score, index, query, stems = remaining.pop(0)
         selected.append(query)
         covered_stems |= stems
     while remaining and len(selected) < max_queries:
         best_idx = 0
         best_value: tuple[int, int, int, int, str] | None = None
-        for idx, (score, neg_index, query, stems) in enumerate(remaining):
+        for idx, (score, index, query, stems) in enumerate(remaining):
             new_stems = len(stems - covered_stems)
             overlap = len(stems & covered_stems)
-            value = (new_stems, score, -overlap, neg_index, query)
+            value = (new_stems, score, -overlap, -index, query)
             if best_value is None or value > best_value:
                 best_idx = idx
                 best_value = value
-        score, neg_index, query, stems = remaining.pop(best_idx)
+        score, index, query, stems = remaining.pop(best_idx)
         selected.append(query)
         covered_stems |= stems
     return selected
@@ -1118,6 +1158,8 @@ def _progressive_queries(platform: str, keywords: list[str]) -> list[str]:
 
 
 def _should_stop_discovery(*, platform: str, query_index: int, unique_candidates: int, max_candidates: int) -> bool:
+    if platform in {Platform.INSTAGRAM, Platform.TIKTOK}:
+        return False
     initial_budget = _DISCOVERY_INITIAL_QUERY_BUDGET.get(platform, 1)
     if query_index + 1 < initial_budget:
         return False
@@ -2144,9 +2186,17 @@ def discover_competitors_for_onboarding(
                 platform=platform,
                 status=DISCOVERY_FOUND if ranked else DISCOVERY_EMPTY,
                 candidate_count=len(ranked),
-                reason="" if ranked else empty_reason_by_platform.get(
-                    platform,
-                    "по текущим поисковым фразам поиск был выполнен, но кандидаты не найдены.",
+                reason=(
+                    ""
+                    if ranked and len(ranked) >= max_candidates_per_platform
+                    else (
+                        f"найдено {len(ranked)} валидных кандидатов; после всех поисковых фраз и проверок больше подтвержденных профилей не осталось."
+                        if ranked
+                        else empty_reason_by_platform.get(
+                            platform,
+                            "по текущим поисковым фразам поиск был выполнен, но кандидаты не найдены.",
+                        )
+                    )
                 ),
             )
         )
