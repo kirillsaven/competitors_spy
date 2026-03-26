@@ -193,6 +193,9 @@ _GENERIC_DISCOVERY_STEMS = {
     "учител",
     "школ",
 }
+_TEACHER_STEMS = {"teacher", "teach", "tutor", "mentor", "репетитор", "преподав", "преподавател", "учител"}
+_LESSON_STEMS = {"lesson", "lessons", "study", "course", "урок", "обуч", "курс"}
+_GROUP_STEMS = {"group", "groups", "student", "students", "групп", "ученик", "студент"}
 
 
 @dataclass(frozen=True)
@@ -1051,7 +1054,9 @@ def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
     anchor_stems = _theme_anchor_stems(keywords)
     seen: set[str] = set()
     scored_queries: list[tuple[int, int, str, set[str]]] = []
-    for index, raw in enumerate(keywords or []):
+    source_queries = list(keywords or [])
+    source_queries.extend(_synthetic_search_queries(keywords, anchor_stems=anchor_stems))
+    for index, raw in enumerate(source_queries):
         query = " ".join(str(raw or "").split()).strip()
         if len(query) < 3:
             continue
@@ -1061,7 +1066,7 @@ def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
         seen.add(key)
         full_stems = _theme_token_stems(query)
         filtered_specific_stems = {stem for stem in full_stems if stem not in _GENERIC_DISCOVERY_STEMS}
-        coverage_stems = filtered_specific_stems or full_stems
+        coverage_stems = full_stems
         if _is_identity_like_query(
             query,
             full_stems=full_stems,
@@ -1097,6 +1102,81 @@ def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
         selected.append(query)
         covered_stems |= stems
     return selected
+
+
+def _synthetic_search_queries(keywords: list[str], *, anchor_stems: set[str]) -> list[str]:
+    if not keywords:
+        return []
+    subject_terms: list[str] = []
+    generic_stems: set[str] = set()
+    for raw in keywords:
+        query = " ".join(str(raw or "").split()).strip()
+        if not query or len(query.split()) != 1:
+            continue
+        full_stems = _theme_token_stems(query)
+        specific_stems = {stem for stem in full_stems if stem not in _GENERIC_DISCOVERY_STEMS}
+        if specific_stems and (not anchor_stems or specific_stems & anchor_stems):
+            subject_terms.append(query)
+            continue
+        generic_stems |= full_stems
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for subject in subject_terms[:2]:
+        for variant in _subject_query_variants(subject=subject, generic_stems=generic_stems):
+            key = variant.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(variant)
+    return out
+
+
+def _subject_query_variants(*, subject: str, generic_stems: set[str]) -> list[str]:
+    normalized_subject = " ".join(str(subject or "").split()).strip()
+    if not normalized_subject:
+        return []
+    if re.fullmatch(r"[A-Za-z][A-Za-z\\s-]*", normalized_subject):
+        base = normalized_subject
+        variants: list[str] = []
+        if generic_stems & _TEACHER_STEMS:
+            variants.append(f"{base} teacher")
+            variants.append(f"{base} tutor")
+        if generic_stems & _LESSON_STEMS:
+            variants.append(f"{base} lessons")
+        if generic_stems & _GROUP_STEMS:
+            variants.append(f"{base} teacher groups")
+        return variants
+
+    russian_object = _russian_subject_object_form(normalized_subject)
+    variants = []
+    if generic_stems & _TEACHER_STEMS:
+        variants.append(f"репетитор {russian_object}")
+        variants.append(f"преподаватель {russian_object}")
+    if generic_stems & _LESSON_STEMS:
+        variants.append(f"уроки {russian_object}")
+    if generic_stems & _GROUP_STEMS:
+        variants.append(f"группы {russian_object}")
+    if generic_stems & _TEACHER_STEMS and generic_stems & _GROUP_STEMS:
+        variants.append(f"группы преподавателей {russian_object}")
+    return variants
+
+
+def _russian_subject_object_form(term: str) -> str:
+    value = str(term or "").strip().lower()
+    if value.endswith("ий"):
+        return value[:-2] + "ого"
+    if value.endswith("ый") or value.endswith("ой"):
+        return value[:-2] + "ого"
+    if value.endswith("ая"):
+        return value[:-2] + "ой"
+    if value.endswith("ое"):
+        return value[:-2] + "ого"
+    if value.endswith("а"):
+        return value[:-1] + "ы"
+    if value.endswith("я"):
+        return value[:-1] + "и"
+    return value
 
 
 def _manual_competitor_queries(
