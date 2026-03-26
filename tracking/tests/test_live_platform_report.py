@@ -9,23 +9,6 @@ from tracking.services import live_platform_report
 def test_prepare_live_platform_user_prefetches_tiktok_and_instagram_payloads(db, monkeypatch):
     monkeypatch.setattr(
         live_platform_report,
-        "_fetch_tiktok_seed_and_cache",
-        lambda *, raw_input, cache: (
-            cache.store_tiktok_feed(handle="nba", items=[{"id": "tt-item"}]),
-            live_platform_report.resolve_seed_for_platform(platform=Platform.TIKTOK, raw_input=raw_input),
-        )[1],
-    )
-    monkeypatch.setattr(
-        live_platform_report,
-        "_fetch_instagram_seed_and_cache",
-        lambda *, raw_input, cache: (
-            cache.store_instagram_profile(profile={"id": "ig-1", "username": "nasa", "url": "https://www.instagram.com/nasa/"}, lookups=[raw_input]),
-            live_platform_report.resolve_seed_for_platform(platform=Platform.INSTAGRAM, raw_input=raw_input),
-        )[1],
-    )
-
-    monkeypatch.setattr(
-        live_platform_report,
         "resolve_seed_for_platform",
         lambda *, platform, raw_input: SimpleNamespace(
             platform=platform,
@@ -35,6 +18,16 @@ def test_prepare_live_platform_user_prefetches_tiktok_and_instagram_payloads(db,
             title=platform.upper(),
             uploads_playlist_id=None,
         ),
+    )
+    monkeypatch.setattr(
+        live_platform_report,
+        "fetch_tiktok_profile_feed_cached",
+        lambda **kwargs: [{"id": "tt-item"}],
+    )
+    monkeypatch.setattr(
+        live_platform_report,
+        "fetch_instagram_profiles_cached",
+        lambda **kwargs: [{"id": "ig-1", "username": "nasa", "url": "https://www.instagram.com/nasa/"}],
     )
 
     prepared = live_platform_report.prepare_live_platform_user(

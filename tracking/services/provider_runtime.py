@@ -19,6 +19,7 @@ class ProviderFetchCache:
     purpose: str = "report_collection"
     tiktok_feeds_by_handle: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     instagram_profiles_by_lookup: dict[str, dict[str, Any]] = field(default_factory=dict)
+    platform_errors: dict[str, str] = field(default_factory=dict)
 
     def store_tiktok_feed(self, *, handle: str, items: list[dict[str, Any]]) -> None:
         key = _normalize_lookup(handle)
@@ -53,6 +54,18 @@ class ProviderFetchCache:
         if profile is None:
             return None
         return dict(profile)
+
+    def mark_platform_error(self, *, platform: str, reason: str) -> None:
+        key = _normalize_lookup(platform)
+        if key and str(reason or "").strip():
+            self.platform_errors[key] = str(reason).strip()
+
+    def get_platform_error(self, *, platform: str) -> str | None:
+        key = _normalize_lookup(platform)
+        if not key:
+            return None
+        reason = self.platform_errors.get(key)
+        return str(reason) if reason else None
 
 
 def log_provider_call(

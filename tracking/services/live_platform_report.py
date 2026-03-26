@@ -4,13 +4,12 @@ from dataclasses import dataclass
 
 from django.conf import settings
 
-from tracking.adapters.instagram import ApifyInstagramClient, seed_from_profiles
-from tracking.adapters.tiktok import ApifyTikTokClient, extract_handle as extract_tiktok_handle, seed_from_feed_items
 from tracking.models import Platform, TgUser, UserCompetitor
 from tracking.services.competitor_service import upsert_competitor
-from tracking.services.seed_resolver import SeedResolveError, resolve_seed_for_platform
-from tracking.services.provider_config import get_instagram_apify_config, get_tiktok_apify_config
+from tracking.services.platform_onboarding import fetch_instagram_profiles_cached, fetch_tiktok_profile_feed_cached
 from tracking.services.provider_runtime import ProviderFetchCache
+from tracking.services.provider_config import get_tiktok_apify_config
+from tracking.services.seed_resolver import SeedResolveError, resolve_seed_for_platform
 
 
 class LivePlatformReportError(RuntimeError):
@@ -26,60 +25,37 @@ class PreparedPlatformReport:
 
 
 def _fetch_tiktok_seed_and_cache(*, raw_input: str, cache: ProviderFetchCache):
+    seed = resolve_seed_for_platform(platform=Platform.TIKTOK, raw_input=raw_input)
+    if seed is None:
+        return None
     config = get_tiktok_apify_config()
-    if config.provider != "apify":
-        raise LivePlatformReportError(f"Unsupported TikTok provider: {config.provider}")
-    if not config.access_token:
-        raise LivePlatformReportError("TIKTOK_PROVIDER_ACCESS_TOKEN is not set")
-    if not config.actor_id:
-        raise LivePlatformReportError("TIKTOK_APIFY_PROFILE_ACTOR_ID is not set")
-    if not config.base_url:
-        raise LivePlatformReportError("TIKTOK_PROVIDER_BASE_URL is not set")
-    client = ApifyTikTokClient(
-        access_token=config.access_token,
-        actor_id=config.actor_id,
-        base_url=config.base_url,
+    max_results = max(
+        1,
+        min(
+            int(getattr(settings, "YT_RECENT_N_FOR_METRICS", 15)),
+            int(config.results_per_profile),
+        ),
     )
-    try:
-        max_results = max(
-            1,
-            min(
-                int(getattr(settings, "YT_RECENT_N_FOR_METRICS", 15)),
-                int(config.results_per_profile),
-            ),
-        )
-        handle = str(extract_tiktok_handle(raw_input) or "").strip()
-        if not handle:
-            raise LivePlatformReportError(f"TikTok resolve failed for {raw_input}: invalid handle or profile URL")
-        items = client.fetch_profile_feed(handle=handle, results_per_page=max_results)
-    finally:
-        client.close()
-    seed = seed_from_feed_items(raw_input=raw_input, items=items)
-    if seed and seed.handle:
+    items = fetch_tiktok_profile_feed_cached(
+        handle=str(seed.handle or "").strip(),
+        results_per_page=max_results,
+        purpose="live_report_seed",
+        context_id=cache.context_id,
+    )
+    if seed.handle and items:
         cache.store_tiktok_feed(handle=seed.handle, items=items)
     return seed
 
 
 def _fetch_instagram_seed_and_cache(*, raw_input: str, cache: ProviderFetchCache):
-    config = get_instagram_apify_config()
-    if config.provider != "apify":
-        raise LivePlatformReportError(f"Unsupported Instagram provider: {config.provider}")
-    if not config.access_token:
-        raise LivePlatformReportError("INSTAGRAM_PROVIDER_ACCESS_TOKEN is not set")
-    if not config.actor_id:
-        raise LivePlatformReportError("INSTAGRAM_APIFY_PROFILE_ACTOR_ID is not set")
-    if not config.base_url:
-        raise LivePlatformReportError("INSTAGRAM_PROVIDER_BASE_URL is not set")
-    client = ApifyInstagramClient(
-        access_token=config.access_token,
-        actor_id=config.actor_id,
-        base_url=config.base_url,
+    seed = resolve_seed_for_platform(platform=Platform.INSTAGRAM, raw_input=raw_input)
+    if seed is None:
+        return None
+    profiles = fetch_instagram_profiles_cached(
+        inputs=[raw_input],
+        purpose="live_report_seed",
+        context_id=cache.context_id,
     )
-    try:
-        profiles = client.fetch_profiles(inputs=[raw_input])
-    finally:
-        client.close()
-    seed = seed_from_profiles(raw_input=raw_input, profiles=profiles)
     if profiles:
         cache.store_instagram_profile(profile=profiles[0], lookups=[raw_input])
     return seed

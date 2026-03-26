@@ -20,6 +20,12 @@ from tracking.models import (
     UserCompetitor,
 )
 from tracking.services.collector import refresh_competitor
+from tracking.services.platform_onboarding import (
+    PlatformOnboardingError,
+    _find_instagram_profile_for_lookup,
+    fetch_instagram_profiles_cached,
+    fetch_tiktok_profile_feeds_cached,
+)
 from tracking.services.provider_runtime import ProviderFetchCache
 from tracking.services.reporting import (
     build_report_payload,
@@ -51,6 +57,107 @@ class SentReportResult:
 SETUP_REPORT_MAX_COMPETITORS_PER_PLATFORM = 20
 
 
+def _ensure_provider_fetch_cache(
+    *,
+    provider_fetch_cache: ProviderFetchCache | None,
+    purpose: str,
+) -> ProviderFetchCache:
+    if provider_fetch_cache is not None:
+        if not str(provider_fetch_cache.purpose or "").strip():
+            provider_fetch_cache.purpose = purpose
+        return provider_fetch_cache
+    return ProviderFetchCache(purpose=purpose)
+
+
+def _collection_mode_max_results(*, mode: str) -> int:
+    max_results = int(getattr(settings, "YT_RECENT_N_FOR_METRICS", 15))
+    if mode == "full":
+        max_results = int(getattr(settings, "BASELINE_N", 30))
+    return max(1, int(max_results))
+
+
+def _resolve_tiktok_handle(competitor: Competitor) -> str:
+    handle = (competitor.handle or "").strip()
+    if not handle:
+        handle = str((competitor.meta or {}).get("profile_handle") or "").strip()
+    if not handle and competitor.url:
+        handle = str(competitor.url.rstrip("/").split("/")[-1]).lstrip("@")
+    if not handle:
+        handle = competitor.external_id
+    return handle.lstrip("@").strip()
+
+
+def _resolve_instagram_lookup(competitor: Competitor) -> str:
+    lookup = (competitor.handle or "").strip()
+    if not lookup:
+        lookup = (competitor.url or "").strip()
+    if not lookup:
+        lookup = competitor.external_id.strip()
+    return lookup
+
+
+def _prefetch_provider_data_for_competitors(
+    *,
+    competitors: list[Competitor],
+    mode: str,
+    provider_fetch_cache: ProviderFetchCache,
+) -> None:
+    if not competitors:
+        return
+
+    tiktok_handles: list[str] = []
+    seen_tiktok: set[str] = set()
+    for competitor in competitors:
+        if competitor.platform != Platform.TIKTOK:
+            continue
+        handle = _resolve_tiktok_handle(competitor)
+        if not handle or handle in seen_tiktok or provider_fetch_cache.get_tiktok_feed(handle=handle) is not None:
+            continue
+        seen_tiktok.add(handle)
+        tiktok_handles.append(handle)
+    if tiktok_handles and provider_fetch_cache.get_platform_error(platform=Platform.TIKTOK) is None:
+        try:
+            grouped = fetch_tiktok_profile_feeds_cached(
+                handles=tiktok_handles,
+                results_per_page=_collection_mode_max_results(mode=mode),
+                purpose=provider_fetch_cache.purpose,
+                context_id=provider_fetch_cache.context_id,
+            )
+            for handle, items in grouped.items():
+                if items:
+                    provider_fetch_cache.store_tiktok_feed(handle=handle, items=items)
+        except PlatformOnboardingError as exc:
+            provider_fetch_cache.mark_platform_error(platform=Platform.TIKTOK, reason=str(exc))
+
+    instagram_lookups: list[str] = []
+    seen_instagram: set[str] = set()
+    for competitor in competitors:
+        if competitor.platform != Platform.INSTAGRAM:
+            continue
+        lookup = _resolve_instagram_lookup(competitor)
+        if (
+            not lookup
+            or lookup in seen_instagram
+            or provider_fetch_cache.get_instagram_profile(lookup=lookup) is not None
+        ):
+            continue
+        seen_instagram.add(lookup)
+        instagram_lookups.append(lookup)
+    if instagram_lookups and provider_fetch_cache.get_platform_error(platform=Platform.INSTAGRAM) is None:
+        try:
+            profiles = fetch_instagram_profiles_cached(
+                inputs=instagram_lookups,
+                purpose=provider_fetch_cache.purpose,
+                context_id=provider_fetch_cache.context_id,
+            )
+            for lookup in instagram_lookups:
+                profile = _find_instagram_profile_for_lookup(profiles, lookup)
+                if isinstance(profile, dict) and profile:
+                    provider_fetch_cache.store_instagram_profile(profile=profile, lookups=[lookup])
+        except PlatformOnboardingError as exc:
+            provider_fetch_cache.mark_platform_error(platform=Platform.INSTAGRAM, reason=str(exc))
+
+
 def get_active_competitors(*, user: TgUser) -> list[Competitor]:
     max_competitors = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
     competitors: list[Competitor] = []
@@ -73,6 +180,15 @@ def build_report_preview(
     provider_fetch_cache: ProviderFetchCache | None = None,
 ) -> ReportPreview:
     competitors = get_active_competitors(user=user)
+    provider_fetch_cache = _ensure_provider_fetch_cache(
+        provider_fetch_cache=provider_fetch_cache,
+        purpose="report_collection",
+    )
+    _prefetch_provider_data_for_competitors(
+        competitors=competitors,
+        mode="incremental",
+        provider_fetch_cache=provider_fetch_cache,
+    )
 
     updated_items = []
     for competitor in competitors:
@@ -117,6 +233,15 @@ def build_setup_verification_preview(
     provider_fetch_cache: ProviderFetchCache | None = None,
 ) -> ReportPreview:
     competitors = get_active_competitors(user=user)
+    provider_fetch_cache = _ensure_provider_fetch_cache(
+        provider_fetch_cache=provider_fetch_cache,
+        purpose="setup_verification",
+    )
+    _prefetch_provider_data_for_competitors(
+        competitors=competitors,
+        mode="full",
+        provider_fetch_cache=provider_fetch_cache,
+    )
     section_entries: dict[str, list[dict[str, Any]]] = {
         Platform.YOUTUBE: [],
         Platform.TIKTOK: [],

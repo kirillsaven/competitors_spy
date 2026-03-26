@@ -18,7 +18,11 @@ from tracking.adapters.tiktok import (
 )
 from tracking.adapters.youtube import extract_handle as extract_youtube_handle
 from tracking.models import Platform, TgUser, UserLinkedAccount
-from tracking.services.platform_onboarding import fetch_instagram_profiles_cached, fetch_tiktok_profile_feed_cached
+from tracking.services.platform_onboarding import (
+    fetch_instagram_profiles_cached,
+    fetch_tiktok_profile_feed_cached,
+    fetch_tiktok_profile_feeds_cached,
+)
 from tracking.services.provider_config import get_instagram_apify_config, get_tiktok_apify_config
 from tracking.services.seed_resolver import SeedResolveError, resolve_seed_for_platform
 from tracking.services.setup_runtime import (
@@ -439,16 +443,12 @@ class CheapAccountMatcher:
                 note="Нет дешевых кандидатов для TikTok: нет хендла или явных TikTok-подсказок в профиле.",
             )
         try:
-            items: list[dict] = []
-            for handle in handles:
-                items.extend(
-                    fetch_tiktok_profile_feed_cached(
-                        handle=handle,
-                        results_per_page=1,
-                        context=self.context,
-                        purpose="account_linking",
-                    )
-                )
+            grouped_items = fetch_tiktok_profile_feeds_cached(
+                handles=handles,
+                results_per_page=1,
+                context=self.context,
+                purpose="account_linking",
+            )
         except Exception as exc:
             status = mark_platform_failure(self.context, platform=Platform.TIKTOK, reason=str(exc))
             return LinkedAccountSuggestion(
@@ -457,6 +457,9 @@ class CheapAccountMatcher:
                 note=str(exc),
                 status=status,
             )
+        items: list[dict] = []
+        for handle in handles:
+            items.extend(grouped_items.get(handle, []))
         profiles = _build_candidate_profiles_from_tiktok(items)
         return self._rank_profiles(Platform.TIKTOK, profiles, note="TikTok-провайдер не подтвердил дешевые кандидаты.")
 

@@ -276,6 +276,37 @@ def _provider_context_id(*, context: SetupRunContext | None = None, context_id: 
     return str(getattr(context, "trace_id", "") or "").strip()
 
 
+def _search_cache_payload(*, items: list[dict[str, Any]], requested_limit: int) -> dict[str, Any]:
+    return {
+        "items": [item for item in items if isinstance(item, dict)],
+        "requested_limit": max(1, int(requested_limit)),
+    }
+
+
+def _read_search_cache_payload(value: object) -> tuple[list[dict[str, Any]], int | None]:
+    if isinstance(value, dict):
+        items = [item for item in (value.get("items") or []) if isinstance(item, dict)]
+        requested_limit = value.get("requested_limit")
+        try:
+            requested_limit_int = max(1, int(requested_limit)) if requested_limit is not None else None
+        except (TypeError, ValueError):
+            requested_limit_int = None
+        return items, requested_limit_int
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)], None
+    return [], None
+
+
+def _search_cache_satisfies_request(*, items: list[dict[str, Any]], cached_limit: int | None, requested_limit: int) -> bool:
+    if not items:
+        return True
+    if cached_limit is None:
+        return True
+    if len(items) >= requested_limit:
+        return True
+    return cached_limit >= requested_limit
+
+
 def _normalize_instagram_lookup(value: str) -> tuple[str, str]:
     raw = str(value or "").strip()
     if not raw:
@@ -582,33 +613,39 @@ def _cached_instagram_search_results(
     actor = str(getattr(config, "search_actor_id", "") or "")
     trace_id = _provider_context_id(context=context, context_id=context_id)
     if context is not None and cache_key in context.search_cache:
-        cached = context.search_cache[cache_key]
-        log_provider_call(
-            actor=actor,
-            platform=Platform.INSTAGRAM,
-            purpose=purpose,
-            cache="runtime_hit",
-            normalized_input=" ".join(query.strip().lower().split()),
-            requested_limit=limit,
-            returned_count=len(cached),
-            context_id=trace_id,
-        )
-        return [item for item in cached if isinstance(item, dict)]
+        cached_items, cached_limit = _read_search_cache_payload(context.search_cache[cache_key])
+        if _search_cache_satisfies_request(items=cached_items, cached_limit=cached_limit, requested_limit=limit):
+            log_provider_call(
+                actor=actor,
+                platform=Platform.INSTAGRAM,
+                purpose=purpose,
+                cache="runtime_hit",
+                normalized_input=" ".join(query.strip().lower().split()),
+                requested_limit=limit,
+                returned_count=len(cached_items),
+                context_id=trace_id,
+            )
+            return list(cached_items)
     retry_cached, retry_found = get_cached_retry_value(_retry_cache_key(layer="instagram-search", key=cache_key))
-    if retry_found and isinstance(retry_cached, list):
-        if context is not None:
-            context.search_cache[cache_key] = list(retry_cached)
-        log_provider_call(
-            actor=actor,
-            platform=Platform.INSTAGRAM,
-            purpose=purpose,
-            cache="ttl_hit",
-            normalized_input=" ".join(query.strip().lower().split()),
-            requested_limit=limit,
-            returned_count=len(retry_cached),
-            context_id=trace_id,
-        )
-        return [item for item in retry_cached if isinstance(item, dict)]
+    if retry_found:
+        retry_items, retry_limit = _read_search_cache_payload(retry_cached)
+        if _search_cache_satisfies_request(items=retry_items, cached_limit=retry_limit, requested_limit=limit):
+            if context is not None:
+                context.search_cache[cache_key] = _search_cache_payload(
+                    items=retry_items,
+                    requested_limit=retry_limit or limit,
+                )
+            log_provider_call(
+                actor=actor,
+                platform=Platform.INSTAGRAM,
+                purpose=purpose,
+                cache="ttl_hit",
+                normalized_input=" ".join(query.strip().lower().split()),
+                requested_limit=limit,
+                returned_count=len(retry_items),
+                context_id=trace_id,
+            )
+            return list(retry_items)
     if platform_is_blocked(context, Platform.INSTAGRAM):
         state = get_platform_state(context, Platform.INSTAGRAM)
         raise PlatformOnboardingError(state.reason or "Instagram is unavailable for this setup")
@@ -636,8 +673,11 @@ def _cached_instagram_search_results(
         context_id=trace_id,
     )
     if context is not None:
-        context.search_cache[cache_key] = list(filtered)
-    store_retry_value(_retry_cache_key(layer="instagram-search", key=cache_key), list(filtered))
+        context.search_cache[cache_key] = _search_cache_payload(items=filtered, requested_limit=limit)
+    store_retry_value(
+        _retry_cache_key(layer="instagram-search", key=cache_key),
+        _search_cache_payload(items=filtered, requested_limit=limit),
+    )
     return filtered
 
 
@@ -654,33 +694,39 @@ def _cached_tiktok_search_results(
     actor = str(getattr(config, "search_actor_id", "") or "")
     trace_id = _provider_context_id(context=context, context_id=context_id)
     if context is not None and cache_key in context.search_cache:
-        cached = context.search_cache[cache_key]
-        log_provider_call(
-            actor=actor,
-            platform=Platform.TIKTOK,
-            purpose=purpose,
-            cache="runtime_hit",
-            normalized_input=" ".join(query.strip().lower().split()),
-            requested_limit=limit,
-            returned_count=len(cached),
-            context_id=trace_id,
-        )
-        return [item for item in cached if isinstance(item, dict)]
+        cached_items, cached_limit = _read_search_cache_payload(context.search_cache[cache_key])
+        if _search_cache_satisfies_request(items=cached_items, cached_limit=cached_limit, requested_limit=limit):
+            log_provider_call(
+                actor=actor,
+                platform=Platform.TIKTOK,
+                purpose=purpose,
+                cache="runtime_hit",
+                normalized_input=" ".join(query.strip().lower().split()),
+                requested_limit=limit,
+                returned_count=len(cached_items),
+                context_id=trace_id,
+            )
+            return list(cached_items)
     retry_cached, retry_found = get_cached_retry_value(_retry_cache_key(layer="tiktok-search", key=cache_key))
-    if retry_found and isinstance(retry_cached, list):
-        if context is not None:
-            context.search_cache[cache_key] = list(retry_cached)
-        log_provider_call(
-            actor=actor,
-            platform=Platform.TIKTOK,
-            purpose=purpose,
-            cache="ttl_hit",
-            normalized_input=" ".join(query.strip().lower().split()),
-            requested_limit=limit,
-            returned_count=len(retry_cached),
-            context_id=trace_id,
-        )
-        return [item for item in retry_cached if isinstance(item, dict)]
+    if retry_found:
+        retry_items, retry_limit = _read_search_cache_payload(retry_cached)
+        if _search_cache_satisfies_request(items=retry_items, cached_limit=retry_limit, requested_limit=limit):
+            if context is not None:
+                context.search_cache[cache_key] = _search_cache_payload(
+                    items=retry_items,
+                    requested_limit=retry_limit or limit,
+                )
+            log_provider_call(
+                actor=actor,
+                platform=Platform.TIKTOK,
+                purpose=purpose,
+                cache="ttl_hit",
+                normalized_input=" ".join(query.strip().lower().split()),
+                requested_limit=limit,
+                returned_count=len(retry_items),
+                context_id=trace_id,
+            )
+            return list(retry_items)
     if platform_is_blocked(context, Platform.TIKTOK):
         state = get_platform_state(context, Platform.TIKTOK)
         raise PlatformOnboardingError(state.reason or "TikTok is unavailable for this setup")
@@ -714,8 +760,11 @@ def _cached_tiktok_search_results(
         context_id=trace_id,
     )
     if context is not None:
-        context.search_cache[cache_key] = list(filtered)
-    store_retry_value(_retry_cache_key(layer="tiktok-search", key=cache_key), list(filtered))
+        context.search_cache[cache_key] = _search_cache_payload(items=filtered, requested_limit=limit)
+    store_retry_value(
+        _retry_cache_key(layer="tiktok-search", key=cache_key),
+        _search_cache_payload(items=filtered, requested_limit=limit),
+    )
     return filtered
 
 

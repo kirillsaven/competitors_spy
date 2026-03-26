@@ -212,6 +212,10 @@ def refresh_tiktok_competitor(
 ) -> list[ContentItem]:
     if competitor.platform != Platform.TIKTOK:
         return []
+    if provider_fetch_cache is not None:
+        cached_error = provider_fetch_cache.get_platform_error(platform=Platform.TIKTOK)
+        if cached_error:
+            raise CollectorError(cached_error)
 
     config = get_tiktok_apify_config()
     max_results = int(getattr(settings, "YT_RECENT_N_FOR_METRICS", 15))
@@ -243,6 +247,8 @@ def refresh_tiktok_competitor(
                     context_id=context_id,
                 )
             except PlatformOnboardingError as exc:
+                if provider_fetch_cache is not None:
+                    provider_fetch_cache.mark_platform_error(platform=Platform.TIKTOK, reason=str(exc))
                 raise CollectorError(str(exc)) from exc
             if provider_fetch_cache is not None and items:
                 provider_fetch_cache.store_tiktok_feed(handle=handle, items=items)
@@ -353,6 +359,10 @@ def refresh_instagram_competitor(
 ) -> list[ContentItem]:
     if competitor.platform != Platform.INSTAGRAM:
         return []
+    if provider_fetch_cache is not None:
+        cached_error = provider_fetch_cache.get_platform_error(platform=Platform.INSTAGRAM)
+        if cached_error:
+            raise CollectorError(cached_error)
 
     lookup = (competitor.handle or "").strip()
     if not lookup:
@@ -376,6 +386,8 @@ def refresh_instagram_competitor(
                     context_id=context_id,
                 )
             except PlatformOnboardingError as exc:
+                if provider_fetch_cache is not None:
+                    provider_fetch_cache.mark_platform_error(platform=Platform.INSTAGRAM, reason=str(exc))
                 raise CollectorError(str(exc)) from exc
         if not profiles:
             raise CollectorError(f"Instagram profile returned no items: lookup={lookup}")

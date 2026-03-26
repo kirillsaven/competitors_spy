@@ -110,24 +110,27 @@ def test_suggest_accounts_for_platform_uses_provider_hint_and_small_tiktok_input
         description="TikTok: https://www.tiktok.com/@creator_live",
     )
 
-    calls: list[tuple[str, int]] = []
+    calls: list[tuple[tuple[str, ...], int]] = []
     monkeypatch.setattr(
         account_linking,
-        "fetch_tiktok_profile_feed_cached",
-        lambda *, handle, results_per_page, context=None, purpose=None, context_id=None: (
-            calls.append((handle, results_per_page)),
-            [
-                {
-                    "authorMeta": {
-                        "id": "tt-1",
-                        "name": "creator_live",
-                        "nickName": "Creator",
-                        "signature": "Official account. IG https://www.instagram.com/creator/",
+        "fetch_tiktok_profile_feeds_cached",
+        lambda *, handles, results_per_page, context=None, purpose=None, context_id=None: (
+            calls.append((tuple(handles), results_per_page)),
+            {
+                handle: [
+                    {
+                        "authorMeta": {
+                            "id": "tt-1",
+                            "name": "creator_live",
+                            "nickName": "Creator",
+                            "signature": "Official account. IG https://www.instagram.com/creator/",
+                        }
                     }
-                }
-            ]
-            if handle == "creator_live"
-            else []
+                ]
+                if handle == "creator_live"
+                else []
+                for handle in handles
+            }
         )[1],
     )
 
@@ -136,7 +139,7 @@ def test_suggest_accounts_for_platform_uses_provider_hint_and_small_tiktok_input
     assert suggestion.note is None
     assert [candidate.seed.external_id for candidate in suggestion.candidates] == ["tt-1"]
     assert "provider_hint" in suggestion.candidates[0].signals
-    assert calls == [("creator", 1), ("creator_live", 1)]
+    assert calls == [(("creator", "creator_live"), 1)]
 
 
 def test_suggest_accounts_for_platforms_reuses_matcher_for_multiple_targets(monkeypatch):

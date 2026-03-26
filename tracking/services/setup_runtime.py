@@ -37,7 +37,7 @@ class SetupRunContext:
     seed_resolution_cache: dict[str, tuple[object | None, str | None]] = field(default_factory=dict)
     profile_cache: dict[str, object] = field(default_factory=dict)
     recent_content_cache: dict[str, list[str]] = field(default_factory=dict)
-    search_cache: dict[str, list[object]] = field(default_factory=dict)
+    search_cache: dict[str, object] = field(default_factory=dict)
     platform_states: dict[str, PlatformRuntimeState] = field(
         default_factory=lambda: {
             platform: PlatformRuntimeState()

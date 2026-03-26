@@ -1025,6 +1025,38 @@ def test_retry_cache_reuses_instagram_search_results_across_setup_retries(monkey
     assert calls == {"search": 1}
 
 
+def test_instagram_search_refetches_when_cached_pool_is_too_small_for_higher_limit(monkeypatch):
+    clear_retry_cache()
+    calls: list[int] = []
+
+    class FakeClient:
+        def search_profiles(self, *, query, limit=None):
+            calls.append(int(limit or 0))
+            if len(calls) == 1:
+                return [
+                    {"id": "ig-1", "username": "teacher_hub", "full_name": "Teacher Hub"},
+                    {"id": "ig-2", "username": "lessonlab", "full_name": "Lesson Lab"},
+                ]
+            return [
+                {"id": "ig-1", "username": "teacher_hub", "full_name": "Teacher Hub"},
+                {"id": "ig-2", "username": "lessonlab", "full_name": "Lesson Lab"},
+                {"id": "ig-3", "username": "teachernotes", "full_name": "Teacher Notes"},
+                {"id": "ig-4", "username": "classroomclub", "full_name": "Classroom Club"},
+            ]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(platform_onboarding, "_get_instagram_client", lambda: FakeClient())
+
+    first = platform_onboarding._cached_instagram_search_results(query="english tutors", limit=2, context=None)
+    second = platform_onboarding._cached_instagram_search_results(query="english tutors", limit=4, context=None)
+
+    assert [item["id"] for item in first] == ["ig-1", "ig-2"]
+    assert [item["id"] for item in second] == ["ig-1", "ig-2", "ig-3", "ig-4"]
+    assert calls == [2, 4]
+
+
 def test_discover_competitors_for_onboarding_validates_multiple_ig_tt_candidates(monkeypatch):
     monkeypatch.setattr(platform_onboarding, "_discover_youtube_search_candidates", lambda **kwargs: [])
     monkeypatch.setattr(
@@ -1143,3 +1175,35 @@ def test_discover_competitors_for_onboarding_validates_multiple_ig_tt_candidates
         (Platform.TIKTOK, "teachertok1"),
         (Platform.TIKTOK, "teachertok2"),
     ]
+
+
+def test_tiktok_search_refetches_when_cached_pool_is_too_small_for_higher_limit(monkeypatch):
+    clear_retry_cache()
+    calls: list[int] = []
+
+    class FakeClient:
+        def search_profiles(self, *, query, limit=None):
+            calls.append(int(limit or 0))
+            if len(calls) == 1:
+                return [
+                    {"id": "tt-1", "name": "teacherhub", "nickName": "Teacher Hub"},
+                    {"id": "tt-2", "name": "lessonlab", "nickName": "Lesson Lab"},
+                ]
+            return [
+                {"id": "tt-1", "name": "teacherhub", "nickName": "Teacher Hub"},
+                {"id": "tt-2", "name": "lessonlab", "nickName": "Lesson Lab"},
+                {"id": "tt-3", "name": "teachernotes", "nickName": "Teacher Notes"},
+                {"id": "tt-4", "name": "classroomclub", "nickName": "Classroom Club"},
+            ]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(platform_onboarding, "_get_tiktok_client", lambda: FakeClient())
+
+    first = platform_onboarding._cached_tiktok_search_results(query="english tutors", limit=2, context=None)
+    second = platform_onboarding._cached_tiktok_search_results(query="english tutors", limit=4, context=None)
+
+    assert [item["id"] for item in first] == ["tt-1", "tt-2"]
+    assert [item["id"] for item in second] == ["tt-1", "tt-2", "tt-3", "tt-4"]
+    assert calls == [2, 4]
