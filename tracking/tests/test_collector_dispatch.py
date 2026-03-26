@@ -172,8 +172,8 @@ def test_refresh_tiktok_competitor_raises_for_unsupported_provider(db, monkeypat
     competitor = Competitor.objects.create(platform=Platform.TIKTOK, external_id="tt-user", handle="tt-user")
     monkeypatch.setattr(
         collector,
-        "get_tiktok_apify_config",
-        lambda: SimpleNamespace(provider="stub", access_token="", actor_id="", base_url="", results_per_profile=10),
+        "fetch_tiktok_profile_feed_cached",
+        lambda **kwargs: (_ for _ in ()).throw(collector.CollectorError("Unsupported TikTok provider: stub")),
     )
 
     with pytest.raises(collector.CollectorError, match="Unsupported TikTok provider: stub"):
@@ -188,14 +188,8 @@ def test_refresh_tiktok_competitor_raises_for_missing_credentials(db, monkeypatc
     competitor = Competitor.objects.create(platform=Platform.TIKTOK, external_id="tt-user", handle="tt-user")
     monkeypatch.setattr(
         collector,
-        "get_tiktok_apify_config",
-        lambda: SimpleNamespace(
-            provider="apify",
-            access_token="",
-            actor_id="clockworks/tiktok-profile-scraper",
-            base_url="https://api.apify.com/v2",
-            results_per_profile=10,
-        ),
+        "fetch_tiktok_profile_feed_cached",
+        lambda **kwargs: (_ for _ in ()).throw(collector.CollectorError("TIKTOK_PROVIDER_ACCESS_TOKEN is not set")),
     )
 
     with pytest.raises(collector.CollectorError, match="TIKTOK_PROVIDER_ACCESS_TOKEN is not set"):
@@ -209,25 +203,7 @@ def test_refresh_tiktok_competitor_raises_for_missing_credentials(db, monkeypatc
 def test_refresh_tiktok_competitor_raises_when_provider_returns_no_items(db, monkeypatch):
     competitor = Competitor.objects.create(platform=Platform.TIKTOK, external_id="tt-user", handle="apifytech")
 
-    class FakeClient:
-        def fetch_profile_feed(self, *, handle, results_per_page):
-            return []
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr(
-        collector,
-        "get_tiktok_apify_config",
-        lambda: SimpleNamespace(
-            provider="apify",
-            access_token="token",
-            actor_id="actor",
-            base_url="https://api.apify.com/v2",
-            results_per_profile=10,
-        ),
-    )
-    monkeypatch.setattr(collector, "_get_tiktok_client", lambda: FakeClient())
+    monkeypatch.setattr(collector, "fetch_tiktok_profile_feed_cached", lambda **kwargs: [])
 
     with pytest.raises(collector.CollectorError, match="TikTok profile returned no items: handle=apifytech"):
         collector.refresh_tiktok_competitor(
@@ -259,21 +235,12 @@ def test_refresh_tiktok_competitor_persists_items_and_shares(db, monkeypatch):
         "isSlideshow": False,
     }
 
-    class FakeClient:
-        def fetch_profile_feed(self, *, handle, results_per_page):
-            assert handle == "apifytech"
-            assert results_per_page == 10
-            return [sample_item]
+    def fake_fetch_tiktok_profile_feed_cached(**kwargs):
+        assert kwargs["handle"] == "apifytech"
+        assert kwargs["results_per_page"] == 10
+        return [sample_item]
 
-        def close(self):
-            return None
-
-    monkeypatch.setattr(
-        collector,
-        "get_tiktok_apify_config",
-        lambda: SimpleNamespace(provider="apify", access_token="token", actor_id="actor", base_url="url", results_per_profile=10),
-    )
-    monkeypatch.setattr(collector, "_get_tiktok_client", lambda: FakeClient())
+    monkeypatch.setattr(collector, "fetch_tiktok_profile_feed_cached", fake_fetch_tiktok_profile_feed_cached)
 
     items = collector.refresh_tiktok_competitor(
         competitor=competitor,
@@ -317,12 +284,7 @@ def test_refresh_tiktok_competitor_uses_cached_feed_without_provider_call(db, mo
     def fail_tiktok_client():
         raise AssertionError("provider should not be called")
 
-    monkeypatch.setattr(collector, "_get_tiktok_client", fail_tiktok_client)
-    monkeypatch.setattr(
-        collector,
-        "get_tiktok_apify_config",
-        lambda: SimpleNamespace(provider="apify", access_token="token", actor_id="actor", base_url="url", results_per_profile=10),
-    )
+    monkeypatch.setattr(collector, "fetch_tiktok_profile_feed_cached", lambda **kwargs: fail_tiktok_client())
 
     items = collector.refresh_tiktok_competitor(
         competitor=competitor,
@@ -356,19 +318,7 @@ def test_refresh_tiktok_competitor_truncates_overlong_title_but_keeps_full_descr
         "commentCount": 10,
     }
 
-    class FakeClient:
-        def fetch_profile_feed(self, *, handle, results_per_page):
-            return [sample_item]
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr(
-        collector,
-        "get_tiktok_apify_config",
-        lambda: SimpleNamespace(provider="apify", access_token="token", actor_id="actor", base_url="url", results_per_profile=10),
-    )
-    monkeypatch.setattr(collector, "_get_tiktok_client", lambda: FakeClient())
+    monkeypatch.setattr(collector, "fetch_tiktok_profile_feed_cached", lambda **kwargs: [sample_item])
 
     collector.refresh_tiktok_competitor(
         competitor=competitor,
@@ -386,8 +336,8 @@ def test_refresh_instagram_competitor_raises_for_unsupported_provider(db, monkey
     competitor = Competitor.objects.create(platform=Platform.INSTAGRAM, external_id="ig-user", handle="ig-user")
     monkeypatch.setattr(
         collector,
-        "get_instagram_apify_config",
-        lambda: SimpleNamespace(provider="stub", access_token="", actor_id="", base_url=""),
+        "fetch_instagram_profiles_cached",
+        lambda **kwargs: (_ for _ in ()).throw(collector.CollectorError("Unsupported Instagram provider: stub")),
     )
 
     with pytest.raises(collector.CollectorError, match="Unsupported Instagram provider: stub"):
@@ -402,13 +352,8 @@ def test_refresh_instagram_competitor_raises_for_missing_credentials(db, monkeyp
     competitor = Competitor.objects.create(platform=Platform.INSTAGRAM, external_id="ig-user", handle="ig-user")
     monkeypatch.setattr(
         collector,
-        "get_instagram_apify_config",
-        lambda: SimpleNamespace(
-            provider="apify",
-            access_token="",
-            actor_id="apify/instagram-profile-scraper",
-            base_url="https://api.apify.com/v2",
-        ),
+        "fetch_instagram_profiles_cached",
+        lambda **kwargs: (_ for _ in ()).throw(collector.CollectorError("INSTAGRAM_PROVIDER_ACCESS_TOKEN is not set")),
     )
 
     with pytest.raises(collector.CollectorError, match="INSTAGRAM_PROVIDER_ACCESS_TOKEN is not set"):
@@ -422,24 +367,7 @@ def test_refresh_instagram_competitor_raises_for_missing_credentials(db, monkeyp
 def test_refresh_instagram_competitor_raises_when_provider_returns_no_items(db, monkeypatch):
     competitor = Competitor.objects.create(platform=Platform.INSTAGRAM, external_id="ig-user", handle="apifytech")
 
-    class FakeClient:
-        def fetch_profiles(self, *, inputs):
-            return []
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr(
-        collector,
-        "get_instagram_apify_config",
-        lambda: SimpleNamespace(
-            provider="apify",
-            access_token="token",
-            actor_id="actor",
-            base_url="https://api.apify.com/v2",
-        ),
-    )
-    monkeypatch.setattr(collector, "_get_instagram_client", lambda: FakeClient())
+    monkeypatch.setattr(collector, "fetch_instagram_profiles_cached", lambda **kwargs: [])
 
     with pytest.raises(collector.CollectorError, match="Instagram profile returned no items: lookup=apifytech"):
         collector.refresh_instagram_competitor(
@@ -472,24 +400,7 @@ def test_refresh_instagram_competitor_raises_when_profile_has_no_recent_reels(db
         ],
     }
 
-    class FakeClient:
-        def fetch_profiles(self, *, inputs):
-            return [sample_profile]
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr(
-        collector,
-        "get_instagram_apify_config",
-        lambda: SimpleNamespace(
-            provider="apify",
-            access_token="token",
-            actor_id="actor",
-            base_url="https://api.apify.com/v2",
-        ),
-    )
-    monkeypatch.setattr(collector, "_get_instagram_client", lambda: FakeClient())
+    monkeypatch.setattr(collector, "fetch_instagram_profiles_cached", lambda **kwargs: [sample_profile])
 
     with pytest.raises(
         collector.CollectorError,
@@ -527,25 +438,11 @@ def test_refresh_instagram_competitor_persists_items_and_shares(db, monkeypatch)
         ],
     }
 
-    class FakeClient:
-        def fetch_profiles(self, *, inputs):
-            assert inputs == ["apifytech"]
-            return [sample_profile]
+    def fake_fetch_instagram_profiles_cached(**kwargs):
+        assert kwargs["inputs"] == ["apifytech"]
+        return [sample_profile]
 
-        def close(self):
-            return None
-
-    monkeypatch.setattr(
-        collector,
-        "get_instagram_apify_config",
-        lambda: SimpleNamespace(
-            provider="apify",
-            access_token="token",
-            actor_id="actor",
-            base_url="https://api.apify.com/v2",
-        ),
-    )
-    monkeypatch.setattr(collector, "_get_instagram_client", lambda: FakeClient())
+    monkeypatch.setattr(collector, "fetch_instagram_profiles_cached", fake_fetch_instagram_profiles_cached)
 
     items = collector.refresh_instagram_competitor(
         competitor=competitor,
@@ -594,7 +491,7 @@ def test_refresh_instagram_competitor_uses_cached_profile_without_provider_call(
     def fail_instagram_client():
         raise AssertionError("provider should not be called")
 
-    monkeypatch.setattr(collector, "_get_instagram_client", fail_instagram_client)
+    monkeypatch.setattr(collector, "fetch_instagram_profiles_cached", lambda **kwargs: fail_instagram_client())
 
     items = collector.refresh_instagram_competitor(
         competitor=competitor,
@@ -632,24 +529,7 @@ def test_refresh_instagram_competitor_truncates_overlong_title_but_keeps_full_de
         ],
     }
 
-    class FakeClient:
-        def fetch_profiles(self, *, inputs):
-            return [sample_profile]
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr(
-        collector,
-        "get_instagram_apify_config",
-        lambda: SimpleNamespace(
-            provider="apify",
-            access_token="token",
-            actor_id="actor",
-            base_url="https://api.apify.com/v2",
-        ),
-    )
-    monkeypatch.setattr(collector, "_get_instagram_client", lambda: FakeClient())
+    monkeypatch.setattr(collector, "fetch_instagram_profiles_cached", lambda **kwargs: [sample_profile])
 
     collector.refresh_instagram_competitor(
         competitor=competitor,

@@ -406,7 +406,11 @@ class CheapAccountMatcher:
                 note="Нет дешевых кандидатов для Instagram: нет хендла или явных Instagram-подсказок в профиле.",
             )
         try:
-            profiles = fetch_instagram_profiles_cached(inputs=handles, context=self.context)
+            profiles = fetch_instagram_profiles_cached(
+                inputs=handles,
+                context=self.context,
+                purpose="account_linking",
+            )
         except Exception as exc:
             status = mark_platform_failure(self.context, platform=Platform.INSTAGRAM, reason=str(exc))
             return LinkedAccountSuggestion(
@@ -438,7 +442,12 @@ class CheapAccountMatcher:
             items: list[dict] = []
             for handle in handles:
                 items.extend(
-                    fetch_tiktok_profile_feed_cached(handle=handle, results_per_page=1, context=self.context)
+                    fetch_tiktok_profile_feed_cached(
+                        handle=handle,
+                        results_per_page=1,
+                        context=self.context,
+                        purpose="account_linking",
+                    )
                 )
         except Exception as exc:
             status = mark_platform_failure(self.context, platform=Platform.TIKTOK, reason=str(exc))

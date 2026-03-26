@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from uuid import uuid4
 
 from tracking.models import Platform
 
@@ -32,6 +33,7 @@ class PlatformRuntimeState:
 
 @dataclass
 class SetupRunContext:
+    trace_id: str = field(default_factory=lambda: uuid4().hex)
     seed_resolution_cache: dict[str, tuple[object | None, str | None]] = field(default_factory=dict)
     profile_cache: dict[str, object] = field(default_factory=dict)
     recent_content_cache: dict[str, list[str]] = field(default_factory=dict)

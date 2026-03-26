@@ -70,7 +70,12 @@ def _resolve_tiktok_seed(raw_input: str, *, context: SetupRunContext | None = No
     handle = extract_tiktok_handle(raw_input)
     if not handle:
         return None
-    items = fetch_tiktok_profile_feed_cached(handle=handle, results_per_page=1, context=context)
+    items = fetch_tiktok_profile_feed_cached(
+        handle=handle,
+        results_per_page=1,
+        context=context,
+        purpose="seed_resolution",
+    )
     return seed_from_feed_items(raw_input=raw_input, items=items)
 
 
@@ -79,7 +84,11 @@ def _resolve_instagram_seed(raw_input: str, *, context: SetupRunContext | None =
     handle = extract_instagram_handle(raw_input)
     if not lookup or (not handle and not lookup.lower().startswith(("http://", "https://"))):
         return None
-    profiles = fetch_instagram_profiles_cached(inputs=[lookup], context=context)
+    profiles = fetch_instagram_profiles_cached(
+        inputs=[lookup],
+        context=context,
+        purpose="seed_resolution",
+    )
     return seed_from_profiles(raw_input=raw_input, profiles=profiles)
 
 

@@ -359,7 +359,7 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
         ],
     )
 
-    def fake_fetch_instagram_profiles_cached(*, inputs, context=None):
+    def fake_fetch_instagram_profiles_cached(*, inputs, context=None, purpose=None, context_id=None):
         lookup = inputs[0]
         if "reelhub" in lookup:
             return [
@@ -395,7 +395,7 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
             }
         ]
 
-    def fake_fetch_tiktok_profile_feed_cached(*, handle, results_per_page, context=None):
+    def fake_fetch_tiktok_profile_feed_cached(*, handle, results_per_page, context=None, purpose=None, context_id=None):
         if handle == "teachertok":
             return [
                 {

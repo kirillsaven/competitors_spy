@@ -62,7 +62,7 @@ def test_resolve_seed_for_platform_reuses_retry_cache(monkeypatch):
     clear_retry_cache()
     calls = {"instagram": 0}
 
-    def fake_fetch_profiles_cached(*, inputs, context=None):
+    def fake_fetch_profiles_cached(*, inputs, context=None, purpose=None, context_id=None):
         calls["instagram"] += 1
         return [
             {

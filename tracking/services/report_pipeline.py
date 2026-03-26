@@ -82,6 +82,10 @@ def _run_collection_pass(
     period_end,
     provider_fetch_cache: ProviderFetchCache | None = None,
 ) -> CollectionPassResult:
+    provider_fetch_cache = provider_fetch_cache or ProviderFetchCache(
+        context_id=f"report:{user.id}:{int(period_end.timestamp())}",
+        purpose="report_collection",
+    )
     competitors = get_active_competitors(user=user)
     updated_items: list[ContentItem] = []
     successful_competitors: list[Competitor] = []

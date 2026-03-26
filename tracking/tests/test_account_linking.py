@@ -114,7 +114,7 @@ def test_suggest_accounts_for_platform_uses_provider_hint_and_small_tiktok_input
     monkeypatch.setattr(
         account_linking,
         "fetch_tiktok_profile_feed_cached",
-        lambda *, handle, results_per_page, context=None: (
+        lambda *, handle, results_per_page, context=None, purpose=None, context_id=None: (
             calls.append((handle, results_per_page)),
             [
                 {
