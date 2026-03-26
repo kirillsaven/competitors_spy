@@ -17,9 +17,11 @@ EPS = 1e-6
 class BaselineMetrics:
     vph_median: float
     vph_iqr: float
-    er_median: float | None
-    er_iqr: float | None
-    n: int
+    rph_median: float | None = None
+    rph_iqr: float | None = None
+    er_median: float | None = None
+    er_iqr: float | None = None
+    n: int = 0
 
 
 @dataclass(frozen=True)
@@ -51,6 +53,7 @@ def compute_competitor_baseline(*, competitor: Competitor, now: datetime) -> Bas
 
     vph_values: list[float] = []
     er_values: list[float] = []
+    rph_values: list[float] = []
 
     for item in items:
         snap = MetricSnapshot.objects.filter(content_item=item).order_by("-captured_at").first()
@@ -60,21 +63,51 @@ def compute_competitor_baseline(*, competitor: Competitor, now: datetime) -> Bas
         if age_hours <= 0:
             continue
         vph_values.append(float(snap.views) / age_hours)
+        reactions_total = 0
+        has_reaction_data = False
+        for value in (snap.likes, snap.comments, snap.shares):
+            if value is not None:
+                reactions_total += int(value)
+                has_reaction_data = True
+        if has_reaction_data:
+            rph_values.append(float(reactions_total) / age_hours)
         if snap.likes is not None and snap.comments is not None and snap.views > 0:
             er_values.append(float(snap.likes + snap.comments) / float(snap.views))
 
     if not vph_values:
-        metrics = BaselineMetrics(vph_median=0.0, vph_iqr=1.0, er_median=None, er_iqr=None, n=0)
+        metrics = BaselineMetrics(
+            vph_median=0.0,
+            vph_iqr=1.0,
+            rph_median=None,
+            rph_iqr=None,
+            er_median=None,
+            er_iqr=None,
+            n=0,
+        )
     else:
         vph_med = median(vph_values)
         vph_i = max(iqr(vph_values), EPS)
+        if rph_values:
+            rph_med = median(rph_values)
+            rph_i = max(iqr(rph_values), EPS)
+        else:
+            rph_med = None
+            rph_i = None
         if er_values:
             er_med = median(er_values)
             er_i = max(iqr(er_values), EPS)
         else:
             er_med = None
             er_i = None
-        metrics = BaselineMetrics(vph_median=vph_med, vph_iqr=vph_i, er_median=er_med, er_iqr=er_i, n=len(vph_values))
+        metrics = BaselineMetrics(
+            vph_median=vph_med,
+            vph_iqr=vph_i,
+            rph_median=rph_med,
+            rph_iqr=rph_i,
+            er_median=er_med,
+            er_iqr=er_i,
+            n=len(vph_values),
+        )
 
     CompetitorBaseline.objects.create(
         competitor=competitor,
@@ -84,6 +117,8 @@ def compute_competitor_baseline(*, competitor: Competitor, now: datetime) -> Bas
         metrics={
             "vph_median": metrics.vph_median,
             "vph_iqr": metrics.vph_iqr,
+            "rph_median": metrics.rph_median,
+            "rph_iqr": metrics.rph_iqr,
             "er_median": metrics.er_median,
             "er_iqr": metrics.er_iqr,
             "n": metrics.n,

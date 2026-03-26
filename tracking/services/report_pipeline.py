@@ -26,6 +26,9 @@ from tracking.services.reporting import (
 from tracking.services.scoring import compute_competitor_baseline, score_items_for_period
 
 logger = logging.getLogger(__name__)
+TIKTOK_REPORT_PREFETCH_BATCH_SIZE = 1
+INSTAGRAM_REPORT_PREFETCH_BATCH_SIZE = 10
+TIKTOK_REPORT_PREFETCH_RESULTS = 6
 
 
 class ReportPipelineError(RuntimeError):
@@ -101,6 +104,46 @@ def _chunked(values: list[str], size: int) -> list[list[str]]:
     return [values[index : index + size] for index in range(0, len(values), size)]
 
 
+def _baseline_metric(baseline: Any, key: str, default: Any = None) -> Any:
+    if baseline is None:
+        return default
+    if isinstance(baseline, dict):
+        return baseline.get(key, default)
+    return getattr(baseline, key, default)
+
+
+def _summarize_scheduled_report_reason(
+    *,
+    successful_competitors: list[Competitor],
+    collection_failures: list[ReportCollectionFailure],
+    updated_items: list[ContentItem],
+    scored_count: int,
+    baseline_by_competitor_id: dict[int, Any],
+) -> tuple[str, str]:
+    if scored_count > 0:
+        return "", ""
+    baseline_ready = sum(1 for baseline in baseline_by_competitor_id.values() if int(_baseline_metric(baseline, "n", 0) or 0) > 0)
+    if successful_competitors and baseline_ready == 0:
+        return (
+            "baseline_not_ready",
+            "Недостаточно истории для обычного аномального отчета: первый проверочный сбор уже сохранен, следующий отчет сравнит новые данные с этой базой.",
+        )
+    if not updated_items and collection_failures:
+        return (
+            "collection_failed",
+            "Обычный аномальный отчет пока не собран: повторный сбор данных завершился ошибками, полезных новых элементов для сравнения нет.",
+        )
+    if collection_failures:
+        return (
+            "partial_collection_no_scored_items",
+            "Повторный сбор прошел частично, но после фильтров и сравнения со средними значениями автора аномальные элементы не остались.",
+        )
+    return (
+        "no_scored_items",
+        "Новые элементы собраны, но ни один не превысил обычные значения автора для этого окна сравнения.",
+    )
+
+
 def _prime_provider_fetch_cache_for_competitors(
     *,
     competitors: list[Competitor],
@@ -117,7 +160,7 @@ def _prime_provider_fetch_cache_for_competitors(
         if competitor.platform == Platform.TIKTOK
     ]
 
-    for chunk in _chunked([lookup for lookup in instagram_lookups if lookup], 10):
+    for chunk in _chunked([lookup for lookup in instagram_lookups if lookup], INSTAGRAM_REPORT_PREFETCH_BATCH_SIZE):
         try:
             profiles = fetch_instagram_profiles_cached(
                 inputs=chunk,
@@ -136,9 +179,9 @@ def _prime_provider_fetch_cache_for_competitors(
         config = get_tiktok_apify_config()
         max_results = min(
             int(getattr(settings, "YT_RECENT_N_FOR_METRICS", 15)),
-            int(getattr(config, "results_per_profile", 10) or 10),
+            min(int(getattr(config, "results_per_profile", 10) or 10), TIKTOK_REPORT_PREFETCH_RESULTS),
         )
-        for chunk in _chunked([handle for handle in tiktok_handles if handle], 3):
+        for chunk in _chunked([handle for handle in tiktok_handles if handle], TIKTOK_REPORT_PREFETCH_BATCH_SIZE):
             try:
                 grouped = fetch_tiktok_profile_feeds_cached(
                     handles=chunk,
@@ -242,10 +285,20 @@ def build_report_preview(
         period_end=period_end,
     )
 
+    report_reason_code, report_reason = _summarize_scheduled_report_reason(
+        successful_competitors=collection.successful_competitors,
+        collection_failures=collection.collection_failures,
+        updated_items=collection.updated_items,
+        scored_count=len(scored),
+        baseline_by_competitor_id=baseline_by_competitor_id,
+    )
     payload = build_report_payload(
         scored=scored,
         period_start=period_start,
         period_end=period_end,
+        baseline_by_competitor_id=baseline_by_competitor_id,
+        report_reason_code=report_reason_code,
+        report_reason=report_reason,
         collection_failures=[
             {
                 "platform": failure.platform,

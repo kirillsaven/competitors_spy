@@ -14,6 +14,7 @@ from tracking.models import (
     Competitor,
     JobRun,
     JobStatus,
+    Report,
     ReportStatus,
     Schedule,
     TgUser,
@@ -40,6 +41,25 @@ def _generate_and_send_report(*, user: TgUser, period_start, period_end, trigger
             period_end=period_end,
         ).report
     return create_and_send_report(user=user, period_start=period_start, period_end=period_end).report
+
+
+def _setup_schedule_grace() -> timedelta:
+    return timedelta(minutes=max(1, int(getattr(settings, "SETUP_SCHEDULE_GRACE_MINUTES", 15))))
+
+
+def _recent_setup_verification_exists(*, user: TgUser, now) -> bool:
+    cutoff = now - _setup_schedule_grace()
+    return Report.objects.filter(
+        user=user,
+        status=ReportStatus.SENT,
+        sent_at__gte=cutoff,
+        payload__report_kind="setup_verification",
+    ).exists()
+
+
+def _compute_next_schedule_run(*, user: TgUser, now, after_setup: bool = False):
+    min_delay = _setup_schedule_grace() if after_setup else None
+    return compute_next_run_at(user.timezone_str, list(user.schedule.times or []), now, min_delay=min_delay)
 
 
 def _safe_send_user_message(*, user: TgUser, text: str) -> None:
@@ -132,6 +152,16 @@ def run_user_report(self, user_id: int) -> None:
         schedule = Schedule.objects.select_for_update().get(user=user)
         if schedule.is_running:
             logger.info("Skipping scheduled report: already running (user_id=%s)", user_id)
+            return
+        if _recent_setup_verification_exists(user=user, now=now):
+            logger.info("Skipping scheduled report right after setup verification (user_id=%s)", user_id)
+            schedule.next_run_at = compute_next_run_at(
+                user.timezone_str,
+                list(schedule.times or []),
+                now,
+                min_delay=_setup_schedule_grace(),
+            )
+            schedule.save(update_fields=["next_run_at", "updated_at"])
             return
 
         schedule.is_running = True
@@ -240,7 +270,12 @@ def run_user_report_now(self, user_id: int, trigger: str = "manual") -> None:
         period_end = now
 
         # Prevent beat from enqueuing an immediate duplicate run.
-        schedule.next_run_at = compute_next_run_at(user.timezone_str, list(schedule.times or []), now)
+        schedule.next_run_at = compute_next_run_at(
+            user.timezone_str,
+            list(schedule.times or []),
+            now,
+            min_delay=_setup_schedule_grace() if trigger == "setup" else None,
+        )
         schedule.save(update_fields=["is_running", "running_started_at", "next_run_at", "updated_at"])
 
         job = JobRun.objects.create(
@@ -272,7 +307,12 @@ def run_user_report_now(self, user_id: int, trigger: str = "manual") -> None:
             schedule = Schedule.objects.select_for_update().get(user=user)
             if schedule.last_run_at is None or period_end > schedule.last_run_at:
                 schedule.last_run_at = period_end
-            schedule.next_run_at = compute_next_run_at(user.timezone_str, list(schedule.times or []), period_end)
+            schedule.next_run_at = compute_next_run_at(
+                user.timezone_str,
+                list(schedule.times or []),
+                period_end,
+                min_delay=_setup_schedule_grace() if trigger == "setup" else None,
+            )
             schedule.is_running = False
             schedule.running_started_at = None
             schedule.save(

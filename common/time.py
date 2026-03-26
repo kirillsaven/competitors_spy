@@ -83,7 +83,13 @@ def tzinfo_from_timezone_str(timezone_str: str):
     return ZoneInfo(tzs)
 
 
-def compute_next_run_at(timezone_str: str, times: list[str], now_utc: datetime) -> datetime:
+def compute_next_run_at(
+    timezone_str: str,
+    times: list[str],
+    now_utc: datetime,
+    *,
+    min_delay: timedelta | None = None,
+) -> datetime:
     if now_utc.tzinfo is None:
         raise ValueError("now_utc must be timezone-aware")
 
@@ -91,7 +97,8 @@ def compute_next_run_at(timezone_str: str, times: list[str], now_utc: datetime) 
         times = ["09:00"]
 
     tz = tzinfo_from_timezone_str(timezone_str)
-    now_local = now_utc.astimezone(tz)
+    effective_now_utc = now_utc + (min_delay or timedelta())
+    now_local = effective_now_utc.astimezone(tz)
     local_date = now_local.date()
 
     candidates: list[datetime] = []

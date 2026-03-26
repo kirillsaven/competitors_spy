@@ -53,6 +53,10 @@ def test_build_report_payload_groups_by_platform_and_keeps_stub_sections():
         scored=scored,
         period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
         period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        baseline_by_competitor_id={
+            1: {"vph_median": 100.0, "rph_median": 5.0, "n": 3},
+            2: {"vph_median": 100.0, "rph_median": 5.0, "n": 3},
+        },
     )
 
     assert [section["platform"] for section in payload["sections"]] == [
@@ -70,12 +74,17 @@ def test_render_report_text_preserves_youtube_section_and_stub_lines():
         scored=[_make_scored_item(platform=Platform.YOUTUBE, suffix="1")],
         period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
         period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        baseline_by_competitor_id={1: {"vph_median": 100.0, "rph_median": 5.0, "n": 3}},
     )
 
     text = render_report_text(payload=payload, timezone_str="UTC")
 
     assert "YouTube:" in text
     assert "Title 1 [Shorts]" in text
+    assert "Просмотры: 5000 | среднее автора:" in text
+    assert "Реакции: 220 | среднее автора:" in text
+    assert "Канал:" not in text
+    assert "Опубликовано:" not in text
     assert "TikTok:" in text
     assert "За этот период ничего не выбилось выше обычного." in text
     assert "Instagram:" in text
@@ -86,13 +95,14 @@ def test_render_report_text_renders_tiktok_items_with_share_counts():
         scored=[_make_scored_item(platform=Platform.TIKTOK, suffix="3")],
         period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
         period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        baseline_by_competitor_id={3: {"vph_median": 100.0, "rph_median": 5.0, "n": 3}},
     )
 
     text = render_report_text(payload=payload, timezone_str="UTC")
 
     assert "TikTok:" in text
     assert "Title 3" in text
-    assert "репосты: 5" in text
+    assert "Реакции: 225 | среднее автора:" in text
     assert "https://example.com/3" in text
 
 
@@ -101,13 +111,14 @@ def test_render_report_text_renders_instagram_items():
         scored=[_make_scored_item(platform=Platform.INSTAGRAM, suffix="4")],
         period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
         period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        baseline_by_competitor_id={4: {"vph_median": 100.0, "rph_median": 5.0, "n": 3}},
     )
 
     text = render_report_text(payload=payload, timezone_str="UTC")
 
     assert "Instagram:" in text
     assert "Title 4" in text
-    assert "репосты: 5" in text
+    assert "Реакции: 225 | среднее автора:" in text
     assert "https://example.com/4" in text
 
 
@@ -116,6 +127,8 @@ def test_render_report_text_includes_partial_failure_summary():
         scored=[],
         period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
         period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        report_reason_code="collection_failed",
+        report_reason="Обычный аномальный отчет пока не собран: повторный сбор данных завершился ошибками, полезных новых элементов для сравнения нет.",
         collection_failures=[
             {
                 "platform": Platform.INSTAGRAM,
@@ -127,9 +140,26 @@ def test_render_report_text_includes_partial_failure_summary():
 
     text = render_report_text(payload=payload, timezone_str="UTC")
 
+    assert "Обычный аномальный отчет пока не собран" in text
     assert "Проблемы при сборе:" in text
     assert "Instagram:" in text
     assert "- Broken Gram: Instagram profile returned no recent items with views: username=broken-gram" in text
+
+
+def test_render_report_text_strips_hashtags_from_title():
+    item = _make_scored_item(platform=Platform.YOUTUBE, suffix="1")
+    item.content_item.title = "Английский для учителей #english #teachers"
+    payload = build_report_payload(
+        scored=[item],
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        baseline_by_competitor_id={1: {"vph_median": 100.0, "rph_median": 5.0, "n": 3}},
+    )
+
+    text = render_report_text(payload=payload, timezone_str="UTC")
+
+    assert "Английский для учителей [Shorts]" in text
+    assert "#english" not in text
 
 
 def test_render_report_text_renders_setup_verification_mode():

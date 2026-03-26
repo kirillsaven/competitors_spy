@@ -53,7 +53,11 @@ def test_build_report_preview_keeps_partial_failures_in_payload_and_text(monkeyp
         return [item]
 
     monkeypatch.setattr(report_pipeline, "refresh_competitor", fake_refresh_competitor)
-    monkeypatch.setattr(report_pipeline, "compute_competitor_baseline", lambda *, competitor, now: {"median": 1})
+    monkeypatch.setattr(
+        report_pipeline,
+        "compute_competitor_baseline",
+        lambda *, competitor, now: {"vph_median": 100.0, "rph_median": 5.0, "n": 0},
+    )
     monkeypatch.setattr(report_pipeline, "score_items_for_period", lambda **kwargs: [])
 
     preview = report_pipeline.build_report_preview(
@@ -76,6 +80,38 @@ def test_build_report_preview_keeps_partial_failures_in_payload_and_text(monkeyp
     ]
     assert "Проблемы при сборе:" in preview.text
     assert "- Broken Gram: Instagram profile returned no recent items with views: username=broken-gram" in preview.text
+    assert "Недостаточно истории для обычного аномального отчета" in preview.text
+
+
+@pytest.mark.django_db
+def test_build_report_preview_explains_when_baseline_is_not_ready(monkeypatch):
+    user = TgUser.objects.create(tg_user_id=1010, tg_chat_id=1010, timezone_str="UTC")
+    competitor = SimpleNamespace(
+        id=10,
+        platform="youtube",
+        display_name="Good Channel",
+        handle="good-channel",
+        external_id="yt-good",
+    )
+    item = SimpleNamespace(id=21, competitor=competitor)
+
+    monkeypatch.setattr(report_pipeline, "get_active_competitors", lambda *, user: [competitor])
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", lambda **kwargs: [item])
+    monkeypatch.setattr(
+        report_pipeline,
+        "compute_competitor_baseline",
+        lambda *, competitor, now: {"vph_median": 100.0, "rph_median": 5.0, "n": 0},
+    )
+    monkeypatch.setattr(report_pipeline, "score_items_for_period", lambda **kwargs: [])
+
+    preview = report_pipeline.build_report_preview(
+        user=user,
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+    )
+
+    assert preview.payload["report_reason_code"] == "baseline_not_ready"
+    assert "первый проверочный сбор уже сохранен" in preview.payload["report_reason"]
 
 
 @pytest.mark.django_db

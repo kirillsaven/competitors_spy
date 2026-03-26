@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from django.utils import timezone
 
-from tracking.models import JobRun, JobStatus, Platform, Schedule, TgUser
+from tracking.models import JobRun, JobStatus, Platform, Report, ReportStatus, Schedule, TgUser
 from tracking import tasks
 
 
@@ -190,3 +190,53 @@ def test_run_user_report_now_uses_setup_verification_report_for_setup_trigger(mo
     schedule.refresh_from_db()
     assert called == {"setup": 1, "scheduled": 0}
     assert schedule.is_running is False
+
+
+@pytest.mark.django_db
+def test_run_user_report_skips_immediate_scheduled_report_after_setup_verification(monkeypatch):
+    user, schedule = _make_user_with_schedule(tg_user_id=9006)
+    now = timezone.now()
+    schedule.next_run_at = now - timedelta(minutes=1)
+    schedule.save(update_fields=["next_run_at", "updated_at"])
+    Report.objects.create(
+        user=user,
+        period_start=now - timedelta(hours=24),
+        period_end=now,
+        status=ReportStatus.SENT,
+        sent_at=now,
+        payload={"report_kind": "setup_verification", "sections": []},
+    )
+    called = {"scheduled": 0}
+    monkeypatch.setattr(
+        tasks,
+        "_generate_and_send_report",
+        lambda **kwargs: called.__setitem__("scheduled", called["scheduled"] + 1),
+    )
+
+    tasks.run_user_report.run(user.id)
+
+    schedule.refresh_from_db()
+    assert called["scheduled"] == 0
+    assert schedule.is_running is False
+    assert schedule.next_run_at > now + timedelta(minutes=10)
+
+
+@pytest.mark.django_db
+def test_run_user_report_now_setup_sets_next_run_with_grace(monkeypatch):
+    user, schedule = _make_user_with_schedule(tg_user_id=9007)
+    now = timezone.now()
+    called = {"setup": 0}
+
+    monkeypatch.setattr(
+        tasks,
+        "create_and_send_setup_verification_report",
+        lambda **kwargs: called.__setitem__("setup", called["setup"] + 1)
+        or SimpleNamespace(report=SimpleNamespace(status="sent")),
+    )
+    monkeypatch.setattr(tasks.notify_report_still_running, "apply_async", lambda *args, **kwargs: None)
+
+    tasks.run_user_report_now.run(user.id, trigger="setup")
+
+    schedule.refresh_from_db()
+    assert called["setup"] == 1
+    assert schedule.next_run_at > now + timedelta(minutes=10)

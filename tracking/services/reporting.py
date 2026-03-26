@@ -5,7 +5,7 @@ from datetime import datetime
 from common.time import format_dt_local, format_timezone_label
 
 from tracking.models import Platform
-from tracking.services.scoring import ScoredItem
+from tracking.services.scoring import BaselineMetrics, ScoredItem
 
 
 PLATFORM_SECTION_ORDER = [
@@ -42,24 +42,62 @@ def _shorten_reason(reason: str, max_len: int = 140) -> str:
     return value[: max_len - 3] + "..."
 
 
+def _baseline_metric(baseline: BaselineMetrics | dict | None, key: str):
+    if baseline is None:
+        return None
+    if isinstance(baseline, dict):
+        return baseline.get(key)
+    return getattr(baseline, key, None)
+
+
+def _clean_report_title(title: str) -> str:
+    cleaned = " ".join(part for part in str(title or "").split() if not part.startswith("#")).strip()
+    return cleaned or "Без названия"
+
+
 def build_report_payload(
     *,
     scored: list[ScoredItem],
     period_start: datetime,
     period_end: datetime,
+    baseline_by_competitor_id: dict[int, BaselineMetrics | dict] | None = None,
+    report_reason_code: str = "",
+    report_reason: str = "",
     collection_failures: list[dict] | None = None,
 ) -> dict:
     section_items: dict[str, list[dict]] = {platform: [] for platform in PLATFORM_SECTION_ORDER}
+    baseline_by_competitor_id = baseline_by_competitor_id or {}
     for s in scored:
         platform = str(s.content_item.platform or s.competitor.platform or "")
         if platform not in section_items or len(section_items[platform]) >= 5:
             continue
         content_type = (s.content_item.meta or {}).get("content_type") if isinstance(s.content_item.meta, dict) else None
+        baseline = baseline_by_competitor_id.get(int(s.competitor.id))
+        elapsed_hours = max((period_end - s.content_item.published_at).total_seconds() / 3600.0, 0.0)
+        avg_views = None
+        vph_median = _baseline_metric(baseline, "vph_median")
+        if vph_median is not None and elapsed_hours > 0:
+            avg_views = float(vph_median) * elapsed_hours
+        actual_reactions = sum(
+            int(value)
+            for value in (s.likes_end, s.comments_end, s.shares_end)
+            if value is not None
+        )
+        avg_reactions = None
+        rph_median = _baseline_metric(baseline, "rph_median")
+        if rph_median is not None and elapsed_hours > 0:
+            avg_reactions = float(rph_median) * elapsed_hours
+
+        def _delta_pct(actual: float | int | None, average: float | None) -> float | None:
+            if actual is None or average is None or average <= 0:
+                return None
+            return ((float(actual) - float(average)) / float(average)) * 100.0
+
         section_items[platform].append(
             {
                 "platform": platform,
                 "video_id": s.content_item.external_id,
-                "title": s.content_item.title,
+                "title": _clean_report_title(s.content_item.title),
                 "url": s.content_item.url,
                 "competitor": {
                     "id": s.competitor.id,
@@ -75,6 +113,11 @@ def build_report_payload(
                 "likes_end": s.likes_end,
                 "comments_end": s.comments_end,
                 "shares_end": s.shares_end,
+                "reactions_end": actual_reactions,
+                "avg_views_same_window": avg_views,
+                "avg_reactions_same_window": avg_reactions,
+                "views_delta_pct": _delta_pct(s.views_end, avg_views),
+                "reactions_delta_pct": _delta_pct(actual_reactions, avg_reactions),
                 "velocity_vph": s.velocity,
                 "score_type": s.score_type,
                 "score": s.score,
@@ -84,6 +127,8 @@ def build_report_payload(
 
     return {
         "report_kind": "scheduled",
+        "report_reason_code": str(report_reason_code or ""),
+        "report_reason": str(report_reason or ""),
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
         "sections": [
@@ -128,13 +173,17 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
     }
 
     lines.append("")
+    report_reason = str(payload.get("report_reason") or "").strip()
+    if report_reason:
+        lines.append(report_reason)
+        lines.append("")
     yt_items = (sections_by_platform.get(Platform.YOUTUBE) or {}).get("items") or []
     _render_platform_section(
         lines=lines,
         title="YouTube:",
         items=yt_items,
         timezone_str=timezone_str,
-        intro="Скор: рост просмотров относительно обычного для канала (плюс вовлеченность ER).",
+        empty_line="Нет элементов для этого отчета." if report_reason else "За этот период ничего не выбилось выше обычного.",
     )
 
     tiktok_items = (sections_by_platform.get(Platform.TIKTOK) or {}).get("items") or []
@@ -143,7 +192,7 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
         title="TikTok:",
         items=tiktok_items,
         timezone_str=timezone_str,
-        empty_line="За этот период ничего не выбилось выше обычного.",
+        empty_line="Нет элементов для этого отчета." if report_reason else "За этот период ничего не выбилось выше обычного.",
     )
 
     instagram_items = (sections_by_platform.get(Platform.INSTAGRAM) or {}).get("items") or []
@@ -152,7 +201,7 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
         title="Instagram:",
         items=instagram_items,
         timezone_str=timezone_str,
-        empty_line="За этот период ничего не выбилось выше обычного.",
+        empty_line="Нет элементов для этого отчета." if report_reason else "За этот период ничего не выбилось выше обычного.",
     )
 
     failures = [failure for failure in (payload.get("collection_failures") or []) if isinstance(failure, dict)]
@@ -301,80 +350,51 @@ def _render_platform_section(
     for idx, it in enumerate(items, start=1):
         title_text = it.get("title") or "Без названия"
         url = it.get("url") or ""
-        delta = it.get("delta_views")
-        delta_hours = it.get("delta_hours")
         views_end = it.get("views_end")
-        likes_end = it.get("likes_end")
-        comments_end = it.get("comments_end")
-        shares_end = it.get("shares_end")
+        reactions_end = it.get("reactions_end")
+        avg_views_same_window = it.get("avg_views_same_window")
+        avg_reactions_same_window = it.get("avg_reactions_same_window")
+        views_delta_pct = it.get("views_delta_pct")
+        reactions_delta_pct = it.get("reactions_delta_pct")
         score = it.get("score")
         content_type = it.get("content_type") or ""
-        competitor = (it.get("competitor") or {}).get("display_name") or (it.get("competitor") or {}).get("handle") or ""
-        published_at = None
-        pa = it.get("published_at")
-        if isinstance(pa, str) and pa:
-            try:
-                published_at = datetime.fromisoformat(pa.replace("Z", "+00:00"))
-            except Exception:
-                published_at = None
         tag = " [Shorts]" if str(content_type) == "short" else ""
         lines.append(f"{idx}) {title_text}{tag}")
-        if competitor:
-            lines.append(f"Канал: {competitor}")
-        if published_at:
-            lines.append(f"Опубликовано: {format_dt_local(published_at, timezone_str)}")
-
-        if delta is not None and delta_hours:
-            try:
-                delta_int = int(delta)
-                views_end_int = int(views_end) if views_end is not None else None
-                growth = ""
-                if views_end_int is not None:
-                    views_start_int = views_end_int - delta_int
-                    if views_start_int > 0:
-                        growth = f" ({(float(delta_int) / float(views_start_int)) * 100.0:+.1f}%)"
-                lines.append(f"Просмотры за период: +{delta_int}{growth} (за {float(delta_hours):.1f}ч)")
-            except Exception:
-                lines.append(f"Просмотры за период: +{delta}")
-        else:
-            lines.append("Просмотры за период: пока нет (нужен предыдущий сбор)")
-
-        if views_end is not None:
-            try:
-                lines.append(f"Всего просмотров: {int(views_end)}")
-            except Exception:
-                pass
-
-        parts: list[str] = []
+        if url:
+            lines.append(url)
         try:
-            if likes_end is not None:
-                parts.append(f"лайки: {int(likes_end)}")
+            if views_end is not None:
+                avg_views_text = "н/д"
+                if avg_views_same_window is not None:
+                    avg_views_text = f"{int(round(float(avg_views_same_window)))}"
+                delta_views_text = "н/д"
+                if views_delta_pct is not None:
+                    delta_views_text = f"{float(views_delta_pct):+.1f}%"
+                lines.append(f"Просмотры: {int(views_end)} | среднее автора: {avg_views_text} | Δ: {delta_views_text}")
         except Exception:
             pass
         try:
-            if comments_end is not None:
-                parts.append(f"комментарии: {int(comments_end)}")
-        except Exception:
-            pass
-        try:
-            if shares_end is not None:
-                parts.append(f"репосты: {int(shares_end)}")
+            if reactions_end is not None:
+                avg_reactions_text = "н/д"
+                if avg_reactions_same_window is not None:
+                    avg_reactions_text = f"{int(round(float(avg_reactions_same_window)))}"
+                delta_reactions_text = "н/д"
+                if reactions_delta_pct is not None:
+                    delta_reactions_text = f"{float(reactions_delta_pct):+.1f}%"
+                lines.append(
+                    f"Реакции: {int(reactions_end)} | среднее автора: {avg_reactions_text} | Δ: {delta_reactions_text}"
+                )
         except Exception:
             pass
         er = it.get("er_end")
         if er is not None:
             try:
-                parts.append(f"ER: {float(er) * 100.0:.2f}%")
+                lines.append(f"ER: {float(er) * 100.0:.2f}%")
             except Exception:
                 pass
-        if parts:
-            lines.append("Реакции: " + ", ".join(parts))
-
         if score is not None:
             try:
                 lines.append(f"Вирусность: {float(score):.2f}")
             except Exception:
                 pass
-        if url:
-            lines.append(url)
         lines.append("")

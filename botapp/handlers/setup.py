@@ -1709,7 +1709,12 @@ async def _finalize_schedule(message: Message, state: FSMContext) -> None:
         times = ["09:00"]
 
     now = timezone.now()
-    next_run_at = compute_next_run_at(user.timezone_str, times, now)
+    next_run_at = compute_next_run_at(
+        user.timezone_str,
+        times,
+        now,
+        min_delay=timedelta(minutes=max(1, int(getattr(settings, "SETUP_SCHEDULE_GRACE_MINUTES", 15)))),
+    )
 
     # Preserve last_run_at when user reconfigures schedule, so deltas keep working.
     now_utc = timezone.now()

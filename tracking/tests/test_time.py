@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -22,6 +22,12 @@ def test_compute_next_run_at_utc_offset() -> None:
     nxt = compute_next_run_at("UTC+03:00", ["09:00", "21:00"], now)
     # Since dt_local at 09:00 is <= now_local, next should be 21:00 local => 18:00 UTC.
     assert nxt == datetime(2026, 2, 12, 18, 0, tzinfo=UTC)
+
+
+def test_compute_next_run_at_respects_min_delay() -> None:
+    now = datetime(2026, 2, 12, 5, 50, tzinfo=UTC)  # 08:50 local at UTC+03:00
+    nxt = compute_next_run_at("UTC+03:00", ["09:00"], now, min_delay=timedelta(minutes=15))
+    assert nxt == datetime(2026, 2, 13, 6, 0, tzinfo=UTC)
 
 
 def test_parse_iso8601_duration_seconds() -> None:
