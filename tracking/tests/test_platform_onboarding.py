@@ -608,6 +608,24 @@ def test_search_queries_drop_overlong_broken_phrases():
     assert all("английскийонлайн" not in query for query in queries)
 
 
+def test_search_queries_drop_identity_and_marketing_phrases_for_youtube_teacher_seed():
+    queries = platform_onboarding.build_search_ready_keywords(
+        keywords=[
+            "английского языка",
+            "получайте дополнительные полезные материалы",
+            "учите английский язык с нами",
+            "преподаватель английского языка",
+            "меня зовут александр бебрис",
+        ],
+        max_keywords=8,
+    )
+
+    assert "меня зовут александр бебрис" not in queries
+    assert "получайте дополнительные полезные материалы" not in queries
+    assert all("александр" not in query for query in queries)
+    assert any("англий" in query for query in queries)
+
+
 def test_candidate_survives_only_if_recent_short_form_content_matches_niche(monkeypatch):
     candidate = platform_onboarding._DiscoveryCandidate(
         platform=Platform.YOUTUBE,

@@ -873,10 +873,10 @@ def _theme_anchor_stems(keywords: list[str]) -> set[str]:
     counts: dict[str, int] = {}
     for query in _dedupe_keyword_queries(keywords, max_queries=8):
         specific_stems = {stem for stem in _theme_token_stems(query) if stem not in _GENERIC_DISCOVERY_STEMS}
-        if len(str(query or "").split()) >= 2 and len(specific_stems) >= 2:
+        if not specific_stems:
             continue
         for stem in specific_stems:
-            counts[stem] = counts.get(stem, 0) + 1
+            counts[stem] = counts.get(stem, 0) + (2 if len(str(query or "").split()) == 1 else 1)
     anchors = {stem for stem, count in counts.items() if count >= 2}
     if anchors:
         return anchors
