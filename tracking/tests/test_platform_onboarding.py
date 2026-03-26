@@ -154,7 +154,7 @@ def test_discover_instagram_competitors_performs_real_query_search(monkeypatch):
         max_candidates=10,
     )
 
-    assert search_calls == ["english teachers", "teacher groups"]
+    assert search_calls == ["teacher groups", "english teachers"]
     assert [candidate.external_id for candidate in candidates] == ["ig-1", "ig-3", "ig-2"]
     assert candidates[0].reason == "search: english teachers, teacher groups"
 
@@ -185,7 +185,7 @@ def test_discover_tiktok_competitors_performs_real_query_search(monkeypatch):
         max_candidates=10,
     )
 
-    assert search_calls == ["english teachers", "teacher groups"]
+    assert search_calls == ["teacher groups", "english teachers"]
     assert [candidate.external_id for candidate in candidates] == ["tt-1", "tt-3", "tt-2"]
     assert candidates[0].reason == "search: english teachers, teacher groups"
 
@@ -503,6 +503,25 @@ def test_discover_competitors_for_onboarding_rejects_offtopic_education_channels
         (Platform.YOUTUBE, "yt-english"),
     ]
     assert calls == {"youtube": 1}
+
+
+def test_search_queries_prioritizes_theme_specific_phrases_over_generic_tutor_terms():
+    queries = platform_onboarding._search_queries(
+        [
+            "онлайн репетитор",
+            "онлайн школу по английскому",
+            "группы для преподавателей",
+            "онлайн репетитор по английскому",
+        ],
+        max_queries=2,
+    )
+
+    assert queries[0] == "группы для преподавателей"
+    assert "онлайн репетитор" not in queries
+    assert set(queries) == {
+        "группы для преподавателей",
+        "онлайн репетитор по английскому",
+    }
 
 
 def test_candidate_survives_only_if_recent_short_form_content_matches_niche(monkeypatch):

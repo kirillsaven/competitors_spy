@@ -727,23 +727,32 @@ def _score_candidate(candidate: _DiscoveryCandidate) -> float:
     )
 
 
+def _query_utility_score(query: str) -> int:
+    stems = _theme_token_stems(query)
+    if not stems:
+        return 0
+    specific_stems = {stem for stem in stems if stem not in _GENERIC_DISCOVERY_STEMS}
+    generic_stems = stems - specific_stems
+    word_count = len(str(query or "").split())
+    return len(specific_stems) * 8 + word_count * 2 - len(generic_stems) * 3
+
+
 def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
     if max_queries <= 0:
         return []
     seen: set[str] = set()
-    queries: list[str] = []
-    for raw in keywords or []:
+    scored_queries: list[tuple[int, int, str]] = []
+    for index, raw in enumerate(keywords or []):
         query = " ".join(str(raw or "").split()).strip()
         if len(query) < 3:
             continue
         key = query.lower()
         if key in seen:
             continue
-        if len(queries) >= max_queries:
-            break
         seen.add(key)
-        queries.append(query)
-    return queries
+        scored_queries.append((_query_utility_score(query), -index, query))
+    scored_queries.sort(key=lambda item: (-item[0], item[1]))
+    return [query for _score, _index, query in scored_queries[:max_queries]]
 
 
 def _manual_competitor_queries(
