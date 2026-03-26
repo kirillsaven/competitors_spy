@@ -550,7 +550,7 @@ def test_discover_competitors_for_onboarding_rejects_offtopic_education_channels
     assert [(candidate.platform, candidate.external_id) for candidate in outcome.candidates] == [
         (Platform.YOUTUBE, "yt-english"),
     ]
-    assert calls == {"youtube": 1}
+    assert calls == {"youtube": 2}
 
 
 def test_search_queries_prioritizes_theme_specific_phrases_over_generic_tutor_terms():

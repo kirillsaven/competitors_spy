@@ -1634,17 +1634,24 @@ def _collector_aware_candidates(
 ) -> tuple[list[_DiscoveryCandidate], str]:
     if platform not in {Platform.YOUTUBE, Platform.INSTAGRAM, Platform.TIKTOK} or not candidates:
         return candidates, ""
-    strong_profile_candidates = [candidate for candidate in candidates if _theme_profile_passes(candidate=candidate, keywords=keywords)]
-    if not strong_profile_candidates:
-        return [], "поиск выполнен, но кандидаты не совпали с темой ниши на уровне профиля."
-    strong_profile_candidates = sorted(
-        strong_profile_candidates,
+    strong_profile_candidates: list[_DiscoveryCandidate] = []
+    borderline_candidates: list[_DiscoveryCandidate] = []
+    for candidate in candidates:
+        if _theme_profile_passes(candidate=candidate, keywords=keywords):
+            strong_profile_candidates.append(candidate)
+            continue
+        if len(candidate.query_hits) >= 1 or float(candidate.metadata.get("profile_theme_score") or 0) > 0:
+            borderline_candidates.append(candidate)
+    ranked_candidates = sorted(
+        strong_profile_candidates + borderline_candidates,
         key=lambda item: (-_score_candidate(item), -len(item.query_hits), item.sort_tiebreak),
     )
+    if not ranked_candidates:
+        return [], "поиск выполнен, но кандидаты не совпали с темой ниши на уровне профиля."
 
-    budget = min(len(strong_profile_candidates), max(1, _DISCOVERY_VALIDATION_BUDGET.get(platform, 1)))
+    budget = min(len(ranked_candidates), max(1, _DISCOVERY_VALIDATION_BUDGET.get(platform, 1)))
     validated: list[_DiscoveryCandidate] = []
-    candidate_batch = strong_profile_candidates[:budget]
+    candidate_batch = ranked_candidates[:budget]
     batch_texts: dict[str, tuple[list[str], list[int]]] = {}
     if platform == Platform.INSTAGRAM:
         batch_texts = _batch_fetch_recent_instagram_reel_texts(
