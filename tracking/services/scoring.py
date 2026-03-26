@@ -170,6 +170,8 @@ def score_items_for_period(
         likes_end = int(snap_end.likes) if snap_end.likes is not None else None
         comments_end = int(snap_end.comments) if snap_end.comments is not None else None
         shares_end = int(snap_end.shares) if snap_end.shares is not None else None
+        if views_end < min_views_end:
+            continue
 
         # Main signal: delta views within the report period (views/hour).
         # If we don't have a start snapshot yet (warm-up), fall back to average views/hour since publish.

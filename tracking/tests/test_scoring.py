@@ -9,7 +9,8 @@ from tracking.services.scoring import BaselineMetrics, score_items_for_period
 
 
 @pytest.mark.django_db
-def test_score_items_for_period_basic() -> None:
+def test_score_items_for_period_basic(settings) -> None:
+    settings.MIN_VIEWS_END = 0
     user = TgUser.objects.create(tg_user_id=1, tg_chat_id=1, timezone_str="UTC+00:00")
     comp = Competitor.objects.create(
         platform=Platform.YOUTUBE,
@@ -52,6 +53,7 @@ def test_score_items_for_period_basic() -> None:
 @pytest.mark.django_db
 def test_score_items_for_period_prefers_recent_high_scale_breakout(settings) -> None:
     settings.REPORT_MAX_ITEM_AGE_DAYS = 14
+    settings.MIN_VIEWS_END = 1000
     user = TgUser.objects.create(tg_user_id=2, tg_chat_id=2, timezone_str="UTC+00:00")
     comp = Competitor.objects.create(
         platform=Platform.YOUTUBE,
@@ -102,3 +104,39 @@ def test_score_items_for_period_prefers_recent_high_scale_breakout(settings) -> 
     )
 
     assert [item.content_item.external_id for item in scored] == ["large", "small"]
+
+
+@pytest.mark.django_db
+def test_score_items_for_period_filters_low_total_views_even_with_delta(settings) -> None:
+    settings.MIN_VIEWS_END = 1000
+    user = TgUser.objects.create(tg_user_id=3, tg_chat_id=3, timezone_str="UTC+00:00")
+    comp = Competitor.objects.create(platform=Platform.YOUTUBE, external_id="UC777", display_name="Low Views", meta={})
+    UserCompetitor.objects.create(user=user, competitor=comp, added_by="manual", is_active=True)
+
+    published_at = datetime(2026, 2, 10, 23, 0, tzinfo=UTC)
+    item = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.YOUTUBE,
+        external_id="tiny",
+        url="https://www.youtube.com/watch?v=tiny",
+        title="Tiny breakout",
+        description="",
+        published_at=published_at,
+        duration_seconds=55,
+        meta={"content_type": "short"},
+    )
+    period_start = datetime(2026, 2, 11, 0, 0, tzinfo=UTC)
+    period_end = datetime(2026, 2, 11, 5, 0, tzinfo=UTC)
+    MetricSnapshot.objects.create(content_item=item, captured_at=period_start, views=40, likes=5, comments=1, extra={})
+    MetricSnapshot.objects.create(content_item=item, captured_at=period_end, views=900, likes=50, comments=10, extra={})
+
+    baseline = BaselineMetrics(vph_median=20.0, vph_iqr=5.0, er_median=0.02, er_iqr=0.01, n=10, rph_median=1.0, rph_iqr=0.5)
+    scored = score_items_for_period(
+        items=[item],
+        competitor_by_item_id={item.id: comp},
+        baseline_by_competitor_id={comp.id: baseline},
+        period_start=period_start,
+        period_end=period_end,
+    )
+
+    assert scored == []
