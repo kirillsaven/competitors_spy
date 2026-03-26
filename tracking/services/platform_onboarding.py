@@ -1060,6 +1060,9 @@ def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
         query = " ".join(str(raw or "").split()).strip()
         if len(query) < 3:
             continue
+        words = [part for part in query.split() if part]
+        if len(words) > 4 or len(query) > 48 or any(len(word) > 14 for word in words):
+            continue
         key = query.lower()
         if key in seen:
             continue

@@ -583,7 +583,26 @@ def test_search_queries_skip_identity_like_phrases_when_theme_queries_exist():
     )
 
     assert "дарья панчо" not in queries
-    assert "английский" in queries
+    assert any("англий" in query for query in queries)
+
+
+def test_search_queries_drop_overlong_broken_phrases():
+    queries = platform_onboarding.build_search_ready_keywords(
+        keywords=[
+            "репетитор",
+            "английский",
+            "английский учеба английскийонлайн репетитор",
+            "уроки английский учеба английскийонлайн",
+            "учеников занимаются с репетитором благодаря",
+            "свою онлайн школу по английскому",
+        ],
+        max_keywords=6,
+    )
+
+    assert all(len(query.split()) <= 4 for query in queries)
+    assert all(len(query) <= 48 for query in queries)
+    assert "преподаватель английского" in queries
+    assert all("английскийонлайн" not in query for query in queries)
 
 
 def test_candidate_survives_only_if_recent_short_form_content_matches_niche(monkeypatch):
