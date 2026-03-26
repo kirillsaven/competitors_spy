@@ -592,10 +592,27 @@ def _theme_token_stems(*values: str | None) -> set[str]:
     return stems
 
 
+def _dedupe_keyword_queries(keywords: list[str], *, max_queries: int | None = None) -> list[str]:
+    seen: set[str] = set()
+    queries: list[str] = []
+    for raw in keywords or []:
+        query = " ".join(str(raw or "").split()).strip()
+        if len(query) < 3:
+            continue
+        key = query.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        queries.append(query)
+        if max_queries is not None and len(queries) >= max_queries:
+            break
+    return queries
+
+
 def _theme_phrase_stems(keywords: list[str]) -> list[tuple[set[str], set[str]]]:
     phrases: list[tuple[set[str], set[str]]] = []
     seen: set[tuple[str, ...]] = set()
-    for query in _search_queries(keywords, max_queries=8):
+    for query in _dedupe_keyword_queries(keywords, max_queries=8):
         full_stems = _theme_token_stems(query)
         if not full_stems:
             continue
@@ -606,6 +623,19 @@ def _theme_phrase_stems(keywords: list[str]) -> list[tuple[set[str], set[str]]]:
         seen.add(normalized)
         phrases.append((full_stems, specific_stems or full_stems))
     return phrases
+
+
+def _theme_anchor_stems(keywords: list[str]) -> set[str]:
+    counts: dict[str, int] = {}
+    for query in _dedupe_keyword_queries(keywords, max_queries=8):
+        specific_stems = {stem for stem in _theme_token_stems(query) if stem not in _GENERIC_DISCOVERY_STEMS}
+        for stem in specific_stems:
+            counts[stem] = counts.get(stem, 0) + 1
+    anchors = {stem for stem, count in counts.items() if count >= 2}
+    if anchors:
+        return anchors
+    strongest = sorted(counts.items(), key=lambda item: (-item[1], -len(item[0]), item[0]))
+    return {stem for stem, _count in strongest[:2]}
 
 
 def _strong_phrase_overlap(stems: set[str], phrase_stems: set[str]) -> int:
@@ -631,8 +661,10 @@ def _theme_specific_stems(keywords: list[str]) -> set[str]:
 
 def _theme_agreement_metrics(*, texts: list[str], keywords: list[str]) -> dict[str, int]:
     phrase_defs = _theme_phrase_stems(keywords)
+    anchor_stems = _theme_anchor_stems(keywords)
     if not phrase_defs:
         return {
+            "anchor_overlap": 0,
             "full_overlap": 0,
             "specific_overlap": 0,
             "matched_phrases": 0,
@@ -645,6 +677,7 @@ def _theme_agreement_metrics(*, texts: list[str], keywords: list[str]) -> dict[s
         union_stems |= stems
 
     matched_phrases = 0
+    anchor_overlap = len(union_stems & anchor_stems)
     specific_overlap = 0
     full_overlap = 0
     for full_stems, specific_stems in phrase_defs:
@@ -654,15 +687,20 @@ def _theme_agreement_metrics(*, texts: list[str], keywords: list[str]) -> dict[s
         full_overlap += len(union_stems & full_stems)
 
     strong_text_matches = 0
+    strong_anchor_matches = 0
     for stems in text_stem_sets:
         if any(_strong_phrase_overlap(stems, specific_stems) for _, specific_stems in phrase_defs):
             strong_text_matches += 1
+        if anchor_stems and (stems & anchor_stems):
+            strong_anchor_matches += 1
 
     return {
+        "anchor_overlap": anchor_overlap,
         "full_overlap": full_overlap,
         "specific_overlap": specific_overlap,
         "matched_phrases": matched_phrases,
         "strong_text_matches": strong_text_matches,
+        "strong_anchor_matches": strong_anchor_matches,
     }
 
 
@@ -674,20 +712,33 @@ def _theme_profile_passes(*, candidate: _DiscoveryCandidate, keywords: list[str]
     ]
     metrics = _theme_agreement_metrics(texts=texts, keywords=keywords)
     candidate.metadata["profile_theme_score"] = (
-        metrics["matched_phrases"] * 3 + metrics["specific_overlap"] + metrics["strong_text_matches"]
+        metrics["matched_phrases"] * 3
+        + metrics["specific_overlap"]
+        + metrics["strong_text_matches"]
+        + metrics["anchor_overlap"] * 2
     )
     candidate.metadata["profile_theme_matches"] = metrics["matched_phrases"]
+    candidate.metadata["profile_theme_anchor_overlap"] = metrics["anchor_overlap"]
     candidate.metadata["profile_theme_specific_overlap"] = metrics["specific_overlap"]
+    if metrics["anchor_overlap"] <= 0:
+        return False
     return metrics["matched_phrases"] >= 1 or metrics["specific_overlap"] >= 2
 
 
 def _theme_content_passes(*, candidate: _DiscoveryCandidate, texts: list[str], keywords: list[str]) -> bool:
     metrics = _theme_agreement_metrics(texts=texts, keywords=keywords)
     candidate.metadata["content_theme_score"] = (
-        metrics["matched_phrases"] * 4 + metrics["specific_overlap"] + metrics["strong_text_matches"] * 2
+        metrics["matched_phrases"] * 4
+        + metrics["specific_overlap"]
+        + metrics["strong_text_matches"] * 2
+        + metrics["anchor_overlap"] * 2
+        + metrics["strong_anchor_matches"] * 2
     )
     candidate.metadata["content_theme_matches"] = metrics["matched_phrases"]
+    candidate.metadata["content_theme_anchor_overlap"] = metrics["anchor_overlap"]
     candidate.metadata["content_theme_specific_overlap"] = metrics["specific_overlap"]
+    if metrics["anchor_overlap"] <= 0 or metrics["strong_anchor_matches"] <= 0:
+        return False
     return metrics["matched_phrases"] >= 1 and metrics["strong_text_matches"] >= 1
 
 
@@ -727,19 +778,22 @@ def _score_candidate(candidate: _DiscoveryCandidate) -> float:
     )
 
 
-def _query_utility_score(query: str) -> int:
+def _query_utility_score(query: str, *, anchor_stems: set[str]) -> int:
     stems = _theme_token_stems(query)
     if not stems:
         return 0
     specific_stems = {stem for stem in stems if stem not in _GENERIC_DISCOVERY_STEMS}
     generic_stems = stems - specific_stems
     word_count = len(str(query or "").split())
-    return len(specific_stems) * 8 + word_count * 2 - len(generic_stems) * 3
+    anchor_overlap = len(specific_stems & anchor_stems)
+    anchor_penalty = 14 if anchor_stems and anchor_overlap <= 0 else 0
+    return anchor_overlap * 18 + len(specific_stems) * 8 + word_count * 2 - len(generic_stems) * 3 - anchor_penalty
 
 
 def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
     if max_queries <= 0:
         return []
+    anchor_stems = _theme_anchor_stems(keywords)
     seen: set[str] = set()
     scored_queries: list[tuple[int, int, str]] = []
     for index, raw in enumerate(keywords or []):
@@ -750,7 +804,7 @@ def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
         if key in seen:
             continue
         seen.add(key)
-        scored_queries.append((_query_utility_score(query), -index, query))
+        scored_queries.append((_query_utility_score(query, anchor_stems=anchor_stems), -index, query))
     scored_queries.sort(key=lambda item: (-item[0], item[1]))
     return [query for _score, _index, query in scored_queries[:max_queries]]
 
