@@ -1010,7 +1010,7 @@ def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
         return []
     anchor_stems = _theme_anchor_stems(keywords)
     seen: set[str] = set()
-    scored_queries: list[tuple[int, int, str]] = []
+    scored_queries: list[tuple[int, int, str, set[str]]] = []
     for index, raw in enumerate(keywords or []):
         query = " ".join(str(raw or "").split()).strip()
         if len(query) < 3:
@@ -1019,9 +1019,33 @@ def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
         if key in seen:
             continue
         seen.add(key)
-        scored_queries.append((_query_utility_score(query, anchor_stems=anchor_stems), -index, query))
-    scored_queries.sort(key=lambda item: (-item[0], item[1]))
-    return [query for _score, _index, query in scored_queries[:max_queries]]
+        scored_queries.append((
+            _query_utility_score(query, anchor_stems=anchor_stems),
+            -index,
+            query,
+            _theme_specific_stems([query]),
+        ))
+    remaining = sorted(scored_queries, key=lambda item: (-item[0], item[1], item[2]))
+    selected: list[str] = []
+    covered_stems: set[str] = set()
+    if remaining:
+        score, neg_index, query, stems = remaining.pop(0)
+        selected.append(query)
+        covered_stems |= stems
+    while remaining and len(selected) < max_queries:
+        best_idx = 0
+        best_value: tuple[int, int, int, int, str] | None = None
+        for idx, (score, neg_index, query, stems) in enumerate(remaining):
+            new_stems = len(stems - covered_stems)
+            overlap = len(stems & covered_stems)
+            value = (new_stems, score, -overlap, neg_index, query)
+            if best_value is None or value > best_value:
+                best_idx = idx
+                best_value = value
+        score, neg_index, query, stems = remaining.pop(best_idx)
+        selected.append(query)
+        covered_stems |= stems
+    return selected
 
 
 def _manual_competitor_queries(

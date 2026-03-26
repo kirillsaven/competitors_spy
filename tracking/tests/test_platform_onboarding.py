@@ -566,8 +566,9 @@ def test_search_queries_prioritizes_theme_specific_phrases_over_generic_tutor_te
 
     assert queries[0] == "онлайн репетитор по английскому"
     assert "онлайн репетитор" not in queries
+    assert len(queries) == 2
     assert set(queries) == {
-        "онлайн школу по английскому",
+        "группы для преподавателей",
         "онлайн репетитор по английскому",
     }
 

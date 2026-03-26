@@ -10,6 +10,12 @@ from django.utils import timezone
 from botapp.telegram_api import send_message
 from tracking.models import Competitor, ContentItem, Platform, Report, ReportStatus, TgUser, UserCompetitor
 from tracking.services.collector import refresh_competitor
+from tracking.services.platform_onboarding import (
+    _find_instagram_profile_for_lookup,
+    fetch_instagram_profiles_cached,
+    fetch_tiktok_profile_feeds_cached,
+)
+from tracking.services.provider_config import get_tiktok_apify_config
 from tracking.services.provider_runtime import ProviderFetchCache
 from tracking.services.reporting import (
     build_report_payload,
@@ -89,6 +95,65 @@ def _short_reason(exc: Exception) -> str:
     return text
 
 
+def _chunked(values: list[str], size: int) -> list[list[str]]:
+    if size <= 0:
+        return [values]
+    return [values[index : index + size] for index in range(0, len(values), size)]
+
+
+def _prime_provider_fetch_cache_for_competitors(
+    *,
+    competitors: list[Competitor],
+    provider_fetch_cache: ProviderFetchCache,
+) -> None:
+    instagram_lookups = [
+        str(competitor.handle or competitor.url or competitor.external_id or "").strip()
+        for competitor in competitors
+        if competitor.platform == Platform.INSTAGRAM
+    ]
+    tiktok_handles = [
+        str(competitor.handle or (competitor.meta or {}).get("profile_handle") or competitor.external_id or "").strip().lstrip("@")
+        for competitor in competitors
+        if competitor.platform == Platform.TIKTOK
+    ]
+
+    for chunk in _chunked([lookup for lookup in instagram_lookups if lookup], 10):
+        try:
+            profiles = fetch_instagram_profiles_cached(
+                inputs=chunk,
+                purpose=provider_fetch_cache.purpose,
+                context_id=provider_fetch_cache.context_id,
+            )
+        except Exception:
+            logger.exception("Instagram batch prefetch failed for report collection")
+            continue
+        for lookup in chunk:
+            profile = _find_instagram_profile_for_lookup(profiles, lookup)
+            if profile:
+                provider_fetch_cache.store_instagram_profile(profile=profile, lookups=[lookup])
+
+    if tiktok_handles:
+        config = get_tiktok_apify_config()
+        max_results = min(
+            int(getattr(settings, "YT_RECENT_N_FOR_METRICS", 15)),
+            int(getattr(config, "results_per_profile", 10) or 10),
+        )
+        for chunk in _chunked([handle for handle in tiktok_handles if handle], 3):
+            try:
+                grouped = fetch_tiktok_profile_feeds_cached(
+                    handles=chunk,
+                    results_per_page=max(1, max_results),
+                    purpose=provider_fetch_cache.purpose,
+                    context_id=provider_fetch_cache.context_id,
+                )
+            except Exception:
+                logger.exception("TikTok batch prefetch failed for report collection")
+                continue
+            for handle, items in grouped.items():
+                if items:
+                    provider_fetch_cache.store_tiktok_feed(handle=handle, items=items)
+
+
 def _run_collection_pass(
     *,
     user: TgUser,
@@ -100,6 +165,10 @@ def _run_collection_pass(
         purpose="report_collection",
     )
     competitors = get_active_competitors(user=user)
+    _prime_provider_fetch_cache_for_competitors(
+        competitors=competitors,
+        provider_fetch_cache=provider_fetch_cache,
+    )
     updated_items: list[ContentItem] = []
     successful_competitors: list[Competitor] = []
     collection_failures: list[ReportCollectionFailure] = []
