@@ -5,6 +5,8 @@ from difflib import SequenceMatcher
 import re
 from typing import Any
 
+from django.conf import settings
+
 from tracking.adapters.base import CompetitorCandidate, SeedResolution
 from tracking.adapters.instagram import (
     ApifyInstagramClient,
