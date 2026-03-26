@@ -3,23 +3,24 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from tracking.adapters.base import SeedResolution
-from tracking.adapters.instagram import (
-    ApifyInstagramClient,
-    extract_handle as extract_instagram_handle,
-    resolve_seed_input as resolve_instagram_seed_input,
-)
-from tracking.adapters.tiktok import (
-    ApifyTikTokClient,
-    extract_handle as extract_tiktok_handle,
-    resolve_seed_input as resolve_tiktok_seed_input,
-)
+from tracking.adapters.instagram import extract_handle as extract_instagram_handle, seed_from_profiles
+from tracking.adapters.tiktok import extract_handle as extract_tiktok_handle, seed_from_feed_items
 from tracking.adapters.youtube import (
     extract_channel_id as extract_youtube_channel_id,
     extract_handle as extract_youtube_handle,
     extract_video_id as extract_youtube_video_id,
 )
 from tracking.models import Platform
-from tracking.services.provider_config import get_instagram_apify_config, get_tiktok_apify_config
+from tracking.services.platform_onboarding import (
+    fetch_instagram_profiles_cached,
+    fetch_tiktok_profile_feed_cached,
+)
+from tracking.services.setup_runtime import (
+    SetupRunContext,
+    get_platform_state,
+    mark_platform_failure,
+    platform_is_blocked,
+)
 from tracking.services.youtube_service import YouTubeNotConfigured, resolve_youtube_seed
 
 
@@ -34,44 +35,8 @@ class SeedResolveAttempt:
     error: str | None = None
 
 
-def _get_tiktok_client() -> ApifyTikTokClient:
-    config = get_tiktok_apify_config()
-    profile_actor_id = str(getattr(config, "profile_actor_id", getattr(config, "actor_id", "")) or "")
-    search_actor_id = str(getattr(config, "search_actor_id", "") or "")
-    if config.provider != "apify":
-        raise SeedResolveError(f"Unsupported TikTok provider: {config.provider}")
-    if not config.access_token:
-        raise SeedResolveError("TIKTOK_PROVIDER_ACCESS_TOKEN is not set")
-    if not profile_actor_id:
-        raise SeedResolveError("TIKTOK_APIFY_PROFILE_ACTOR_ID is not set")
-    if not config.base_url:
-        raise SeedResolveError("TIKTOK_PROVIDER_BASE_URL is not set")
-    return ApifyTikTokClient(
-        access_token=config.access_token,
-        actor_id=profile_actor_id,
-        search_actor_id=search_actor_id,
-        base_url=config.base_url,
-    )
-
-
-def _get_instagram_client() -> ApifyInstagramClient:
-    config = get_instagram_apify_config()
-    profile_actor_id = str(getattr(config, "profile_actor_id", getattr(config, "actor_id", "")) or "")
-    search_actor_id = str(getattr(config, "search_actor_id", "") or "")
-    if config.provider != "apify":
-        raise SeedResolveError(f"Unsupported Instagram provider: {config.provider}")
-    if not config.access_token:
-        raise SeedResolveError("INSTAGRAM_PROVIDER_ACCESS_TOKEN is not set")
-    if not profile_actor_id:
-        raise SeedResolveError("INSTAGRAM_APIFY_PROFILE_ACTOR_ID is not set")
-    if not config.base_url:
-        raise SeedResolveError("INSTAGRAM_PROVIDER_BASE_URL is not set")
-    return ApifyInstagramClient(
-        access_token=config.access_token,
-        actor_id=profile_actor_id,
-        search_actor_id=search_actor_id,
-        base_url=config.base_url,
-    )
+def _cache_key(*, platform: str, raw_input: str) -> str:
+    return f"{str(platform).strip()}::{str(raw_input or '').strip().lower()}"
 
 
 def _resolve_youtube_seed(raw_input: str) -> SeedResolution | None:
@@ -81,20 +46,21 @@ def _resolve_youtube_seed(raw_input: str) -> SeedResolution | None:
         raise SeedResolveError(str(exc)) from exc
 
 
-def _resolve_tiktok_seed(raw_input: str) -> SeedResolution | None:
-    client = _get_tiktok_client()
-    try:
-        return resolve_tiktok_seed_input(client, raw_input)
-    finally:
-        client.close()
+def _resolve_tiktok_seed(raw_input: str, *, context: SetupRunContext | None = None) -> SeedResolution | None:
+    handle = extract_tiktok_handle(raw_input)
+    if not handle:
+        return None
+    items = fetch_tiktok_profile_feed_cached(handle=handle, results_per_page=1, context=context)
+    return seed_from_feed_items(raw_input=raw_input, items=items)
 
 
-def _resolve_instagram_seed(raw_input: str) -> SeedResolution | None:
-    client = _get_instagram_client()
-    try:
-        return resolve_instagram_seed_input(client, raw_input)
-    finally:
-        client.close()
+def _resolve_instagram_seed(raw_input: str, *, context: SetupRunContext | None = None) -> SeedResolution | None:
+    lookup = (raw_input or "").strip()
+    handle = extract_instagram_handle(raw_input)
+    if not lookup or (not handle and not lookup.lower().startswith(("http://", "https://"))):
+        return None
+    profiles = fetch_instagram_profiles_cached(inputs=[lookup], context=context)
+    return seed_from_profiles(raw_input=raw_input, profiles=profiles)
 
 
 def candidate_platforms_for_exact_seed(raw_input: str) -> list[str]:
@@ -113,25 +79,53 @@ def candidate_platforms_for_exact_seed(raw_input: str) -> list[str]:
     return platforms
 
 
-def resolve_seed_for_platform(*, platform: str, raw_input: str) -> SeedResolution | None:
+def resolve_seed_for_platform(
+    *,
+    platform: str,
+    raw_input: str,
+    context: SetupRunContext | None = None,
+) -> SeedResolution | None:
     platform_key = str(platform)
-    if platform_key == Platform.YOUTUBE:
-        return _resolve_youtube_seed(raw_input)
-    if platform_key == Platform.TIKTOK:
-        return _resolve_tiktok_seed(raw_input)
-    if platform_key == Platform.INSTAGRAM:
-        return _resolve_instagram_seed(raw_input)
-    raise SeedResolveError(f"Unsupported platform: {platform}")
+    if platform_is_blocked(context, platform_key):
+        state = get_platform_state(context, platform_key)
+        raise SeedResolveError(state.reason or f"{platform_key} is unavailable for this setup")
+    cache_key = _cache_key(platform=platform_key, raw_input=raw_input)
+    if context is not None and cache_key in context.seed_resolution_cache:
+        cached_seed, cached_error = context.seed_resolution_cache[cache_key]
+        if cached_error:
+            raise SeedResolveError(cached_error)
+        return cached_seed if isinstance(cached_seed, SeedResolution) else None
+    try:
+        if platform_key == Platform.YOUTUBE:
+            seed = _resolve_youtube_seed(raw_input)
+        elif platform_key == Platform.TIKTOK:
+            seed = _resolve_tiktok_seed(raw_input, context=context)
+        elif platform_key == Platform.INSTAGRAM:
+            seed = _resolve_instagram_seed(raw_input, context=context)
+        else:
+            raise SeedResolveError(f"Unsupported platform: {platform}")
+    except SeedResolveError as exc:
+        if context is not None:
+            context.seed_resolution_cache[cache_key] = (None, str(exc))
+            mark_platform_failure(context, platform=platform_key, reason=str(exc))
+        raise
+    if context is not None:
+        context.seed_resolution_cache[cache_key] = (seed, None)
+    return seed
 
 
-def attempt_exact_seed_resolution(raw_input: str) -> list[SeedResolveAttempt]:
+def attempt_exact_seed_resolution(
+    raw_input: str,
+    *,
+    context: SetupRunContext | None = None,
+) -> list[SeedResolveAttempt]:
     attempts: list[SeedResolveAttempt] = []
     for platform in candidate_platforms_for_exact_seed(raw_input):
         try:
             attempts.append(
                 SeedResolveAttempt(
                     platform=platform,
-                    seed=resolve_seed_for_platform(platform=platform, raw_input=raw_input),
+                    seed=resolve_seed_for_platform(platform=platform, raw_input=raw_input, context=context),
                 )
             )
         except SeedResolveError as exc:
@@ -139,8 +133,11 @@ def attempt_exact_seed_resolution(raw_input: str) -> list[SeedResolveAttempt]:
     return attempts
 
 
-def resolve_exact_seed(raw_input: str) -> SeedResolution | None:
-    attempts = attempt_exact_seed_resolution(raw_input)
+def resolve_exact_seed(raw_input: str, *, context: SetupRunContext | None = None) -> SeedResolution | None:
+    if context is None:
+        attempts = attempt_exact_seed_resolution(raw_input)
+    else:
+        attempts = attempt_exact_seed_resolution(raw_input, context=context)
     if not attempts:
         return None
 

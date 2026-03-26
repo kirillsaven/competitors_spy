@@ -8,6 +8,7 @@ from common.text import KeywordSource, extract_keywords
 from tracking.adapters.base import SeedResolution
 from tracking.services.llm_gemini import GeminiError, infer_keywords_ru
 from tracking.services.platform_onboarding import get_recent_seed_content_texts
+from tracking.services.setup_runtime import SetupRunContext
 
 logger = logging.getLogger(__name__)
 
@@ -59,8 +60,15 @@ def _append_keyword_source(
     sources.append(KeywordSource(text=value, source_id=source_id, source_type=source_type))
 
 
-def _safe_recent_seed_content_texts(*, seed: SeedResolution, n: int = 10) -> list[str]:
+def _safe_recent_seed_content_texts(
+    *,
+    seed: SeedResolution,
+    n: int = 10,
+    context: SetupRunContext | None = None,
+) -> list[str]:
     try:
+        return get_recent_seed_content_texts(seed=seed, n=n, context=context)
+    except TypeError:
         return get_recent_seed_content_texts(seed=seed, n=n)
     except Exception as exc:
         logger.warning("Keyword source fetch failed for %s:%s: %s", seed.platform, seed.external_id, exc)
@@ -72,6 +80,7 @@ def build_niche_context_text(
     seed: SeedResolution,
     competitors: list[SeedResolution],
     linked_accounts: list[SeedResolution] | None = None,
+    context: SetupRunContext | None = None,
 ) -> str:
     lines: list[str] = []
     accounts = _ordered_accounts(seed=seed, linked_accounts=linked_accounts)
@@ -89,7 +98,7 @@ def build_niche_context_text(
         if account.description:
             lines.append(f"Description: {account.description}")
 
-        recent = _safe_recent_seed_content_texts(seed=account, n=10)
+        recent = _safe_recent_seed_content_texts(seed=account, n=10, context=context)
         if recent:
             lines.append("Recent content:")
             for text in recent:
@@ -116,6 +125,7 @@ def build_keyword_source_text(
     seed: SeedResolution,
     competitors: list[SeedResolution],
     linked_accounts: list[SeedResolution] | None = None,
+    context: SetupRunContext | None = None,
 ) -> str:
     parts: list[str] = []
     seen_parts: set[str] = set()
@@ -124,7 +134,7 @@ def build_keyword_source_text(
             _append_unique(parts, account.title, seen_parts)
         if account.description:
             _append_unique(parts, account.description, seen_parts)
-        for text in _safe_recent_seed_content_texts(seed=account, n=10):
+        for text in _safe_recent_seed_content_texts(seed=account, n=10, context=context):
             _append_unique(parts, text, seen_parts)
 
     for competitor in competitors[:20]:
@@ -139,6 +149,7 @@ def build_keyword_sources(
     seed: SeedResolution,
     competitors: list[SeedResolution],
     linked_accounts: list[SeedResolution] | None = None,
+    context: SetupRunContext | None = None,
 ) -> list[KeywordSource]:
     sources: list[KeywordSource] = []
     seen_sources: set[tuple[str, str]] = set()
@@ -160,7 +171,7 @@ def build_keyword_sources(
                 source_type="description",
                 seen=seen_sources,
             )
-        for text in _safe_recent_seed_content_texts(seed=account, n=10):
+        for text in _safe_recent_seed_content_texts(seed=account, n=10, context=context):
             _append_keyword_source(
                 sources,
                 text=text,
@@ -221,12 +232,23 @@ def infer_niche_keywords(
     competitors: list[SeedResolution],
     prefer_llm: bool,
     linked_accounts: list[SeedResolution] | None = None,
+    context: SetupRunContext | None = None,
 ) -> tuple[list[str], str]:
     """
     Returns: (keywords, source) where source in {"llm","auto"}.
     """
-    context = build_niche_context_text(seed=seed, competitors=competitors, linked_accounts=linked_accounts)
-    keyword_sources = build_keyword_sources(seed=seed, competitors=competitors, linked_accounts=linked_accounts)
+    context_text = build_niche_context_text(
+        seed=seed,
+        competitors=competitors,
+        linked_accounts=linked_accounts,
+        context=context,
+    )
+    keyword_sources = build_keyword_sources(
+        seed=seed,
+        competitors=competitors,
+        linked_accounts=linked_accounts,
+        context=context,
+    )
     auto_keywords = extract_keywords(
         keyword_sources,
         max_keywords=8,
@@ -240,7 +262,7 @@ def infer_niche_keywords(
 
     if prefer_llm:
         try:
-            kws = infer_keywords_ru(context_text=context)
+            kws = infer_keywords_ru(context_text=context_text)
             if kws:
                 return kws, "llm"
         except GeminiError as e:

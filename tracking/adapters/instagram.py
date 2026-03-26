@@ -123,20 +123,23 @@ class ApifyInstagramClient:
             raise InstagramApiError(f"Apify Instagram API returned unexpected payload: {data!r}")
         return [item for item in data if isinstance(item, dict)]
 
-    def search_profiles(self, *, query: str) -> list[dict[str, Any]]:
+    def search_profiles(self, *, query: str, limit: int | None = None) -> list[dict[str, Any]]:
         search_query = str(query or "").strip()
         if not search_query:
             return []
         if not self.search_actor_id:
             raise InstagramApiError("Instagram search actor is not configured")
         url = f"{self.base_url}/acts/{quote(self.search_actor_id, safe='')}/run-sync-get-dataset-items"
+        payload: dict[str, Any] = {"query": search_query}
+        if limit is not None:
+            payload["resultsLimit"] = max(1, int(limit))
         response = self._client.post(
             url,
             headers={
                 "Authorization": f"Bearer {self.access_token}",
                 "Accept": "application/json",
             },
-            json={"query": search_query},
+            json=payload,
         )
         try:
             data = response.json()

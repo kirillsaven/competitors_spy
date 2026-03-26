@@ -116,20 +116,23 @@ class ApifyTikTokClient:
     def fetch_profile_feed(self, *, handle: str, results_per_page: int) -> list[dict[str, Any]]:
         return self.fetch_profile_feeds(handles=[handle], results_per_profile=results_per_page)
 
-    def search_profiles(self, *, query: str) -> list[dict[str, Any]]:
+    def search_profiles(self, *, query: str, limit: int | None = None) -> list[dict[str, Any]]:
         search_query = str(query or "").strip()
         if not search_query:
             return []
         if not self.search_actor_id:
             raise TikTokApiError("TikTok search actor is not configured")
         url = f"{self.base_url}/acts/{quote(self.search_actor_id, safe='')}/run-sync-get-dataset-items"
+        payload: dict[str, Any] = {"searchQueries": [search_query]}
+        if limit is not None:
+            payload["maxProfilesPerQuery"] = max(1, int(limit))
         response = self._client.post(
             url,
             headers={
                 "Authorization": f"Bearer {self.access_token}",
                 "Accept": "application/json",
             },
-            json={"searchQueries": [search_query]},
+            json=payload,
         )
         try:
             data = response.json()

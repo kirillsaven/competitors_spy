@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import pytest
+
 from tracking.adapters.base import SeedResolution
 from tracking.models import Platform
 from tracking.services import platform_onboarding
+from tracking.services import seed_resolver
+from tracking.services.setup_runtime import PLATFORM_STATE_UNAVAILABLE, SetupRunContext, get_platform_state
 
 
 def _seed(
@@ -290,3 +294,97 @@ def test_discover_competitors_for_onboarding_ranks_and_dedupes_candidates(monkey
         "Instagram: FOUND (1)",
         "TikTok: ERROR — provider timeout",
     ]
+
+
+def test_setup_context_reuses_instagram_profile_between_seed_resolve_and_recent_content(monkeypatch):
+    calls = {"profiles": 0}
+    context = SetupRunContext()
+
+    class FakeClient:
+        def fetch_profiles(self, *, inputs):
+            calls["profiles"] += 1
+            assert inputs == ["https://www.instagram.com/nasa/"]
+            return [
+                {
+                    "id": "ig-1",
+                    "username": "nasa",
+                    "url": "https://www.instagram.com/nasa/",
+                    "latestPosts": [{"id": "post-1", "caption": "Mars update"}],
+                }
+            ]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(platform_onboarding, "_get_instagram_client", lambda: FakeClient())
+
+    seed = seed_resolver.resolve_seed_for_platform(
+        platform=Platform.INSTAGRAM,
+        raw_input="https://www.instagram.com/nasa/",
+        context=context,
+    )
+    texts = platform_onboarding.get_recent_seed_content_texts(seed=seed, n=5, context=context)
+
+    assert texts == ["Mars update"]
+    assert calls == {"profiles": 1}
+
+
+def test_instagram_403_marks_platform_unavailable_for_rest_of_setup(monkeypatch):
+    calls = {"search": 0}
+    context = SetupRunContext()
+
+    class FakeClient:
+        def search_profiles(self, *, query, limit=None):
+            calls["search"] += 1
+            raise platform_onboarding.InstagramApiError(
+                "Apify Instagram search API error: status=403 body={'error': {'type': 'platform-feature-disabled'}}"
+            )
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(platform_onboarding, "_get_instagram_client", lambda: FakeClient())
+
+    with pytest.raises(platform_onboarding.InstagramApiError, match="status=403"):
+        platform_onboarding._cached_instagram_search_results(
+            query="english tutors",
+            limit=5,
+            context=context,
+        )
+
+    state = get_platform_state(context, Platform.INSTAGRAM)
+    assert state.state == PLATFORM_STATE_UNAVAILABLE
+
+    with pytest.raises(platform_onboarding.PlatformOnboardingError, match="status=403"):
+        platform_onboarding._cached_instagram_search_results(
+            query="english tutors",
+            limit=5,
+            context=context,
+        )
+
+    assert calls == {"search": 1}
+
+
+def test_setup_context_reuses_instagram_search_query_results(monkeypatch):
+    calls = {"search": 0}
+    context = SetupRunContext()
+
+    class FakeClient:
+        def search_profiles(self, *, query, limit=None):
+            calls["search"] += 1
+            return [
+                {"id": "ig-1", "username": "teacher_hub", "full_name": "Teacher Hub"},
+                {"id": "ig-2", "username": "lessonlab", "full_name": "Lesson Lab"},
+            ]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(platform_onboarding, "_get_instagram_client", lambda: FakeClient())
+
+    first = platform_onboarding._cached_instagram_search_results(query="english tutors", limit=5, context=context)
+    second = platform_onboarding._cached_instagram_search_results(query="english tutors", limit=5, context=context)
+
+    assert [item["id"] for item in first] == ["ig-1", "ig-2"]
+    assert [item["id"] for item in second] == ["ig-1", "ig-2"]
+    assert calls == {"search": 1}

@@ -10,6 +10,7 @@ from tracking.adapters.instagram import (
     ApifyInstagramClient,
     InstagramApiError,
     build_profile_url as build_instagram_profile_url,
+    extract_handle,
 )
 from tracking.adapters.tiktok import (
     ApifyTikTokClient,
@@ -20,6 +21,17 @@ from tracking.adapters.tiktok import (
 from tracking.adapters.youtube import YouTubeApiError
 from tracking.models import Platform
 from tracking.services.provider_config import get_instagram_apify_config, get_tiktok_apify_config
+from tracking.services.setup_runtime import (
+    PLATFORM_STATE_ERROR,
+    PLATFORM_STATE_SKIPPED,
+    PLATFORM_STATE_UNAVAILABLE,
+    SetupRunContext,
+    get_platform_state,
+    mark_platform_available,
+    mark_platform_failure,
+    mark_platform_skipped,
+    platform_is_blocked,
+)
 from tracking.services.youtube_service import get_recent_video_titles, get_youtube_client
 
 
@@ -30,6 +42,8 @@ class PlatformOnboardingError(RuntimeError):
 DISCOVERY_FOUND = "FOUND"
 DISCOVERY_EMPTY = "EMPTY"
 DISCOVERY_ERROR = "ERROR"
+DISCOVERY_UNAVAILABLE = PLATFORM_STATE_UNAVAILABLE
+DISCOVERY_SKIPPED = PLATFORM_STATE_SKIPPED
 
 _TOKEN_RE = re.compile(r"[0-9A-Za-zА-Яа-яЁё]+")
 _GENERIC_QUERY_TOKENS = {
@@ -114,6 +128,23 @@ _EN_SUFFIXES = (
     "s",
 )
 
+_DISCOVERY_QUERY_BUDGET = {
+    Platform.YOUTUBE: 2,
+    Platform.INSTAGRAM: 3,
+    Platform.TIKTOK: 3,
+}
+_DISCOVERY_INITIAL_QUERY_BUDGET = {
+    Platform.YOUTUBE: 2,
+    Platform.INSTAGRAM: 2,
+    Platform.TIKTOK: 2,
+}
+_DISCOVERY_RESULT_BUDGET = {
+    Platform.YOUTUBE: 6,
+    Platform.INSTAGRAM: 6,
+    Platform.TIKTOK: 6,
+}
+_DISCOVERY_EARLY_STOP_CANDIDATES = 6
+
 
 @dataclass(frozen=True)
 class PlatformDiscoveryStatus:
@@ -166,6 +197,220 @@ def _render_platform_status(status: PlatformDiscoveryStatus) -> str:
     if status.reason:
         line += f" — {status.reason}"
     return line
+
+
+def _profile_cache_key(platform: str, lookup: str) -> str:
+    return f"profile::{platform}::{str(lookup or '').strip().lower()}"
+
+
+def _recent_cache_key(platform: str, external_id: str, handle: str | None, n: int) -> str:
+    identity = str(handle or external_id or "").strip().lower()
+    return f"recent::{platform}::{identity}::{max(1, int(n))}"
+
+
+def _search_cache_key(platform: str, query: str) -> str:
+    return f"search::{platform}::{' '.join(str(query or '').strip().lower().split())}"
+
+
+def _normalize_instagram_lookup(value: str) -> tuple[str, str]:
+    raw = str(value or "").strip()
+    if not raw:
+        return "", ""
+    if raw.isdigit():
+        return "id", raw
+    handle = extract_handle(raw)
+    if handle:
+        return "handle", handle.lower()
+    return "url", raw.rstrip("/").lower()
+
+
+def _find_instagram_profile_for_lookup(profiles: list[dict[str, Any]], lookup: str) -> dict[str, Any] | None:
+    lookup_kind, lookup_value = _normalize_instagram_lookup(lookup)
+    for profile in profiles:
+        username = str(profile.get("username") or "").strip().lower()
+        profile_id = str(profile.get("id") or "").strip()
+        profile_url = str(profile.get("url") or "").strip().rstrip("/").lower()
+        if lookup_kind == "id" and profile_id == lookup_value:
+            return profile
+        if lookup_kind == "handle" and username == lookup_value:
+            return profile
+        if lookup_kind == "url" and profile_url == lookup_value:
+            return profile
+        if lookup_kind == "url":
+            resolved_handle = extract_handle(lookup)
+            if resolved_handle and username == resolved_handle.lower():
+                return profile
+    return None
+
+
+def fetch_instagram_profiles_cached(
+    *,
+    inputs: list[str],
+    context: SetupRunContext | None = None,
+) -> list[dict[str, Any]]:
+    sanitized_inputs = [value.strip() for value in inputs if value and value.strip()]
+    if not sanitized_inputs:
+        return []
+    if platform_is_blocked(context, Platform.INSTAGRAM):
+        state = get_platform_state(context, Platform.INSTAGRAM)
+        raise PlatformOnboardingError(state.reason or "Instagram is unavailable for this setup")
+
+    cached_profiles: list[dict[str, Any]] = []
+    missing_inputs: list[str] = []
+    for lookup in sanitized_inputs:
+        cache_key = _profile_cache_key(Platform.INSTAGRAM, lookup)
+        if context is not None and cache_key in context.profile_cache:
+            cached = context.profile_cache[cache_key]
+            if isinstance(cached, dict):
+                cached_profiles.append(cached)
+            continue
+        missing_inputs.append(lookup)
+
+    if missing_inputs:
+        client = _get_instagram_client()
+        try:
+            fetched = client.fetch_profiles(inputs=missing_inputs)
+            mark_platform_available(context, Platform.INSTAGRAM)
+        except (PlatformOnboardingError, InstagramApiError, RuntimeError) as exc:
+            mark_platform_failure(context, platform=Platform.INSTAGRAM, reason=str(exc))
+            raise
+        finally:
+            client.close()
+        for lookup in missing_inputs:
+            matched = _find_instagram_profile_for_lookup(fetched, lookup)
+            if context is not None:
+                context.profile_cache[_profile_cache_key(Platform.INSTAGRAM, lookup)] = matched or {}
+            if matched:
+                cached_profiles.append(matched)
+
+    ordered: list[dict[str, Any]] = []
+    for lookup in sanitized_inputs:
+        if context is None:
+            matched = _find_instagram_profile_for_lookup(cached_profiles, lookup)
+            if matched:
+                ordered.append(matched)
+            continue
+        cache_key = _profile_cache_key(Platform.INSTAGRAM, lookup)
+        cached = context.profile_cache.get(cache_key)
+        if isinstance(cached, dict) and cached:
+            ordered.append(cached)
+    return ordered
+
+
+def fetch_tiktok_profile_feed_cached(
+    *,
+    handle: str,
+    results_per_page: int,
+    context: SetupRunContext | None = None,
+) -> list[dict[str, Any]]:
+    normalized_handle = str(handle or "").strip()
+    if not normalized_handle:
+        return []
+    if platform_is_blocked(context, Platform.TIKTOK):
+        state = get_platform_state(context, Platform.TIKTOK)
+        raise PlatformOnboardingError(state.reason or "TikTok is unavailable for this setup")
+
+    cache_key = _profile_cache_key(Platform.TIKTOK, normalized_handle)
+    requested = max(1, int(results_per_page))
+    cached_items = context.profile_cache.get(cache_key) if context is not None else None
+    if isinstance(cached_items, list) and len(cached_items) >= requested:
+        return [item for item in cached_items[:requested] if isinstance(item, dict)]
+
+    client = _get_tiktok_client()
+    try:
+        items = client.fetch_profile_feed(handle=normalized_handle, results_per_page=requested)
+        mark_platform_available(context, Platform.TIKTOK)
+    except (PlatformOnboardingError, TikTokApiError, RuntimeError) as exc:
+        mark_platform_failure(context, platform=Platform.TIKTOK, reason=str(exc))
+        raise
+    finally:
+        client.close()
+    if context is not None:
+        context.profile_cache[cache_key] = [item for item in items if isinstance(item, dict)]
+    return [item for item in items if isinstance(item, dict)]
+
+
+def _cached_youtube_search_channel_ids(
+    *,
+    query: str,
+    max_results: int,
+    context: SetupRunContext | None = None,
+) -> list[str]:
+    cache_key = _search_cache_key(Platform.YOUTUBE, query)
+    if context is not None and cache_key in context.search_cache:
+        cached = context.search_cache[cache_key]
+        return [str(item) for item in cached[:max_results]]
+    client = get_youtube_client()
+    try:
+        channel_ids = list(client.search_channels(q=query, max_results=max_results))
+        mark_platform_available(context, Platform.YOUTUBE)
+    finally:
+        client.close()
+    if context is not None:
+        context.search_cache[cache_key] = list(channel_ids)
+    return channel_ids
+
+
+def _cached_instagram_search_results(
+    *,
+    query: str,
+    limit: int,
+    context: SetupRunContext | None = None,
+) -> list[dict[str, Any]]:
+    cache_key = _search_cache_key(Platform.INSTAGRAM, query)
+    if context is not None and cache_key in context.search_cache:
+        cached = context.search_cache[cache_key]
+        return [item for item in cached[:limit] if isinstance(item, dict)]
+    if platform_is_blocked(context, Platform.INSTAGRAM):
+        state = get_platform_state(context, Platform.INSTAGRAM)
+        raise PlatformOnboardingError(state.reason or "Instagram is unavailable for this setup")
+    client = _get_instagram_client()
+    try:
+        try:
+            results = client.search_profiles(query=query, limit=limit)
+        except TypeError:
+            results = client.search_profiles(query=query)
+        mark_platform_available(context, Platform.INSTAGRAM)
+    except (PlatformOnboardingError, InstagramApiError, RuntimeError) as exc:
+        mark_platform_failure(context, platform=Platform.INSTAGRAM, reason=str(exc))
+        raise
+    finally:
+        client.close()
+    filtered = [item for item in results if isinstance(item, dict)]
+    if context is not None:
+        context.search_cache[cache_key] = list(filtered)
+    return filtered[:limit]
+
+
+def _cached_tiktok_search_results(
+    *,
+    query: str,
+    limit: int,
+    context: SetupRunContext | None = None,
+) -> list[dict[str, Any]]:
+    cache_key = _search_cache_key(Platform.TIKTOK, query)
+    if context is not None and cache_key in context.search_cache:
+        cached = context.search_cache[cache_key]
+        return [item for item in cached[:limit] if isinstance(item, dict)]
+    if platform_is_blocked(context, Platform.TIKTOK):
+        state = get_platform_state(context, Platform.TIKTOK)
+        raise PlatformOnboardingError(state.reason or "TikTok is unavailable for this setup")
+    client = _get_tiktok_client()
+    try:
+        try:
+            results = client.search_profiles(query=query, limit=limit)
+        except TypeError:
+            results = client.search_profiles(query=query)
+        mark_platform_available(context, Platform.TIKTOK)
+    except (PlatformOnboardingError, TikTokApiError, RuntimeError) as exc:
+        mark_platform_failure(context, platform=Platform.TIKTOK, reason=str(exc))
+        raise
+    finally:
+        client.close()
+    filtered = [item for item in results if isinstance(item, dict)]
+    if context is not None:
+        context.search_cache[cache_key] = list(filtered)
+    return filtered[:limit]
 
 
 def _normalize_token(token: str) -> str:
@@ -296,6 +541,18 @@ def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
     return queries
 
 
+def _progressive_queries(platform: str, keywords: list[str]) -> list[str]:
+    return _search_queries(keywords, max_queries=_DISCOVERY_QUERY_BUDGET.get(platform, 2))
+
+
+def _should_stop_discovery(*, platform: str, query_index: int, unique_candidates: int, max_candidates: int) -> bool:
+    initial_budget = _DISCOVERY_INITIAL_QUERY_BUDGET.get(platform, 1)
+    if query_index + 1 < initial_budget:
+        return False
+    enough_candidates = min(max_candidates, _DISCOVERY_EARLY_STOP_CANDIDATES)
+    return unique_candidates >= enough_candidates
+
+
 def _get_tiktok_client() -> ApifyTikTokClient:
     config = get_tiktok_apify_config()
     profile_actor_id = str(getattr(config, "profile_actor_id", getattr(config, "actor_id", "")) or "")
@@ -376,33 +633,48 @@ def _instagram_profile_texts(profile: dict, *, n: int) -> list[str]:
     return texts
 
 
-def get_recent_seed_content_texts(*, seed: SeedResolution, n: int = 10) -> list[str]:
+def get_recent_seed_content_texts(
+    *,
+    seed: SeedResolution,
+    n: int = 10,
+    context: SetupRunContext | None = None,
+) -> list[str]:
+    cache_key = _recent_cache_key(seed.platform, seed.external_id, seed.handle, n)
+    if context is not None and cache_key in context.recent_content_cache:
+        return list(context.recent_content_cache[cache_key])
+
     if seed.platform == Platform.YOUTUBE:
-        return get_recent_video_titles(seed, n=n)
+        texts = get_recent_video_titles(seed, n=n)
+        if context is not None:
+            context.recent_content_cache[cache_key] = list(texts)
+        return texts
 
     if seed.platform == Platform.TIKTOK:
-        client = _get_tiktok_client()
-        try:
-            items = client.fetch_profile_feed(handle=_get_tiktok_handle(seed), results_per_page=max(1, n))
-        finally:
-            client.close()
+        items = fetch_tiktok_profile_feed_cached(
+            handle=_get_tiktok_handle(seed),
+            results_per_page=max(1, n),
+            context=context,
+        )
         texts: list[str] = []
         for item in items[:n]:
             details = item_to_video_details(item)
             text = details.description or details.title
             if text:
                 texts.append(text)
+        if context is not None:
+            context.recent_content_cache[cache_key] = list(texts)
         return texts
 
     if seed.platform == Platform.INSTAGRAM:
-        client = _get_instagram_client()
-        try:
-            profiles = client.fetch_profiles(inputs=[_get_instagram_lookup(seed)])
-        finally:
-            client.close()
+        profiles = fetch_instagram_profiles_cached(inputs=[_get_instagram_lookup(seed)], context=context)
         if not profiles:
+            if context is not None:
+                context.recent_content_cache[cache_key] = []
             return []
-        return _instagram_profile_texts(profiles[0], n=n)
+        texts = _instagram_profile_texts(profiles[0], n=n)
+        if context is not None:
+            context.recent_content_cache[cache_key] = list(texts)
+        return texts
 
     return []
 
@@ -431,19 +703,31 @@ def _discover_youtube_search_candidates(
     *,
     keywords: list[str],
     max_search_calls: int,
+    context: SetupRunContext | None = None,
 ) -> list[_DiscoveryCandidate]:
     queries = _search_queries(keywords, max_queries=max_search_calls)
     if not queries:
         raise PlatformOnboardingError("No YouTube search queries could be built from niche keywords")
+    query_hits: dict[str, set[str]] = {}
+    for index, query in enumerate(queries):
+        for channel_id in _cached_youtube_search_channel_ids(
+            query=query,
+            max_results=_DISCOVERY_RESULT_BUDGET[Platform.YOUTUBE],
+            context=context,
+        ):
+            query_hits.setdefault(channel_id, set()).add(query)
+        if _should_stop_discovery(
+            platform=Platform.YOUTUBE,
+            query_index=index,
+            unique_candidates=len(query_hits),
+            max_candidates=_DISCOVERY_EARLY_STOP_CANDIDATES,
+        ):
+            break
+    if not query_hits:
+        return []
+
     client = get_youtube_client()
     try:
-        query_hits: dict[str, set[str]] = {}
-        for query in queries:
-            for channel_id in client.search_channels(q=query, max_results=10):
-                query_hits.setdefault(channel_id, set()).add(query)
-        if not query_hits:
-            return []
-
         out: list[_DiscoveryCandidate] = []
         channel_ids = list(query_hits)
         for index in range(0, len(channel_ids), 50):
@@ -479,40 +763,46 @@ def _search_instagram_candidates_raw(
     *,
     keywords: list[str],
     max_candidates: int = 20,
+    context: SetupRunContext | None = None,
 ) -> list[_DiscoveryCandidate]:
-    queries = _search_queries(keywords)
+    queries = _progressive_queries(Platform.INSTAGRAM, keywords)
     if not queries:
         raise PlatformOnboardingError("No Instagram search queries could be built from niche keywords")
-    client = _get_instagram_client()
-    try:
-        raw_by_id: dict[str, _DiscoveryCandidate] = {}
-        for query in queries:
-            for raw in client.search_profiles(query=query)[: max(10, max_candidates * 2)]:
-                candidate = _build_instagram_candidate(raw, queries={query})
-                if not candidate:
-                    continue
-                existing = raw_by_id.get(candidate.external_id)
-                if existing is None:
-                    raw_by_id[candidate.external_id] = candidate
-                else:
-                    existing.query_hits.update(candidate.query_hits)
+    raw_by_id: dict[str, _DiscoveryCandidate] = {}
+    result_limit = min(max_candidates, _DISCOVERY_RESULT_BUDGET[Platform.INSTAGRAM])
+    for index, query in enumerate(queries):
+        for raw in _cached_instagram_search_results(query=query, limit=result_limit, context=context):
+            candidate = _build_instagram_candidate(raw, queries={query})
+            if not candidate:
+                continue
+            existing = raw_by_id.get(candidate.external_id)
+            if existing is None:
+                raw_by_id[candidate.external_id] = candidate
+            else:
+                existing.query_hits.update(candidate.query_hits)
+        if _should_stop_discovery(
+            platform=Platform.INSTAGRAM,
+            query_index=index,
+            unique_candidates=len(raw_by_id),
+            max_candidates=max_candidates,
+        ):
+            break
 
-        if not raw_by_id:
-            return []
+    if not raw_by_id:
+        return []
 
-        ranked = sorted(
-            raw_by_id.values(),
-            key=lambda item: (-_score_candidate(item), -len(item.query_hits), item.sort_tiebreak),
-        )
-        return ranked[:max_candidates]
-    finally:
-        client.close()
+    ranked = sorted(
+        raw_by_id.values(),
+        key=lambda item: (-_score_candidate(item), -len(item.query_hits), item.sort_tiebreak),
+    )
+    return ranked[:max_candidates]
 
 
 def discover_instagram_competitors(
     *,
     keywords: list[str],
     max_candidates: int = 20,
+    context: SetupRunContext | None = None,
 ) -> list[CompetitorCandidate]:
     return [
         CompetitorCandidate(
@@ -523,7 +813,7 @@ def discover_instagram_competitors(
             display_name=item.display_name,
             reason="search: " + ", ".join(sorted(item.query_hits)),
         )
-        for item in _search_instagram_candidates_raw(keywords=keywords, max_candidates=max_candidates)
+        for item in _search_instagram_candidates_raw(keywords=keywords, max_candidates=max_candidates, context=context)
     ]
 
 
@@ -551,37 +841,43 @@ def _search_tiktok_candidates_raw(
     *,
     keywords: list[str],
     max_candidates: int = 20,
+    context: SetupRunContext | None = None,
 ) -> list[_DiscoveryCandidate]:
-    queries = _search_queries(keywords)
+    queries = _progressive_queries(Platform.TIKTOK, keywords)
     if not queries:
         raise PlatformOnboardingError("No TikTok search queries could be built from niche keywords")
-    client = _get_tiktok_client()
-    try:
-        raw_by_id: dict[str, _DiscoveryCandidate] = {}
-        for query in queries:
-            for raw in client.search_profiles(query=query)[: max(10, max_candidates * 2)]:
-                candidate = _build_tiktok_candidate(raw, queries={query})
-                if not candidate:
-                    continue
-                existing = raw_by_id.get(candidate.external_id)
-                if existing is None:
-                    raw_by_id[candidate.external_id] = candidate
-                else:
-                    existing.query_hits.update(candidate.query_hits)
+    raw_by_id: dict[str, _DiscoveryCandidate] = {}
+    result_limit = min(max_candidates, _DISCOVERY_RESULT_BUDGET[Platform.TIKTOK])
+    for index, query in enumerate(queries):
+        for raw in _cached_tiktok_search_results(query=query, limit=result_limit, context=context):
+            candidate = _build_tiktok_candidate(raw, queries={query})
+            if not candidate:
+                continue
+            existing = raw_by_id.get(candidate.external_id)
+            if existing is None:
+                raw_by_id[candidate.external_id] = candidate
+            else:
+                existing.query_hits.update(candidate.query_hits)
+        if _should_stop_discovery(
+            platform=Platform.TIKTOK,
+            query_index=index,
+            unique_candidates=len(raw_by_id),
+            max_candidates=max_candidates,
+        ):
+            break
 
-        ranked = sorted(
-            raw_by_id.values(),
-            key=lambda item: (-_score_candidate(item), -len(item.query_hits), item.sort_tiebreak),
-        )
-        return ranked[:max_candidates]
-    finally:
-        client.close()
+    ranked = sorted(
+        raw_by_id.values(),
+        key=lambda item: (-_score_candidate(item), -len(item.query_hits), item.sort_tiebreak),
+    )
+    return ranked[:max_candidates]
 
 
 def discover_tiktok_competitors(
     *,
     keywords: list[str],
     max_candidates: int = 20,
+    context: SetupRunContext | None = None,
 ) -> list[CompetitorCandidate]:
     return [
         CompetitorCandidate(
@@ -592,7 +888,7 @@ def discover_tiktok_competitors(
             display_name=item.display_name,
             reason="search: " + ", ".join(sorted(item.query_hits)),
         )
-        for item in _search_tiktok_candidates_raw(keywords=keywords, max_candidates=max_candidates)
+        for item in _search_tiktok_candidates_raw(keywords=keywords, max_candidates=max_candidates, context=context)
     ]
 
 
@@ -659,6 +955,7 @@ def discover_competitors_for_onboarding(
     linked_accounts: list[SeedResolution] | None = None,
     max_youtube_search_calls: int,
     max_candidates_per_platform: int,
+    context: SetupRunContext | None = None,
 ) -> DiscoveryOutcome:
     del competitors  # setup still keeps manual competitors separately; discovery is query-based here.
 
@@ -669,40 +966,64 @@ def discover_competitors_for_onboarding(
         Platform.INSTAGRAM: [],
     }
 
-    try:
-        candidates_by_platform[Platform.YOUTUBE] = _discover_youtube_search_candidates(
-            keywords=keywords,
-            max_search_calls=max_youtube_search_calls,
-        )
-    except (PlatformOnboardingError, YouTubeApiError, RuntimeError) as exc:
-        platform_statuses.append(
-            PlatformDiscoveryStatus(platform=Platform.YOUTUBE, status=DISCOVERY_ERROR, reason=str(exc))
-        )
+    for platform in (Platform.YOUTUBE, Platform.INSTAGRAM, Platform.TIKTOK):
+        if platform_is_blocked(context, platform):
+            state = get_platform_state(context, platform)
+            platform_statuses.append(
+                PlatformDiscoveryStatus(
+                    platform=platform,
+                    status=state.state,
+                    reason=state.reason or f"{_platform_label(platform)} недоступен для этого setup.",
+                )
+            )
 
-    try:
-        candidates_by_platform[Platform.INSTAGRAM] = _search_instagram_candidates_raw(
-            keywords=keywords,
-            max_candidates=max_candidates_per_platform * 2,
-        )
-    except (PlatformOnboardingError, InstagramApiError, RuntimeError) as exc:
-        platform_statuses.append(
-            PlatformDiscoveryStatus(platform=Platform.INSTAGRAM, status=DISCOVERY_ERROR, reason=str(exc))
-        )
+    if not any(status.platform == Platform.YOUTUBE for status in platform_statuses):
+        try:
+            candidates_by_platform[Platform.YOUTUBE] = _discover_youtube_search_candidates(
+                keywords=keywords,
+                max_search_calls=min(max_youtube_search_calls, _DISCOVERY_QUERY_BUDGET[Platform.YOUTUBE]),
+                context=context,
+            )
+        except (PlatformOnboardingError, YouTubeApiError, RuntimeError) as exc:
+            platform_statuses.append(
+                PlatformDiscoveryStatus(platform=Platform.YOUTUBE, status=DISCOVERY_ERROR, reason=str(exc))
+            )
+            mark_platform_failure(context, platform=Platform.YOUTUBE, reason=str(exc))
 
-    try:
-        candidates_by_platform[Platform.TIKTOK] = _search_tiktok_candidates_raw(
-            keywords=keywords,
-            max_candidates=max_candidates_per_platform * 2,
-        )
-    except (PlatformOnboardingError, TikTokApiError, RuntimeError) as exc:
-        platform_statuses.append(
-            PlatformDiscoveryStatus(platform=Platform.TIKTOK, status=DISCOVERY_ERROR, reason=str(exc))
-        )
+    if not any(status.platform == Platform.INSTAGRAM for status in platform_statuses):
+        try:
+            candidates_by_platform[Platform.INSTAGRAM] = _search_instagram_candidates_raw(
+                keywords=keywords,
+                max_candidates=max_candidates_per_platform,
+                context=context,
+            )
+        except (PlatformOnboardingError, InstagramApiError, RuntimeError) as exc:
+            state = mark_platform_failure(context, platform=Platform.INSTAGRAM, reason=str(exc))
+            platform_statuses.append(
+                PlatformDiscoveryStatus(platform=Platform.INSTAGRAM, status=state, reason=str(exc))
+            )
+
+    if not any(status.platform == Platform.TIKTOK for status in platform_statuses):
+        try:
+            candidates_by_platform[Platform.TIKTOK] = _search_tiktok_candidates_raw(
+                keywords=keywords,
+                max_candidates=max_candidates_per_platform,
+                context=context,
+            )
+        except (PlatformOnboardingError, TikTokApiError, RuntimeError) as exc:
+            state = mark_platform_failure(context, platform=Platform.TIKTOK, reason=str(exc))
+            platform_statuses.append(
+                PlatformDiscoveryStatus(platform=Platform.TIKTOK, status=state, reason=str(exc))
+            )
 
     _apply_cross_platform_bonus(candidates_by_platform)
 
     final_candidates: list[CompetitorCandidate] = []
-    errored_platforms = {status.platform for status in platform_statuses if status.status == DISCOVERY_ERROR}
+    errored_platforms = {
+        status.platform
+        for status in platform_statuses
+        if status.status in {DISCOVERY_ERROR, DISCOVERY_UNAVAILABLE, DISCOVERY_SKIPPED}
+    }
     for platform in (Platform.YOUTUBE, Platform.INSTAGRAM, Platform.TIKTOK):
         if platform in errored_platforms:
             continue

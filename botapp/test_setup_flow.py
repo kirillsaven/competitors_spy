@@ -11,6 +11,7 @@ from tracking.adapters.base import SeedResolution
 from tracking.models import SeedProfile, SeedStatus, TgUser
 from tracking.services.account_linking import LinkedAccountSuggestion
 from tracking.services.platform_onboarding import DiscoveryOutcome, PlatformDiscoveryStatus
+from tracking.services.setup_runtime import SetupRunContext, mark_platform_failure
 
 
 class DummyState:
@@ -403,3 +404,128 @@ def test_start_discovery_reports_per_platform_statuses_without_vague_failure(mon
     assert "TikTok: EMPTY" in message.answers[-1]
     assert "Instagram: ERROR — provider timeout" in message.answers[-1]
     assert "Автоподбор не сработал:" not in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_youtube_seed_survives_instagram_tiktok_provider_failure(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=505, tg_chat_id=505)
+    state = DummyState({"user_id": user.id, "setup_runtime_id": "run-yt"})
+    message = DummyMessage()
+    message.from_user = SimpleNamespace(id=user.tg_user_id)
+    message.text = "https://www.youtube.com/@creator"
+
+    monkeypatch.setattr(setup, "db_call", _db_call)
+    monkeypatch.setattr(setup, "db_run", _db_run)
+    monkeypatch.setattr(
+        setup,
+        "resolve_seed_for_platform",
+        lambda **kwargs: SeedResolution(
+            platform="youtube",
+            external_id="yt-1",
+            handle="creator",
+            url="https://www.youtube.com/@creator",
+            title="Creator",
+            description="Channel",
+            uploads_playlist_id="UU1",
+        ),
+    )
+    monkeypatch.setattr(
+        setup,
+        "suggest_accounts_for_platforms",
+        lambda **kwargs: {
+            "instagram": LinkedAccountSuggestion(
+                platform="instagram",
+                candidates=[],
+                note="provider hard limit exceeded",
+                status="UNAVAILABLE",
+            ),
+            "tiktok": LinkedAccountSuggestion(
+                platform="tiktok",
+                candidates=[],
+                note="provider hard limit exceeded",
+                status="UNAVAILABLE",
+            ),
+        },
+    )
+
+    async_to_sync(setup.on_seed_input)(message, state)
+
+    assert state.state == SetupStates.WAIT_COMPETITOR_LIST
+    assert any("Instagram временно недоступен" in text for text in message.answers)
+    assert any("TikTok временно недоступен" in text for text in message.answers)
+
+
+@pytest.mark.django_db
+def test_instagram_provider_failure_falls_back_to_manual_niche(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=606, tg_chat_id=606)
+    state = DummyState({"user_id": user.id, "setup_runtime_id": "run-ig"})
+    message = DummyMessage()
+    message.from_user = SimpleNamespace(id=user.tg_user_id)
+    message.text = "https://www.instagram.com/dariapancho/"
+
+    monkeypatch.setattr(setup, "db_call", _db_call)
+    monkeypatch.setattr(setup, "db_run", _db_run)
+
+    def fake_resolve_seed_for_platform(*, platform, raw_input, context=None):
+        mark_platform_failure(context, platform=platform, reason="status=403 body={'error': 'hard limit'}")
+        raise setup.SeedResolveError("status=403 body={'error': 'hard limit'}")
+
+    monkeypatch.setattr(setup, "resolve_seed_for_platform", fake_resolve_seed_for_platform)
+
+    async_to_sync(setup.on_seed_input)(message, state)
+
+    assert state.state == SetupStates.ADD_NICHE
+    assert any("Instagram сейчас недоступен" in text for text in message.answers)
+    assert any("в сокращенном режиме" in text for text in message.answers)
+
+
+@pytest.mark.django_db
+def test_start_discovery_continues_when_zero_platforms_available(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=707, tg_chat_id=707)
+    state = DummyState(
+        {
+            "user_id": user.id,
+            "setup_runtime_id": "run-discovery",
+            "seed": None,
+            "niche_keywords": ["english tutor"],
+            "competitor_seeds": [],
+        }
+    )
+    message = DummyMessage()
+    called = {}
+
+    monkeypatch.setattr(setup, "db_call", _db_call)
+    monkeypatch.setattr(
+        setup,
+        "_load_confirmed_linked_accounts",
+        lambda **kwargs: sync_to_async(lambda: [], thread_sensitive=True)(),
+    )
+    monkeypatch.setattr(
+        setup,
+        "discover_competitors_for_onboarding",
+        lambda **kwargs: DiscoveryOutcome(
+            candidates=[],
+            platform_statuses=[
+                PlatformDiscoveryStatus(platform="youtube", status="UNAVAILABLE", reason="YouTube quota is disabled"),
+                PlatformDiscoveryStatus(platform="instagram", status="UNAVAILABLE", reason="provider hard limit exceeded"),
+                PlatformDiscoveryStatus(platform="tiktok", status="UNAVAILABLE", reason="provider hard limit exceeded"),
+            ],
+            notes=[
+                "YouTube: UNAVAILABLE — YouTube quota is disabled",
+                "Instagram: UNAVAILABLE — provider hard limit exceeded",
+                "TikTok: UNAVAILABLE — provider hard limit exceeded",
+            ],
+        ),
+    )
+
+    async def fake_ask_timezone_method(message, state):
+        called["timezone"] = True
+
+    monkeypatch.setattr(setup, "_ask_timezone_method", fake_ask_timezone_method)
+
+    async_to_sync(setup._start_discovery)(message, state)
+
+    assert called == {"timezone": True}
+    assert "YouTube: UNAVAILABLE" in message.answers[-1]
+    assert "Instagram: UNAVAILABLE" in message.answers[-1]
+    assert "TikTok: UNAVAILABLE" in message.answers[-1]
