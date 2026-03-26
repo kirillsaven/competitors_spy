@@ -523,13 +523,13 @@ def test_discover_competitors_for_onboarding_rejects_offtopic_education_channels
 
     calls = {"youtube": 0}
 
-    def fake_recent_youtube_short_texts(*, candidate, n, context=None):
+    def fake_recent_youtube_short_signals(*, candidate, n, context=None):
         calls["youtube"] += 1
         if candidate.external_id == "yt-english":
-            return ["english teacher lesson plans", "worksheet ideas for english tutors"]
-        return ["разбор егэ по истории", "история россии для егэ"]
+            return ["english teacher lesson plans", "worksheet ideas for english tutors"], [12000, 9000]
+        return ["разбор егэ по истории", "история россии для егэ"], [15000, 11000]
 
-    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_texts", fake_recent_youtube_short_texts)
+    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_signals", fake_recent_youtube_short_signals)
 
     outcome = platform_onboarding.discover_competitors_for_onboarding(
         keywords=["english teachers", "lesson plans"],
@@ -601,7 +601,10 @@ def test_search_queries_drop_overlong_broken_phrases():
 
     assert all(len(query.split()) <= 4 for query in queries)
     assert all(len(query) <= 48 for query in queries)
+    assert len(queries) >= 6
     assert "преподаватель английского" in queries
+    assert "уроки английского" in queries
+    assert any("школа английского" in query for query in queries)
     assert all("английскийонлайн" not in query for query in queries)
 
 
@@ -617,10 +620,10 @@ def test_candidate_survives_only_if_recent_short_form_content_matches_niche(monk
         metadata={"rank_hint": 1000},
     )
 
-    def fake_recent_youtube_short_texts(*, candidate, n, context=None):
-        return ["history exam tips", "егэ по истории"]
+    def fake_recent_youtube_short_signals(*, candidate, n, context=None):
+        return ["history exam tips", "егэ по истории"], [5000, 4200]
 
-    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_texts", fake_recent_youtube_short_texts)
+    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_signals", fake_recent_youtube_short_signals)
 
     validated, reason = platform_onboarding._collector_aware_candidates(
         platform=Platform.YOUTUBE,
@@ -664,12 +667,12 @@ def test_youtube_discovery_checks_multiple_candidates_before_returning_empty(mon
     monkeypatch.setattr(platform_onboarding, "_search_instagram_candidates_raw", lambda **kwargs: [])
     monkeypatch.setattr(platform_onboarding, "_search_tiktok_candidates_raw", lambda **kwargs: [])
 
-    def fake_recent_youtube_short_texts(*, candidate, n, context=None):
+    def fake_recent_youtube_short_signals(*, candidate, n, context=None):
         if candidate.external_id == "yt-good":
-            return ["english teacher lesson plans", "worksheet ideas for english tutors"]
-        return ["history exam tips", "егэ по истории"]
+            return ["english teacher lesson plans", "worksheet ideas for english tutors"], [10000, 8700]
+        return ["history exam tips", "егэ по истории"], [20000, 16000]
 
-    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_texts", fake_recent_youtube_short_texts)
+    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_signals", fake_recent_youtube_short_signals)
 
     outcome = platform_onboarding.discover_competitors_for_onboarding(
         keywords=["english teachers", "lesson plans"],

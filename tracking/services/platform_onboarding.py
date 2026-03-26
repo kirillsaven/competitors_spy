@@ -35,7 +35,7 @@ from tracking.services.setup_runtime import (
     mark_platform_skipped,
     platform_is_blocked,
 )
-from tracking.services.youtube_service import get_recent_video_titles, get_youtube_client
+from tracking.services.youtube_service import YouTubeNotConfigured, get_recent_video_titles, get_youtube_client
 
 
 class PlatformOnboardingError(RuntimeError):
@@ -196,6 +196,7 @@ _GENERIC_DISCOVERY_STEMS = {
 _TEACHER_STEMS = {"teacher", "teach", "tutor", "mentor", "репетитор", "преподав", "преподавател", "учител"}
 _LESSON_STEMS = {"lesson", "lessons", "study", "course", "урок", "обуч", "курс"}
 _GROUP_STEMS = {"group", "groups", "student", "students", "групп", "ученик", "студент"}
+_SCHOOL_STEMS = {"school", "schools", "школ", "academy", "course", "courses"}
 
 
 @dataclass(frozen=True)
@@ -1006,10 +1007,10 @@ def _score_candidate(candidate: _DiscoveryCandidate) -> float:
     description_bonus = 2.4 if len(str(candidate.description or "").strip()) >= 24 else 0.0
     cross_platform_bonus = len(candidate.cross_platform_keys) * 4.5
     verified_bonus = 1.4 if bool(candidate.metadata.get("verified")) else 0.0
-    popularity_bonus = min(int(candidate.metadata.get("rank_hint") or 0), 1_000_000) / 250_000
+    popularity_bonus = min(int(candidate.metadata.get("rank_hint") or 0), 5_000_000) / 100_000
     competitor_overlap_bonus = float(candidate.metadata.get("competitor_overlap") or 0) * 1.8
     collectible_count_bonus = min(int(candidate.metadata.get("collectible_count") or 0), 3) * 3.0
-    collectible_views_bonus = min(int(candidate.metadata.get("collectible_views") or 0), 1_000_000) / 250_000
+    collectible_views_bonus = min(int(candidate.metadata.get("collectible_views") or 0), 2_000_000) / 50_000
     profile_theme_bonus = float(candidate.metadata.get("profile_theme_score") or 0) * 2.0
     content_theme_bonus = float(candidate.metadata.get("content_theme_score") or 0) * 2.4
     return (
@@ -1036,15 +1037,24 @@ def _query_utility_score(query: str, *, anchor_stems: set[str]) -> int:
     words = [part for part in str(query or "").split() if part]
     word_count = len(words)
     anchor_overlap = len(specific_stems & anchor_stems)
+    teacher_hits = len(stems & _TEACHER_STEMS)
+    lesson_hits = len(stems & _LESSON_STEMS)
+    school_hits = len(stems & _SCHOOL_STEMS)
+    group_hits = len(stems & _GROUP_STEMS)
     anchor_penalty = 14 if anchor_stems and anchor_overlap <= 0 else 0
     singleton_penalty = 6 if word_count == 1 and not specific_stems else 0
+    audience_only_penalty = 5 if group_hits and not (teacher_hits or lesson_hits or school_hits) else 0
     return (
         anchor_overlap * 18
         + len(specific_stems) * 8
         + word_count * 2
+        + teacher_hits * 3
+        + lesson_hits * 5
+        + school_hits * 4
         - len(generic_stems) * 3
         - anchor_penalty
         - singleton_penalty
+        - audience_only_penalty
     )
 
 
@@ -1114,14 +1124,17 @@ def _synthetic_search_queries(keywords: list[str], *, anchor_stems: set[str]) ->
     generic_stems: set[str] = set()
     for raw in keywords:
         query = " ".join(str(raw or "").split()).strip()
-        if not query or len(query.split()) != 1:
+        if not query:
             continue
         full_stems = _theme_token_stems(query)
+        if len(query.split()) != 1:
+            generic_stems |= full_stems & (_TEACHER_STEMS | _LESSON_STEMS | _GROUP_STEMS | _SCHOOL_STEMS)
+            continue
         specific_stems = {stem for stem in full_stems if stem not in _GENERIC_DISCOVERY_STEMS}
         if specific_stems and (not anchor_stems or specific_stems & anchor_stems):
             subject_terms.append(query)
             continue
-        generic_stems |= full_stems
+        generic_stems |= full_stems & (_TEACHER_STEMS | _LESSON_STEMS | _GROUP_STEMS | _SCHOOL_STEMS)
 
     out: list[str] = []
     seen: set[str] = set()
@@ -1147,8 +1160,11 @@ def _subject_query_variants(*, subject: str, generic_stems: set[str]) -> list[st
             variants.append(f"{base} tutor")
         if generic_stems & _LESSON_STEMS:
             variants.append(f"{base} lessons")
-        if generic_stems & _GROUP_STEMS:
+        if generic_stems & _GROUP_STEMS and generic_stems & _TEACHER_STEMS:
             variants.append(f"{base} teacher groups")
+        if generic_stems & _SCHOOL_STEMS:
+            variants.append(f"{base} school")
+            variants.append(f"online {base} school")
         return variants
 
     russian_object = _russian_subject_object_form(normalized_subject)
@@ -1158,10 +1174,13 @@ def _subject_query_variants(*, subject: str, generic_stems: set[str]) -> list[st
         variants.append(f"преподаватель {russian_object}")
     if generic_stems & _LESSON_STEMS:
         variants.append(f"уроки {russian_object}")
-    if generic_stems & _GROUP_STEMS:
+    if generic_stems & _GROUP_STEMS and not (generic_stems & _TEACHER_STEMS):
         variants.append(f"группы {russian_object}")
     if generic_stems & _TEACHER_STEMS and generic_stems & _GROUP_STEMS:
         variants.append(f"группы преподавателей {russian_object}")
+    if generic_stems & _SCHOOL_STEMS:
+        variants.append(f"школа {russian_object}")
+        variants.append(f"онлайн школа {russian_object}")
     return variants
 
 
@@ -1246,7 +1265,7 @@ def _progressive_queries(platform: str, keywords: list[str]) -> list[str]:
     return _search_queries(keywords, max_queries=_DISCOVERY_QUERY_BUDGET.get(platform, 2))
 
 
-def build_search_ready_keywords(*, keywords: list[str], max_keywords: int = 6) -> list[str]:
+def build_search_ready_keywords(*, keywords: list[str], max_keywords: int = 8) -> list[str]:
     return _search_queries(keywords, max_queries=max_keywords)
 
 
@@ -1381,6 +1400,16 @@ def _fetch_recent_youtube_short_texts(
     n: int,
     context: SetupRunContext | None = None,
 ) -> list[str]:
+    texts, _views = _fetch_recent_youtube_short_signals(candidate=candidate, n=n, context=context)
+    return texts
+
+
+def _fetch_recent_youtube_short_signals(
+    *,
+    candidate: _DiscoveryCandidate,
+    n: int,
+    context: SetupRunContext | None = None,
+) -> tuple[list[str], list[int]]:
     cached = _get_cached_collectible_texts(
         platform=Platform.YOUTUBE,
         external_id=candidate.external_id,
@@ -1389,9 +1418,19 @@ def _fetch_recent_youtube_short_texts(
         context=context,
     )
     if cached is not None:
-        return cached
+        return cached, []
 
-    client = get_youtube_client()
+    try:
+        client = get_youtube_client()
+    except YouTubeNotConfigured:
+        return _store_cached_collectible_texts(
+            platform=Platform.YOUTUBE,
+            external_id=candidate.external_id,
+            handle=candidate.handle,
+            n=n,
+            texts=[],
+            context=context,
+        ), []
     try:
         try:
             items = client.channels_list(part="contentDetails", ids=[candidate.external_id])
@@ -1403,7 +1442,7 @@ def _fetch_recent_youtube_short_texts(
                     n=n,
                     texts=[],
                     context=context,
-                )
+                ), []
             uploads = ((items[0].get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads")
             if not uploads:
                 return _store_cached_collectible_texts(
@@ -1413,7 +1452,7 @@ def _fetch_recent_youtube_short_texts(
                     n=n,
                     texts=[],
                     context=context,
-                )
+                ), []
             playlist_items = client.playlist_items(playlist_id=str(uploads), max_results=max(6, n * 3))
             video_ids = playlist_items_to_video_ids(playlist_items)
             if not video_ids:
@@ -1424,7 +1463,7 @@ def _fetch_recent_youtube_short_texts(
                     n=n,
                     texts=[],
                     context=context,
-                )
+                ), []
             video_items = client.videos_list(ids=video_ids[: max(6, n * 3)], part="snippet,contentDetails")
         except YouTubeApiError:
             return _store_cached_collectible_texts(
@@ -1434,13 +1473,18 @@ def _fetch_recent_youtube_short_texts(
                 n=n,
                 texts=[],
                 context=context,
-            )
+            ), []
+        short_details = [
+            detail
+            for detail in video_items_to_details(video_items)
+            if detail.duration_seconds is not None and detail.duration_seconds <= 60
+        ][:n]
         texts = [
             str(detail.title or "").strip()
-            for detail in video_items_to_details(video_items)
-            if detail.duration_seconds is not None and detail.duration_seconds <= 60 and str(detail.title or "").strip()
-        ][:n]
-        return _store_cached_collectible_texts(
+            for detail in short_details
+            if str(detail.title or "").strip()
+        ]
+        stored = _store_cached_collectible_texts(
             platform=Platform.YOUTUBE,
             external_id=candidate.external_id,
             handle=candidate.handle,
@@ -1448,6 +1492,7 @@ def _fetch_recent_youtube_short_texts(
             texts=texts,
             context=context,
         )
+        return stored, [int(detail.views or 0) for detail in short_details]
     finally:
         client.close()
 
@@ -1671,7 +1716,7 @@ def _fetch_candidate_collectible_texts(
     context: SetupRunContext | None = None,
 ) -> tuple[list[str], list[int]]:
     if candidate.platform == Platform.YOUTUBE:
-        return _fetch_recent_youtube_short_texts(candidate=candidate, n=_DISCOVERY_VALIDATION_ITEMS, context=context), []
+        return _fetch_recent_youtube_short_signals(candidate=candidate, n=_DISCOVERY_VALIDATION_ITEMS, context=context)
     if candidate.platform == Platform.INSTAGRAM:
         return _fetch_recent_instagram_reel_texts(candidate=candidate, n=_DISCOVERY_VALIDATION_ITEMS, context=context)
     if candidate.platform == Platform.TIKTOK:

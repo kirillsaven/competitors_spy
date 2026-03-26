@@ -164,7 +164,7 @@ def test_infer_niche_keywords_auto_prefers_phrase_like_teacher_topics(monkeypatc
     keywords, source = niche_service.infer_niche_keywords(seed=seed, competitors=[], prefer_llm=False)
 
     assert source == "auto"
-    assert 1 <= len(keywords) <= 6
+    assert 1 <= len(keywords) <= 8
     assert all(len(keyword.split()) >= 2 for keyword in keywords)
     assert any("английск" in keyword for keyword in keywords)
     assert any("преподав" in keyword or "репетитор" in keyword for keyword in keywords)

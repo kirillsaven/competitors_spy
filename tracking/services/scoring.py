@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import math
 
 from django.conf import settings
 
@@ -146,7 +147,7 @@ def score_items_for_period(
     # Hard floor to avoid noisy "viral" picks on very short periods (e.g. a few minutes).
     # The main threshold is scaled by period length below.
     min_delta_floor = 20
-    max_age_days = 30
+    max_age_days = int(getattr(settings, "REPORT_MAX_ITEM_AGE_DAYS", 14))
     min_published_at = period_end - timedelta(days=max_age_days)
 
     for item in items:
@@ -210,9 +211,23 @@ def score_items_for_period(
         z_vel = (velocity - baseline.vph_median) / max(baseline.vph_iqr, EPS)
         if er_end is not None and baseline.er_median is not None and baseline.er_iqr is not None:
             z_er = (er_end - baseline.er_median) / max(baseline.er_iqr, EPS)
-            score = 0.75 * z_vel + 0.25 * z_er
+            relative_score = 0.75 * z_vel + 0.25 * z_er
         else:
-            score = z_vel
+            relative_score = z_vel
+
+        age_hours_end = max((snap_end.captured_at - item.published_at).total_seconds() / 3600.0, 0.0)
+        views_signal = math.log10(max(float(views_end), 1.0))
+        delta_signal = math.log10(max(float(delta_views or views_end), 1.0))
+        baseline_vph = float(baseline.vph_median or 0.0)
+        virality_ratio = float(velocity) / max(baseline_vph, EPS) if baseline_vph > 0 else 0.0
+        recency_bonus = max(0.0, 1.0 - min(age_hours_end / float(max(max_age_days * 24, 1)), 1.0))
+        score = (
+            relative_score
+            + (0.32 * delta_signal)
+            + (0.18 * views_signal)
+            + (0.20 * min(virality_ratio, 25.0) / 5.0)
+            + (0.20 * recency_bonus)
+        )
 
         scored.append(
             ScoredItem(

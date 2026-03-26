@@ -239,7 +239,7 @@ def infer_niche_keywords(
     )
     auto_keywords = extract_keywords(
         keyword_sources,
-        max_keywords=6,
+        max_keywords=8,
         blocked_terms=build_keyword_blocked_terms(
             seed=seed,
             linked_accounts=linked_accounts,

@@ -1047,8 +1047,8 @@ async def _start_keywords_step(message: Message, state: FSMContext) -> None:
         )
         return
 
-    kws = [k.strip() for k in (kws or []) if isinstance(k, str) and k.strip()][:12]
-    kws = build_search_ready_keywords(keywords=kws, max_keywords=6) or kws[:6]
+    kws = [k.strip() for k in (kws or []) if isinstance(k, str) and k.strip()][:16]
+    kws = build_search_ready_keywords(keywords=kws, max_keywords=8) or kws[:8]
     if not kws:
         await state.update_data(niche_keywords=[], excluded_keywords=[])
         await state.set_state(SetupStates.ADD_NICHE)
