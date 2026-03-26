@@ -23,6 +23,15 @@ def _platform_label(platform: str) -> str:
     }.get(str(platform or ""), str(platform or "Platform"))
 
 
+def _content_type_tag(content_type: str) -> str:
+    kind = str(content_type or "").strip().lower()
+    if kind == "short":
+        return " [Shorts]"
+    if kind == "reel":
+        return " [Reels]"
+    return ""
+
+
 def build_report_payload(
     *,
     scored: list[ScoredItem],
@@ -187,9 +196,10 @@ def render_setup_verification_text(*, payload: dict, timezone_str: str) -> str:
             lines.append("Примеры последних собранных материалов:")
             for idx, example in enumerate(examples[:3], start=1):
                 title = str(example.get("title") or "Без названия").strip()
+                tag = _content_type_tag(str(example.get("content_type") or ""))
                 competitor = str(example.get("competitor") or "").strip()
                 published_at = example.get("published_at")
-                lines.append(f"{idx}) {title}")
+                lines.append(f"{idx}) {title}{tag}")
                 if competitor:
                     lines.append(f"Источник: {competitor}")
                 if isinstance(published_at, str) and published_at:

@@ -227,6 +227,7 @@ def build_setup_verification_preview(
                 "url": str(item.url or "").strip(),
                 "published_at": item.published_at.isoformat(),
                 "competitor": str(competitor.display_name or competitor.handle or competitor.external_id or "").strip(),
+                "content_type": str((getattr(item, "meta", None) or {}).get("content_type") or "").strip(),
             }
         )
 

@@ -11,6 +11,7 @@ from tracking.adapters.instagram import (
     InstagramApiError,
     build_profile_url as build_instagram_profile_url,
     extract_handle,
+    profile_to_video_details,
 )
 from tracking.adapters.tiktok import (
     ApifyTikTokClient,
@@ -145,6 +146,10 @@ _DISCOVERY_RESULT_BUDGET = {
     Platform.TIKTOK: 4,
 }
 _DISCOVERY_EARLY_STOP_CANDIDATES = 4
+_DISCOVERY_VALIDATION_BUDGET = {
+    Platform.INSTAGRAM: 2,
+    Platform.TIKTOK: 2,
+}
 
 
 @dataclass(frozen=True)
@@ -559,6 +564,8 @@ def _score_candidate(candidate: _DiscoveryCandidate) -> float:
     verified_bonus = 1.4 if bool(candidate.metadata.get("verified")) else 0.0
     popularity_bonus = min(int(candidate.metadata.get("rank_hint") or 0), 1_000_000) / 250_000
     competitor_overlap_bonus = float(candidate.metadata.get("competitor_overlap") or 0) * 1.8
+    collectible_count_bonus = min(int(candidate.metadata.get("collectible_count") or 0), 3) * 3.0
+    collectible_views_bonus = min(int(candidate.metadata.get("collectible_views") or 0), 1_000_000) / 250_000
     return (
         query_repeat_bonus
         + overlap_bonus
@@ -567,6 +574,8 @@ def _score_candidate(candidate: _DiscoveryCandidate) -> float:
         + verified_bonus
         + popularity_bonus
         + competitor_overlap_bonus
+        + collectible_count_bonus
+        + collectible_views_bonus
     )
 
 
@@ -726,19 +735,91 @@ def _get_instagram_lookup(seed: SeedResolution) -> str:
 
 def _instagram_profile_texts(profile: dict, *, n: int) -> list[str]:
     texts: list[str] = []
-    for key in ("latestPosts", "latestIgtvVideos"):
-        value = profile.get(key)
-        if not isinstance(value, list):
-            continue
-        for item in value:
-            if not isinstance(item, dict):
-                continue
-            text = str(item.get("caption") or item.get("description") or item.get("title") or "").strip()
-            if text:
-                texts.append(text)
-            if len(texts) >= n:
-                return texts
+    for item in profile_to_video_details(profile):
+        text = str(item.description or item.title or "").strip()
+        if text:
+            texts.append(text)
+        if len(texts) >= n:
+            return texts
     return texts
+
+
+def _mark_candidate_collectible(candidate: _DiscoveryCandidate, *, item_count: int, max_views: int) -> None:
+    candidate.metadata["collectible_count"] = max(1, int(item_count))
+    candidate.metadata["collectible_views"] = max(0, int(max_views))
+
+
+def _validate_instagram_candidate_collectible(
+    *,
+    candidate: _DiscoveryCandidate,
+    context: SetupRunContext | None = None,
+) -> bool:
+    lookup = str(candidate.url or candidate.handle or candidate.external_id or "").strip()
+    if not lookup:
+        return False
+    profiles = fetch_instagram_profiles_cached(inputs=[lookup], context=context)
+    if not profiles:
+        return False
+    details = profile_to_video_details(profiles[0])
+    if not details:
+        return False
+    _mark_candidate_collectible(
+        candidate,
+        item_count=len(details),
+        max_views=max(int(item.views or 0) for item in details),
+    )
+    return True
+
+
+def _validate_tiktok_candidate_collectible(
+    *,
+    candidate: _DiscoveryCandidate,
+    context: SetupRunContext | None = None,
+) -> bool:
+    handle = str(candidate.handle or "").strip()
+    if not handle:
+        return False
+    items = fetch_tiktok_profile_feed_cached(handle=handle, results_per_page=2, context=context)
+    details = [item_to_video_details(item) for item in items]
+    details = [item for item in details if int(item.views or 0) > 0]
+    if not details:
+        return False
+    _mark_candidate_collectible(
+        candidate,
+        item_count=len(details),
+        max_views=max(int(item.views or 0) for item in details),
+    )
+    return True
+
+
+def _collector_aware_candidates(
+    *,
+    platform: str,
+    candidates: list[_DiscoveryCandidate],
+    max_candidates: int,
+    context: SetupRunContext | None = None,
+) -> tuple[list[_DiscoveryCandidate], str]:
+    if platform not in {Platform.INSTAGRAM, Platform.TIKTOK} or not candidates:
+        return candidates, ""
+
+    validator = (
+        _validate_instagram_candidate_collectible
+        if platform == Platform.INSTAGRAM
+        else _validate_tiktok_candidate_collectible
+    )
+    budget = min(len(candidates), max(1, _DISCOVERY_VALIDATION_BUDGET.get(platform, 1)))
+    validated: list[_DiscoveryCandidate] = []
+    for candidate in candidates[:budget]:
+        if validator(candidate=candidate, context=context):
+            validated.append(candidate)
+        if len(validated) >= min(max_candidates, _DISCOVERY_EARLY_STOP_CANDIDATES):
+            break
+    if validated:
+        return validated, ""
+
+    if platform == Platform.INSTAGRAM:
+        return [], "поиск выполнен, но топ-кандидаты не прошли быструю проверку сбором reels."
+    return [], "поиск выполнен, но топ-кандидаты не прошли быструю проверку сбором коротких TikTok-видео."
 
 
 def get_recent_seed_content_texts(
@@ -1184,9 +1265,28 @@ def discover_competitors_for_onboarding(
         for status in platform_statuses
         if status.status in {DISCOVERY_ERROR, DISCOVERY_UNAVAILABLE, DISCOVERY_SKIPPED}
     }
+    empty_reason_by_platform: dict[str, str] = {}
     for platform in (Platform.YOUTUBE, Platform.INSTAGRAM, Platform.TIKTOK):
         if platform in errored_platforms:
             continue
+        if platform in {Platform.INSTAGRAM, Platform.TIKTOK}:
+            try:
+                validated_candidates, empty_reason = _collector_aware_candidates(
+                    platform=platform,
+                    candidates=candidates_by_platform[platform],
+                    max_candidates=max_candidates_per_platform,
+                    context=context,
+                )
+            except (PlatformOnboardingError, InstagramApiError, TikTokApiError, RuntimeError) as exc:
+                state = mark_platform_failure(context, platform=platform, reason=str(exc))
+                platform_statuses.append(
+                    PlatformDiscoveryStatus(platform=platform, status=state, reason=str(exc))
+                )
+                errored_platforms.add(platform)
+                continue
+            candidates_by_platform[platform] = validated_candidates
+            if empty_reason:
+                empty_reason_by_platform[platform] = empty_reason
         ranked = _filter_and_rank_candidates(
             candidates=candidates_by_platform[platform],
             seed=seed,
@@ -1200,7 +1300,10 @@ def discover_competitors_for_onboarding(
                 platform=platform,
                 status=DISCOVERY_FOUND if ranked else DISCOVERY_EMPTY,
                 candidate_count=len(ranked),
-                reason="" if ranked else "по текущим поисковым фразам поиск был выполнен, но кандидаты не найдены.",
+                reason="" if ranked else empty_reason_by_platform.get(
+                    platform,
+                    "по текущим поисковым фразам поиск был выполнен, но кандидаты не найдены.",
+                ),
             )
         )
 

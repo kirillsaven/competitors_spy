@@ -63,6 +63,23 @@ def build_profile_url(handle: str) -> str:
     return f"https://www.instagram.com/{handle}/"
 
 
+def _is_reel_item(item: dict[str, Any]) -> bool:
+    url = str(item.get("url") or "").strip().lower()
+    if "/reel/" in url or "/reels/" in url:
+        return True
+
+    product_type = str(item.get("productType") or item.get("product_type") or "").strip().lower()
+    if product_type in {"clips", "clip", "reel", "reels"}:
+        return True
+    if product_type in {"igtv", "feed", "post"}:
+        return False
+
+    media_type = str(item.get("mediaType") or item.get("type") or item.get("__typename") or "").strip().lower()
+    if media_type in {"clips", "clip", "reel", "reels"}:
+        return True
+    return False
+
+
 class ApifyInstagramClient:
     def __init__(
         self,
@@ -191,7 +208,7 @@ def seed_from_profiles(*, raw_input: str, profiles: list[dict[str, Any]]) -> See
 
 def profile_to_video_details(profile: dict[str, Any]) -> list[VideoDetails]:
     posts: list[dict[str, Any]] = []
-    for key in ("latestPosts", "latestIgtvVideos"):
+    for key in ("latestPosts", "latestReels"):
         value = profile.get(key)
         if isinstance(value, list):
             posts.extend(item for item in value if isinstance(item, dict))
@@ -199,6 +216,8 @@ def profile_to_video_details(profile: dict[str, Any]) -> list[VideoDetails]:
     out: list[VideoDetails] = []
     seen_ids: set[str] = set()
     for item in posts:
+        if not _is_reel_item(item):
+            continue
         views = _to_int(item.get("videoViewCount"))
         if views is None:
             continue

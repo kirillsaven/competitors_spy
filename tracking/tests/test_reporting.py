@@ -142,6 +142,7 @@ def test_render_report_text_renders_setup_verification_mode():
                         "competitor": "Teacher Hub",
                         "published_at": datetime(2026, 3, 23, 12, 0, tzinfo=UTC).isoformat(),
                         "url": "https://example.com/lesson",
+                        "content_type": "short",
                     }
                 ],
                 "failures": [{"competitor": "Broken Channel", "reason": "quota exceeded"}],
@@ -154,6 +155,6 @@ def test_render_report_text_renders_setup_verification_mode():
     assert "Проверка настройки завершена" in text
     assert "YouTube: выбрано 2, успешно 1, ошибок 1" in text
     assert "Примеры последних собранных материалов:" in text
-    assert "1) Lesson Breakdown" in text
+    assert "1) Lesson Breakdown [Shorts]" in text
     assert "Проблемы при сборе:" in text
     assert "- Broken Channel: quota exceeded" in text

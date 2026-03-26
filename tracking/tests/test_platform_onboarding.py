@@ -76,7 +76,7 @@ def test_get_recent_seed_content_texts_reads_tiktok_captions(monkeypatch):
     assert texts == ["Fast break finish #nba"]
 
 
-def test_get_recent_seed_content_texts_reads_instagram_captions_without_view_filter(monkeypatch):
+def test_get_recent_seed_content_texts_reads_instagram_reel_captions(monkeypatch):
     sample_profiles = [
         {
             "id": "ig-1",
@@ -85,13 +85,19 @@ def test_get_recent_seed_content_texts_reads_instagram_captions_without_view_fil
             "latestPosts": [
                 {
                     "id": "post-1",
+                    "productType": "clips",
+                    "url": "https://www.instagram.com/reel/post-1/",
                     "caption": "Mars update",
                     "timestamp": "2024-07-03T10:30:00.000Z",
+                    "videoViewCount": 1500,
                 },
                 {
                     "id": "post-2",
+                    "productType": "feed",
+                    "url": "https://www.instagram.com/p/post-2/",
                     "description": "Moon update",
                     "timestamp": "2024-07-03T10:35:00.000Z",
+                    "videoViewCount": 1800,
                 },
             ],
         }
@@ -119,7 +125,7 @@ def test_get_recent_seed_content_texts_reads_instagram_captions_without_view_fil
         n=5,
     )
 
-    assert texts == ["Mars update", "Moon update"]
+    assert texts == ["Mars update"]
 
 
 def test_discover_instagram_competitors_performs_real_query_search(monkeypatch):
@@ -260,6 +266,11 @@ def test_discover_competitors_for_onboarding_ranks_and_dedupes_candidates(monkey
         "_search_tiktok_candidates_raw",
         lambda **kwargs: (_ for _ in ()).throw(RuntimeError("provider timeout")),
     )
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_collector_aware_candidates",
+        lambda **kwargs: (kwargs["candidates"], ""),
+    )
 
     outcome = platform_onboarding.discover_competitors_for_onboarding(
         keywords=["english teachers", "teacher groups"],
@@ -294,6 +305,141 @@ def test_discover_competitors_for_onboarding_ranks_and_dedupes_candidates(monkey
         "YouTube: FOUND (1)",
         "Instagram: FOUND (1)",
         "TikTok: ERROR — provider timeout",
+    ]
+
+
+def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_tiktok_candidates(monkeypatch):
+    monkeypatch.setattr(platform_onboarding, "_discover_youtube_search_candidates", lambda **kwargs: [])
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_search_instagram_candidates_raw",
+        lambda **kwargs: [
+            platform_onboarding._DiscoveryCandidate(
+                platform=Platform.INSTAGRAM,
+                external_id="ig-good",
+                handle="reelhub",
+                url="https://www.instagram.com/reelhub/",
+                display_name="Reel Hub",
+                description="teacher reels",
+                query_hits={"english teachers"},
+            ),
+            platform_onboarding._DiscoveryCandidate(
+                platform=Platform.INSTAGRAM,
+                external_id="ig-bad",
+                handle="feedonly",
+                url="https://www.instagram.com/feedonly/",
+                display_name="Feed Only",
+                description="feed videos only",
+                query_hits={"english teachers"},
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_search_tiktok_candidates_raw",
+        lambda **kwargs: [
+            platform_onboarding._DiscoveryCandidate(
+                platform=Platform.TIKTOK,
+                external_id="tt-good",
+                handle="teachertok",
+                url="https://www.tiktok.com/@teachertok",
+                display_name="TeacherTok",
+                description="short lessons",
+                query_hits={"english teachers"},
+            ),
+            platform_onboarding._DiscoveryCandidate(
+                platform=Platform.TIKTOK,
+                external_id="tt-bad",
+                handle="emptytok",
+                url="https://www.tiktok.com/@emptytok",
+                display_name="EmptyTok",
+                description="no usable videos",
+                query_hits={"english teachers"},
+            ),
+        ],
+    )
+
+    def fake_fetch_instagram_profiles_cached(*, inputs, context=None):
+        lookup = inputs[0]
+        if "reelhub" in lookup:
+            return [
+                {
+                    "id": "ig-good",
+                    "username": "reelhub",
+                    "latestPosts": [
+                        {
+                            "id": "reel-1",
+                            "productType": "clips",
+                            "url": "https://www.instagram.com/reel/reel-1/",
+                            "caption": "Teacher reel",
+                            "timestamp": "2024-07-03T10:30:00.000Z",
+                            "videoViewCount": 2400,
+                        }
+                    ],
+                }
+            ]
+        return [
+            {
+                "id": "ig-bad",
+                "username": "feedonly",
+                "latestPosts": [
+                    {
+                        "id": "feed-1",
+                        "productType": "feed",
+                        "url": "https://www.instagram.com/p/feed-1/",
+                        "caption": "Feed video",
+                        "timestamp": "2024-07-03T10:30:00.000Z",
+                        "videoViewCount": 1900,
+                    }
+                ],
+            }
+        ]
+
+    def fake_fetch_tiktok_profile_feed_cached(*, handle, results_per_page, context=None):
+        if handle == "teachertok":
+            return [
+                {
+                    "id": "vid-1",
+                    "text": "Short lesson",
+                    "createTimeISO": "2024-04-03T14:22:40.000Z",
+                    "authorMeta": {"id": "auth-1", "name": "teachertok", "nickName": "TeacherTok"},
+                    "webVideoUrl": "https://www.tiktok.com/@teachertok/video/vid-1",
+                    "videoMeta": {"duration": 19},
+                    "playCount": 8800,
+                    "diggCount": 200,
+                    "commentCount": 11,
+                    "shareCount": 4,
+                }
+            ]
+        return []
+
+    monkeypatch.setattr(platform_onboarding, "fetch_instagram_profiles_cached", fake_fetch_instagram_profiles_cached)
+    monkeypatch.setattr(platform_onboarding, "fetch_tiktok_profile_feed_cached", fake_fetch_tiktok_profile_feed_cached)
+
+    outcome = platform_onboarding.discover_competitors_for_onboarding(
+        keywords=["english teachers"],
+        seed=_seed(
+            platform=Platform.INSTAGRAM,
+            external_id="ig-seed",
+            handle="creator",
+            title="Creator",
+            description="English teacher",
+            url="https://www.instagram.com/creator/",
+        ),
+        competitors=[],
+        linked_accounts=[],
+        max_youtube_search_calls=1,
+        max_candidates_per_platform=20,
+    )
+
+    assert [(candidate.platform, candidate.external_id) for candidate in outcome.candidates] == [
+        (Platform.INSTAGRAM, "ig-good"),
+        (Platform.TIKTOK, "tt-good"),
+    ]
+    assert outcome.notes == [
+        "YouTube: EMPTY — по текущим поисковым фразам поиск был выполнен, но кандидаты не найдены.",
+        "Instagram: FOUND (1)",
+        "TikTok: FOUND (1)",
     ]
 
 
@@ -410,7 +556,16 @@ def test_setup_context_reuses_instagram_profile_between_seed_resolve_and_recent_
                     "id": "ig-1",
                     "username": "nasa",
                     "url": "https://www.instagram.com/nasa/",
-                    "latestPosts": [{"id": "post-1", "caption": "Mars update"}],
+                    "latestPosts": [
+                        {
+                            "id": "post-1",
+                            "productType": "clips",
+                            "url": "https://www.instagram.com/reel/post-1/",
+                            "caption": "Mars update",
+                            "timestamp": "2024-07-03T10:30:00.000Z",
+                            "videoViewCount": 1500,
+                        }
+                    ],
                 }
             ]
 

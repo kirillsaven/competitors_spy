@@ -159,3 +159,48 @@ def test_build_setup_verification_preview_summarizes_platform_counts(monkeypatch
     assert instagram_section["failed_competitors"] == 1
     assert instagram_section["failures"] == [{"competitor": "Broken Gram", "reason": "Instagram timeout"}]
     assert "Проверка настройки завершена" in preview.text
+
+
+@pytest.mark.django_db
+def test_build_setup_verification_preview_keeps_all_three_collectible_sections(monkeypatch):
+    user = TgUser.objects.create(tg_user_id=1004, tg_chat_id=1004, timezone_str="UTC")
+    youtube_competitor = SimpleNamespace(id=10, platform="youtube", display_name="YT Hub", handle="yt-hub", external_id="yt-10")
+    tiktok_competitor = SimpleNamespace(id=11, platform="tiktok", display_name="TT Hub", handle="tt-hub", external_id="tt-11")
+    instagram_competitor = SimpleNamespace(id=12, platform="instagram", display_name="IG Hub", handle="ig-hub", external_id="ig-12")
+
+    monkeypatch.setattr(
+        report_pipeline,
+        "get_active_competitors",
+        lambda *, user: [youtube_competitor, tiktok_competitor, instagram_competitor],
+    )
+
+    def fake_refresh_competitor(*, competitor, mode, captured_at, provider_fetch_cache=None):
+        content_type = {"youtube": "short", "tiktok": "video", "instagram": "reel"}[competitor.platform]
+        return [
+            SimpleNamespace(
+                id=100 + competitor.id,
+                platform=competitor.platform,
+                external_id=f"item-{competitor.id}",
+                title=f"{competitor.display_name} item",
+                url=f"https://example.com/{competitor.platform}/{competitor.id}",
+                published_at=datetime(2026, 3, 24, 10, 0, tzinfo=UTC),
+                competitor=competitor,
+                meta={"content_type": content_type},
+            )
+        ]
+
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", fake_refresh_competitor)
+
+    preview = report_pipeline.build_setup_verification_preview(
+        user=user,
+        period_end=datetime(2026, 3, 24, 12, 0, tzinfo=UTC),
+    )
+
+    sections = {section["platform"]: section for section in preview.payload["sections"]}
+    assert sections["youtube"]["successful_competitors"] == 1
+    assert sections["tiktok"]["successful_competitors"] == 1
+    assert sections["instagram"]["successful_competitors"] == 1
+    assert sections["youtube"]["examples"][0]["content_type"] == "short"
+    assert sections["instagram"]["examples"][0]["content_type"] == "reel"
+    assert "YT Hub item [Shorts]" in preview.text
+    assert "IG Hub item [Reels]" in preview.text

@@ -66,6 +66,108 @@ def test_refresh_competitor_dispatches_by_platform(monkeypatch):
     }
 
 
+def test_refresh_youtube_competitor_keeps_shorts_only(db, monkeypatch):
+    competitor = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="UCshorts123",
+        handle="shorts-channel",
+        meta={"uploads_playlist_id": "UUshorts123"},
+    )
+
+    class FakeClient:
+        def playlist_items(self, *, playlist_id, max_results):
+            assert playlist_id == "UUshorts123"
+            return [
+                {"contentDetails": {"videoId": "short-1"}},
+                {"contentDetails": {"videoId": "long-1"}},
+            ]
+
+        def videos_list(self, *, ids, part):
+            assert ids == ["short-1", "long-1"]
+            return [
+                {
+                    "id": "short-1",
+                    "snippet": {
+                        "title": "Short lesson",
+                        "description": "Short description",
+                        "publishedAt": "2026-03-20T12:00:00Z",
+                    },
+                    "statistics": {"viewCount": "1200", "likeCount": "44", "commentCount": "5"},
+                    "contentDetails": {"duration": "PT45S"},
+                },
+                {
+                    "id": "long-1",
+                    "snippet": {
+                        "title": "Long lesson",
+                        "description": "Long description",
+                        "publishedAt": "2026-03-20T13:00:00Z",
+                    },
+                    "statistics": {"viewCount": "8200", "likeCount": "144", "commentCount": "15"},
+                    "contentDetails": {"duration": "PT8M"},
+                },
+            ]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(collector, "_get_youtube_client", lambda: FakeClient())
+
+    items = collector.refresh_youtube_competitor(
+        competitor=competitor,
+        mode="incremental",
+        captured_at=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+    )
+
+    assert [item.external_id for item in items] == ["short-1"]
+    content_item = ContentItem.objects.get(platform=Platform.YOUTUBE, external_id="short-1")
+    snapshot = MetricSnapshot.objects.get(content_item=content_item)
+    assert content_item.meta["content_type"] == "short"
+    assert snapshot.views == 1200
+    assert not ContentItem.objects.filter(platform=Platform.YOUTUBE, external_id="long-1").exists()
+
+
+def test_refresh_youtube_competitor_raises_when_no_recent_shorts_exist(db, monkeypatch):
+    competitor = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="UClong123",
+        handle="long-channel",
+        meta={"uploads_playlist_id": "UUlong123"},
+    )
+
+    class FakeClient:
+        def playlist_items(self, *, playlist_id, max_results):
+            return [{"contentDetails": {"videoId": "long-1"}}]
+
+        def videos_list(self, *, ids, part):
+            return [
+                {
+                    "id": "long-1",
+                    "snippet": {
+                        "title": "Long lesson",
+                        "description": "Long description",
+                        "publishedAt": "2026-03-20T13:00:00Z",
+                    },
+                    "statistics": {"viewCount": "8200", "likeCount": "144", "commentCount": "15"},
+                    "contentDetails": {"duration": "PT8M"},
+                }
+            ]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(collector, "_get_youtube_client", lambda: FakeClient())
+
+    with pytest.raises(
+        collector.CollectorError,
+        match="YouTube channel returned no recent Shorts with usable metrics: channel_id=UClong123",
+    ):
+        collector.refresh_youtube_competitor(
+            competitor=competitor,
+            mode="incremental",
+            captured_at=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        )
+
+
 def test_refresh_tiktok_competitor_raises_for_unsupported_provider(db, monkeypatch):
     competitor = Competitor.objects.create(platform=Platform.TIKTOK, external_id="tt-user", handle="tt-user")
     monkeypatch.setattr(
@@ -347,6 +449,59 @@ def test_refresh_instagram_competitor_raises_when_provider_returns_no_items(db, 
         )
 
 
+def test_refresh_instagram_competitor_raises_when_profile_has_no_recent_reels(db, monkeypatch):
+    competitor = Competitor.objects.create(platform=Platform.INSTAGRAM, external_id="ig-user", handle="apifytech")
+
+    sample_profile = {
+        "id": "7333333333333333333",
+        "username": "apifytech",
+        "url": "https://www.instagram.com/apifytech/",
+        "latestPosts": [
+            {
+                "id": "3666666666666666666",
+                "productType": "feed",
+                "shortCode": "Dnolong123",
+                "url": "https://www.instagram.com/p/Dnolong123/",
+                "caption": "Feed video post",
+                "timestamp": "2024-07-03T10:40:00.000Z",
+                "videoDuration": 140,
+                "videoViewCount": 44000,
+                "likesCount": 1200,
+                "commentsCount": 40,
+            }
+        ],
+    }
+
+    class FakeClient:
+        def fetch_profiles(self, *, inputs):
+            return [sample_profile]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        collector,
+        "get_instagram_apify_config",
+        lambda: SimpleNamespace(
+            provider="apify",
+            access_token="token",
+            actor_id="actor",
+            base_url="https://api.apify.com/v2",
+        ),
+    )
+    monkeypatch.setattr(collector, "_get_instagram_client", lambda: FakeClient())
+
+    with pytest.raises(
+        collector.CollectorError,
+        match="Instagram profile returned no recent reels with views: username=apifytech",
+    ):
+        collector.refresh_instagram_competitor(
+            competitor=competitor,
+            mode="incremental",
+            captured_at=datetime.now(tz=UTC),
+        )
+
+
 def test_refresh_instagram_competitor_persists_items_and_shares(db, monkeypatch):
     competitor = Competitor.objects.create(platform=Platform.INSTAGRAM, external_id="ig-user", handle="apifytech")
 
@@ -404,6 +559,7 @@ def test_refresh_instagram_competitor_persists_items_and_shares(db, monkeypatch)
     competitor.refresh_from_db()
     assert competitor.display_name == "Apify Tech"
     assert competitor.url == "https://www.instagram.com/apifytech/"
+    assert content_item.meta["content_type"] == "reel"
     assert snapshot.views == 124000
     assert snapshot.likes == 930
     assert snapshot.comments == 18
