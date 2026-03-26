@@ -133,8 +133,8 @@ _EN_SUFFIXES = (
 
 _DISCOVERY_QUERY_BUDGET = {
     Platform.YOUTUBE: 3,
-    Platform.INSTAGRAM: 2,
-    Platform.TIKTOK: 2,
+    Platform.INSTAGRAM: 4,
+    Platform.TIKTOK: 4,
 }
 _DISCOVERY_INITIAL_QUERY_BUDGET = {
     Platform.YOUTUBE: 1,
@@ -142,9 +142,9 @@ _DISCOVERY_INITIAL_QUERY_BUDGET = {
     Platform.TIKTOK: 1,
 }
 _DISCOVERY_RESULT_BUDGET = {
-    Platform.YOUTUBE: 20,
+    Platform.YOUTUBE: 50,
     Platform.INSTAGRAM: 3,
-    Platform.TIKTOK: 10,
+    Platform.TIKTOK: 5,
 }
 _DISCOVERY_EARLY_STOP_CANDIDATES = {
     Platform.YOUTUBE: 20,
@@ -152,9 +152,9 @@ _DISCOVERY_EARLY_STOP_CANDIDATES = {
     Platform.TIKTOK: 20,
 }
 _DISCOVERY_VALIDATION_BUDGET = {
-    Platform.YOUTUBE: 15,
-    Platform.INSTAGRAM: 20,
-    Platform.TIKTOK: 20,
+    Platform.YOUTUBE: 25,
+    Platform.INSTAGRAM: 25,
+    Platform.TIKTOK: 25,
 }
 _DISCOVERY_VALIDATION_ITEMS = 5
 _GENERIC_DISCOVERY_STEMS = {
@@ -682,6 +682,12 @@ def _cached_tiktok_search_results(
             results = client.search_profiles(query=query, limit=limit)
         except TypeError:
             results = client.search_profiles(query=query)
+        except TikTokApiError as exc:
+            if limit > 3 and "timed out" in str(exc).lower():
+                retry_limit = max(3, limit // 2)
+                results = client.search_profiles(query=query, limit=retry_limit)
+            else:
+                raise
         mark_platform_available(context, Platform.TIKTOK)
     except (PlatformOnboardingError, TikTokApiError, RuntimeError) as exc:
         mark_platform_failure(context, platform=Platform.TIKTOK, reason=str(exc))
