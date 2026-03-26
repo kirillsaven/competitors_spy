@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from django.conf import settings
 
 from tracking.adapters.base import SeedResolution
 from tracking.adapters.instagram import extract_handle as extract_instagram_handle, seed_from_profiles
@@ -57,6 +58,12 @@ def _cache_key(*, platform: str, raw_input: str) -> str:
 
 def _retry_cache_key(*, platform: str, raw_input: str) -> str:
     return f"setup-retry::seed::{_cache_key(platform=platform, raw_input=raw_input)}"
+
+
+def _seed_retry_ttl_seconds(*, platform: str) -> int | None:
+    if str(platform) == Platform.YOUTUBE:
+        return int(getattr(settings, "YOUTUBE_SEED_SEARCH_CACHE_TTL_SECONDS", 21600) or 21600)
+    return None
 
 
 def _resolve_youtube_seed(raw_input: str) -> SeedResolution | None:
@@ -145,17 +152,29 @@ def resolve_seed_for_platform(
         if context is not None:
             context.seed_resolution_cache[cache_key] = (None, str(exc))
             mark_platform_failure(context, platform=platform_key, reason=str(exc))
-        store_retry_value(_retry_cache_key(platform=platform_key, raw_input=raw_input), (None, str(exc)))
+        store_retry_value(
+            _retry_cache_key(platform=platform_key, raw_input=raw_input),
+            (None, str(exc)),
+            ttl_seconds=_seed_retry_ttl_seconds(platform=platform_key),
+        )
         raise
     except Exception as exc:
         if context is not None:
             context.seed_resolution_cache[cache_key] = (None, str(exc))
             mark_platform_failure(context, platform=platform_key, reason=str(exc))
-        store_retry_value(_retry_cache_key(platform=platform_key, raw_input=raw_input), (None, str(exc)))
+        store_retry_value(
+            _retry_cache_key(platform=platform_key, raw_input=raw_input),
+            (None, str(exc)),
+            ttl_seconds=_seed_retry_ttl_seconds(platform=platform_key),
+        )
         raise SeedResolveError(str(exc)) from exc
     if context is not None:
         context.seed_resolution_cache[cache_key] = (seed, None)
-    store_retry_value(_retry_cache_key(platform=platform_key, raw_input=raw_input), (seed, None))
+    store_retry_value(
+        _retry_cache_key(platform=platform_key, raw_input=raw_input),
+        (seed, None),
+        ttl_seconds=_seed_retry_ttl_seconds(platform=platform_key),
+    )
     return seed
 
 

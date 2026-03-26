@@ -15,12 +15,17 @@ from tracking.adapters.youtube import (
     playlist_items_to_video_ids,
     resolve_seed_input,
 )
+from tracking.services.setup_retry_cache import get_cached_retry_value, store_retry_value
 
 logger = logging.getLogger(__name__)
 
 
 class YouTubeNotConfigured(RuntimeError):
     pass
+
+
+def _seed_search_cache_key(*, query: str, max_results: int) -> str:
+    return f"youtube-seed-search::{str(query or '').strip().lower()}::{int(max_results)}"
 
 
 def get_youtube_client() -> YouTubeClient:
@@ -173,6 +178,10 @@ def search_youtube_seed_candidates(*, query: str, max_results: int = 8) -> list[
     q = (query or "").strip()
     if not q:
         return []
+    cache_key = _seed_search_cache_key(query=q, max_results=max_results)
+    retry_cached, retry_found = get_cached_retry_value(cache_key)
+    if retry_found and isinstance(retry_cached, list):
+        return [item for item in retry_cached if isinstance(item, SeedResolution)]
     client = get_youtube_client()
     try:
         ids = client.search_channels(q=q, max_results=max(1, min(int(max_results), 10)))
@@ -208,6 +217,12 @@ def search_youtube_seed_candidates(*, query: str, max_results: int = 8) -> list[
                     uploads_playlist_id=uploads,
                 )
             )
-        return out[: max_results]
+        result = out[: max_results]
+        store_retry_value(
+            cache_key,
+            result,
+            ttl_seconds=int(getattr(settings, "YOUTUBE_SEED_SEARCH_CACHE_TTL_SECONDS", 21600) or 21600),
+        )
+        return result
     finally:
         client.close()

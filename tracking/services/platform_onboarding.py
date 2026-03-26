@@ -561,7 +561,11 @@ def _cached_youtube_search_channel_ids(
         client.close()
     if context is not None:
         context.search_cache[cache_key] = list(channel_ids)
-    store_retry_value(_retry_cache_key(layer="youtube-search", key=cache_key), list(channel_ids))
+    store_retry_value(
+        _retry_cache_key(layer="youtube-search", key=cache_key),
+        list(channel_ids),
+        ttl_seconds=int(getattr(settings, "YOUTUBE_SEARCH_CACHE_TTL_SECONDS", 21600) or 21600),
+    )
     return channel_ids
 
 
@@ -1902,7 +1906,11 @@ def get_recent_seed_content_texts(
         texts = get_recent_video_titles(seed, n=n)
         if context is not None:
             context.recent_content_cache[cache_key] = list(texts)
-        store_retry_value(_retry_cache_key(layer="recent-content", key=cache_key), list(texts))
+        store_retry_value(
+            _retry_cache_key(layer="recent-content", key=cache_key),
+            list(texts),
+            ttl_seconds=int(getattr(settings, "YOUTUBE_RECENT_CACHE_TTL_SECONDS", 3600) or 3600),
+        )
         return texts
 
     if seed.platform == Platform.TIKTOK:
