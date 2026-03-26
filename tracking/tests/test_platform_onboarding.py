@@ -296,6 +296,105 @@ def test_discover_competitors_for_onboarding_ranks_and_dedupes_candidates(monkey
     ]
 
 
+def test_discover_competitors_for_onboarding_preserves_manual_competitors_as_query_and_ranking_hints(monkeypatch):
+    seen_competitors: list[SeedResolution] = []
+
+    def fake_youtube_search(**kwargs):
+        seen_competitors.extend(kwargs["competitors"])
+        return [
+            platform_onboarding._DiscoveryCandidate(
+                platform=Platform.YOUTUBE,
+                external_id="yt-1",
+                handle="teacherhub",
+                url="https://www.youtube.com/@teacherhub",
+                display_name="Teacher Hub",
+                description="lesson planning for english teachers",
+                query_hits={"teacher groups"},
+                metadata={"rank_hint": 5000},
+            ),
+            platform_onboarding._DiscoveryCandidate(
+                platform=Platform.YOUTUBE,
+                external_id="yt-2",
+                handle="genericchannel",
+                url="https://www.youtube.com/@genericchannel",
+                display_name="Generic Channel",
+                description="broad education videos",
+                query_hits={"teacher groups"},
+                metadata={"rank_hint": 5000},
+            ),
+        ]
+
+    monkeypatch.setattr(platform_onboarding, "_discover_youtube_search_candidates", fake_youtube_search)
+    monkeypatch.setattr(platform_onboarding, "_search_instagram_candidates_raw", lambda **kwargs: [])
+    monkeypatch.setattr(platform_onboarding, "_search_tiktok_candidates_raw", lambda **kwargs: [])
+
+    competitors = [
+        _seed(
+            platform=Platform.YOUTUBE,
+            external_id="manual-1",
+            handle="teachergroups",
+            title="Teacher Groups",
+            description="lesson planning for english teachers",
+            url="https://www.youtube.com/@teachergroups",
+        )
+    ]
+
+    outcome = platform_onboarding.discover_competitors_for_onboarding(
+        keywords=["teacher groups"],
+        seed=_seed(
+            platform=Platform.INSTAGRAM,
+            external_id="ig-seed",
+            handle="creator",
+            title="Creator",
+            description="English teacher",
+            url="https://www.instagram.com/creator/",
+        ),
+        competitors=competitors,
+        linked_accounts=[],
+        max_youtube_search_calls=3,
+        max_candidates_per_platform=20,
+    )
+
+    assert [item.external_id for item in seen_competitors] == ["manual-1"]
+    assert [(candidate.platform, candidate.external_id) for candidate in outcome.candidates] == [
+        (Platform.YOUTUBE, "yt-1"),
+        (Platform.YOUTUBE, "yt-2"),
+    ]
+    assert outcome.candidates[0].external_id == "yt-1"
+
+
+def test_discover_competitors_for_onboarding_respects_zero_youtube_search_calls(monkeypatch):
+    called = {"youtube": 0}
+
+    def fake_youtube_search(**kwargs):
+        called["youtube"] += 1
+        return []
+
+    monkeypatch.setattr(platform_onboarding, "_discover_youtube_search_candidates", fake_youtube_search)
+    monkeypatch.setattr(platform_onboarding, "_search_instagram_candidates_raw", lambda **kwargs: [])
+    monkeypatch.setattr(platform_onboarding, "_search_tiktok_candidates_raw", lambda **kwargs: [])
+
+    outcome = platform_onboarding.discover_competitors_for_onboarding(
+        keywords=["english tutors"],
+        seed=_seed(
+            platform=Platform.INSTAGRAM,
+            external_id="ig-seed",
+            handle="creator",
+            title="Creator",
+            description="English teacher",
+            url="https://www.instagram.com/creator/",
+        ),
+        competitors=[],
+        linked_accounts=[],
+        max_youtube_search_calls=0,
+        max_candidates_per_platform=20,
+        context=SetupRunContext(),
+    )
+
+    assert called == {"youtube": 0}
+    assert outcome.notes[0] == "YouTube: SKIPPED — YT_MAX_SEARCH_CALLS_PER_SETUP=0; поиск YouTube отключен для этого setup."
+
+
 def test_setup_context_reuses_instagram_profile_between_seed_resolve_and_recent_content(monkeypatch):
     calls = {"profiles": 0}
     context = SetupRunContext()

@@ -521,10 +521,21 @@ def _score_candidate(candidate: _DiscoveryCandidate) -> float:
     cross_platform_bonus = len(candidate.cross_platform_keys) * 4.5
     verified_bonus = 1.4 if bool(candidate.metadata.get("verified")) else 0.0
     popularity_bonus = min(int(candidate.metadata.get("rank_hint") or 0), 1_000_000) / 250_000
-    return query_repeat_bonus + overlap_bonus + description_bonus + cross_platform_bonus + verified_bonus + popularity_bonus
+    competitor_overlap_bonus = float(candidate.metadata.get("competitor_overlap") or 0) * 1.8
+    return (
+        query_repeat_bonus
+        + overlap_bonus
+        + description_bonus
+        + cross_platform_bonus
+        + verified_bonus
+        + popularity_bonus
+        + competitor_overlap_bonus
+    )
 
 
 def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
+    if max_queries <= 0:
+        return []
     seen: set[str] = set()
     queries: list[str] = []
     for raw in keywords or []:
@@ -534,11 +545,71 @@ def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
         key = query.lower()
         if key in seen:
             continue
-        seen.add(key)
-        queries.append(query)
         if len(queries) >= max_queries:
             break
+        seen.add(key)
+        queries.append(query)
     return queries
+
+
+def _manual_competitor_queries(
+    competitors: list[SeedResolution],
+    *,
+    max_queries: int,
+    keywords: list[str],
+) -> list[str]:
+    if max_queries <= 0:
+        return []
+    keyword_stems = _token_stems(*keywords)
+    seen: set[str] = set()
+    queries: list[str] = []
+    for competitor in competitors or []:
+        raw_candidates = [
+            str(competitor.title or "").strip(),
+            str(competitor.description or "").strip(),
+            str(competitor.handle or "").strip(),
+        ]
+        for raw in raw_candidates:
+            query = " ".join(raw.split()).strip()
+            if len(query) < 3:
+                continue
+            stems = _token_stems(query)
+            if not stems:
+                continue
+            if keyword_stems and not (stems & keyword_stems):
+                continue
+            key = query.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            queries.append(query)
+            if len(queries) >= max_queries:
+                return queries
+    return queries
+
+
+def _discovery_queries(
+    *,
+    platform: str,
+    keywords: list[str],
+    competitors: list[SeedResolution],
+    max_queries: int,
+) -> list[str]:
+    base_queries = _search_queries(keywords, max_queries=max_queries)
+    extra_capacity = max(0, int(max_queries) - len(base_queries))
+    competitor_queries = _manual_competitor_queries(
+        competitors,
+        max_queries=extra_capacity,
+        keywords=base_queries or keywords,
+    )
+    return base_queries + competitor_queries
+
+
+def _competitor_hint_stems(competitors: list[SeedResolution]) -> set[str]:
+    stems: set[str] = set()
+    for competitor in competitors or []:
+        stems |= _token_stems(competitor.title, competitor.description, competitor.handle)
+    return stems
 
 
 def _progressive_queries(platform: str, keywords: list[str]) -> list[str]:
@@ -702,10 +773,16 @@ def _build_youtube_candidate(item: dict[str, Any], *, queries: set[str]) -> _Dis
 def _discover_youtube_search_candidates(
     *,
     keywords: list[str],
+    competitors: list[SeedResolution],
     max_search_calls: int,
     context: SetupRunContext | None = None,
 ) -> list[_DiscoveryCandidate]:
-    queries = _search_queries(keywords, max_queries=max_search_calls)
+    queries = _discovery_queries(
+        platform=Platform.YOUTUBE,
+        keywords=keywords,
+        competitors=competitors,
+        max_queries=max_search_calls,
+    )
     if not queries:
         raise PlatformOnboardingError("No YouTube search queries could be built from niche keywords")
     query_hits: dict[str, set[str]] = {}
@@ -762,10 +839,16 @@ def _build_instagram_candidate(raw: dict[str, Any], *, queries: set[str]) -> _Di
 def _search_instagram_candidates_raw(
     *,
     keywords: list[str],
+    competitors: list[SeedResolution],
     max_candidates: int = 20,
     context: SetupRunContext | None = None,
 ) -> list[_DiscoveryCandidate]:
-    queries = _progressive_queries(Platform.INSTAGRAM, keywords)
+    queries = _discovery_queries(
+        platform=Platform.INSTAGRAM,
+        keywords=keywords,
+        competitors=competitors,
+        max_queries=_DISCOVERY_QUERY_BUDGET.get(Platform.INSTAGRAM, 2),
+    )
     if not queries:
         raise PlatformOnboardingError("No Instagram search queries could be built from niche keywords")
     raw_by_id: dict[str, _DiscoveryCandidate] = {}
@@ -801,6 +884,7 @@ def _search_instagram_candidates_raw(
 def discover_instagram_competitors(
     *,
     keywords: list[str],
+    competitors: list[SeedResolution] | None = None,
     max_candidates: int = 20,
     context: SetupRunContext | None = None,
 ) -> list[CompetitorCandidate]:
@@ -813,7 +897,12 @@ def discover_instagram_competitors(
             display_name=item.display_name,
             reason="search: " + ", ".join(sorted(item.query_hits)),
         )
-        for item in _search_instagram_candidates_raw(keywords=keywords, max_candidates=max_candidates, context=context)
+        for item in _search_instagram_candidates_raw(
+            keywords=keywords,
+            competitors=list(competitors or []),
+            max_candidates=max_candidates,
+            context=context,
+        )
     ]
 
 
@@ -840,10 +929,16 @@ def _build_tiktok_candidate(raw: dict[str, Any], *, queries: set[str]) -> _Disco
 def _search_tiktok_candidates_raw(
     *,
     keywords: list[str],
+    competitors: list[SeedResolution],
     max_candidates: int = 20,
     context: SetupRunContext | None = None,
 ) -> list[_DiscoveryCandidate]:
-    queries = _progressive_queries(Platform.TIKTOK, keywords)
+    queries = _discovery_queries(
+        platform=Platform.TIKTOK,
+        keywords=keywords,
+        competitors=competitors,
+        max_queries=_DISCOVERY_QUERY_BUDGET.get(Platform.TIKTOK, 2),
+    )
     if not queries:
         raise PlatformOnboardingError("No TikTok search queries could be built from niche keywords")
     raw_by_id: dict[str, _DiscoveryCandidate] = {}
@@ -876,6 +971,7 @@ def _search_tiktok_candidates_raw(
 def discover_tiktok_competitors(
     *,
     keywords: list[str],
+    competitors: list[SeedResolution] | None = None,
     max_candidates: int = 20,
     context: SetupRunContext | None = None,
 ) -> list[CompetitorCandidate]:
@@ -888,7 +984,12 @@ def discover_tiktok_competitors(
             display_name=item.display_name,
             reason="search: " + ", ".join(sorted(item.query_hits)),
         )
-        for item in _search_tiktok_candidates_raw(keywords=keywords, max_candidates=max_candidates, context=context)
+        for item in _search_tiktok_candidates_raw(
+            keywords=keywords,
+            competitors=list(competitors or []),
+            max_candidates=max_candidates,
+            context=context,
+        )
     ]
 
 
@@ -914,9 +1015,11 @@ def _filter_and_rank_candidates(
     candidates: list[_DiscoveryCandidate],
     seed: SeedResolution | None,
     linked_accounts: list[SeedResolution] | None,
+    competitors: list[SeedResolution],
     max_candidates: int,
 ) -> list[CompetitorCandidate]:
     excluded_ids, handles_by_platform, seed_titles = _identity_keys(seed, linked_accounts)
+    competitor_stems = _competitor_hint_stems(competitors)
     filtered: list[_DiscoveryCandidate] = []
     for candidate in candidates:
         if _is_seed_like_candidate(
@@ -928,6 +1031,9 @@ def _filter_and_rank_candidates(
             continue
         if not candidate.query_hits:
             continue
+        if competitor_stems:
+            candidate_stems = _token_stems(candidate.handle, candidate.display_name, candidate.description)
+            candidate.metadata["competitor_overlap"] = len(candidate_stems & competitor_stems)
         filtered.append(candidate)
 
     ranked = sorted(
@@ -957,8 +1063,6 @@ def discover_competitors_for_onboarding(
     max_candidates_per_platform: int,
     context: SetupRunContext | None = None,
 ) -> DiscoveryOutcome:
-    del competitors  # setup still keeps manual competitors separately; discovery is query-based here.
-
     platform_statuses: list[PlatformDiscoveryStatus] = []
     candidates_by_platform: dict[str, list[_DiscoveryCandidate]] = {
         Platform.YOUTUBE: [],
@@ -978,22 +1082,31 @@ def discover_competitors_for_onboarding(
             )
 
     if not any(status.platform == Platform.YOUTUBE for status in platform_statuses):
-        try:
-            candidates_by_platform[Platform.YOUTUBE] = _discover_youtube_search_candidates(
-                keywords=keywords,
-                max_search_calls=min(max_youtube_search_calls, _DISCOVERY_QUERY_BUDGET[Platform.YOUTUBE]),
-                context=context,
-            )
-        except (PlatformOnboardingError, YouTubeApiError, RuntimeError) as exc:
+        if max_youtube_search_calls <= 0:
+            reason = "YT_MAX_SEARCH_CALLS_PER_SETUP=0; поиск YouTube отключен для этого setup."
+            mark_platform_skipped(context, Platform.YOUTUBE, reason=reason)
             platform_statuses.append(
-                PlatformDiscoveryStatus(platform=Platform.YOUTUBE, status=DISCOVERY_ERROR, reason=str(exc))
+                PlatformDiscoveryStatus(platform=Platform.YOUTUBE, status=DISCOVERY_SKIPPED, reason=reason)
             )
-            mark_platform_failure(context, platform=Platform.YOUTUBE, reason=str(exc))
+        else:
+            try:
+                candidates_by_platform[Platform.YOUTUBE] = _discover_youtube_search_candidates(
+                    keywords=keywords,
+                    competitors=competitors,
+                    max_search_calls=min(max_youtube_search_calls, _DISCOVERY_QUERY_BUDGET[Platform.YOUTUBE]),
+                    context=context,
+                )
+            except (PlatformOnboardingError, YouTubeApiError, RuntimeError) as exc:
+                platform_statuses.append(
+                    PlatformDiscoveryStatus(platform=Platform.YOUTUBE, status=DISCOVERY_ERROR, reason=str(exc))
+                )
+                mark_platform_failure(context, platform=Platform.YOUTUBE, reason=str(exc))
 
     if not any(status.platform == Platform.INSTAGRAM for status in platform_statuses):
         try:
             candidates_by_platform[Platform.INSTAGRAM] = _search_instagram_candidates_raw(
                 keywords=keywords,
+                competitors=competitors,
                 max_candidates=max_candidates_per_platform,
                 context=context,
             )
@@ -1007,6 +1120,7 @@ def discover_competitors_for_onboarding(
         try:
             candidates_by_platform[Platform.TIKTOK] = _search_tiktok_candidates_raw(
                 keywords=keywords,
+                competitors=competitors,
                 max_candidates=max_candidates_per_platform,
                 context=context,
             )
@@ -1031,6 +1145,7 @@ def discover_competitors_for_onboarding(
             candidates=candidates_by_platform[platform],
             seed=seed,
             linked_accounts=linked_accounts,
+            competitors=competitors,
             max_candidates=max_candidates_per_platform,
         )
         final_candidates.extend(ranked)
