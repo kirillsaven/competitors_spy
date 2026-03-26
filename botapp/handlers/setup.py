@@ -580,6 +580,7 @@ async def cmd_setup(message: Message, state: FSMContext) -> None:
     # Reset active competitors for a clean re-setup.
     await db_run(lambda: UserCompetitor.objects.filter(user=user).update(is_active=False))
 
+    await _clear_setup_runtime(state)
     await state.clear()
     await state.update_data(user_id=user.id, setup_runtime_id=_new_setup_runtime_id())
     await _ask_seed(message, state)
@@ -594,6 +595,7 @@ async def cmd_schedule(message: Message, state: FSMContext) -> None:
         tg_user_id=message.from_user.id,
         defaults={"tg_chat_id": message.chat.id},
     )
+    await _clear_setup_runtime(state)
     await state.clear()
     await state.update_data(user_id=user.id, setup_runtime_id=_new_setup_runtime_id())
     await _ask_timezone_method(message, state)

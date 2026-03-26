@@ -28,6 +28,10 @@ class DummyState:
     async def set_state(self, value) -> None:
         self.state = value
 
+    async def clear(self) -> None:
+        self.data.clear()
+        self.state = None
+
 
 class DummyMessage:
     def __init__(self) -> None:
@@ -529,3 +533,22 @@ def test_start_discovery_continues_when_zero_platforms_available(monkeypatch):
     assert "YouTube: UNAVAILABLE" in message.answers[-1]
     assert "Instagram: UNAVAILABLE" in message.answers[-1]
     assert "TikTok: UNAVAILABLE" in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_cmd_setup_releases_previous_setup_runtime(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=808, tg_chat_id=808)
+    old_runtime = setup.SetupRunContext()
+    setup._SETUP_RUNTIMES["old-runtime"] = old_runtime
+    state = DummyState({"setup_runtime_id": "old-runtime"})
+    message = DummyMessage()
+    message.from_user = SimpleNamespace(id=user.tg_user_id)
+    message.chat = SimpleNamespace(id=user.tg_chat_id)
+
+    monkeypatch.setattr(setup, "db_call", _db_call)
+    monkeypatch.setattr(setup, "db_run", _db_run)
+
+    async_to_sync(setup.cmd_setup)(message, state)
+
+    assert "old-runtime" not in setup._SETUP_RUNTIMES
+    assert state.data["setup_runtime_id"] in setup._SETUP_RUNTIMES
