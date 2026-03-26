@@ -553,6 +553,64 @@ def test_candidate_survives_only_if_recent_short_form_content_matches_niche(monk
     assert "recent Shorts по теме" in reason
 
 
+def test_youtube_discovery_checks_multiple_candidates_before_returning_empty(monkeypatch):
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_discover_youtube_search_candidates",
+        lambda **kwargs: [
+            platform_onboarding._DiscoveryCandidate(
+                platform=Platform.YOUTUBE,
+                external_id="yt-bad",
+                handle="badchannel",
+                url="https://www.youtube.com/@badchannel",
+                display_name="Bad Channel",
+                description="english teachers and lesson plans",
+                query_hits={"english teachers"},
+                metadata={"rank_hint": 900000},
+            ),
+            platform_onboarding._DiscoveryCandidate(
+                platform=Platform.YOUTUBE,
+                external_id="yt-good",
+                handle="goodchannel",
+                url="https://www.youtube.com/@goodchannel",
+                display_name="Good Channel",
+                description="english teachers and lesson plans",
+                query_hits={"english teachers"},
+                metadata={"rank_hint": 1000},
+            ),
+        ],
+    )
+    monkeypatch.setattr(platform_onboarding, "_search_instagram_candidates_raw", lambda **kwargs: [])
+    monkeypatch.setattr(platform_onboarding, "_search_tiktok_candidates_raw", lambda **kwargs: [])
+
+    def fake_recent_youtube_short_texts(*, candidate, n, context=None):
+        if candidate.external_id == "yt-good":
+            return ["english teacher lesson plans", "worksheet ideas for english tutors"]
+        return ["history exam tips", "егэ по истории"]
+
+    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_texts", fake_recent_youtube_short_texts)
+
+    outcome = platform_onboarding.discover_competitors_for_onboarding(
+        keywords=["english teachers", "lesson plans"],
+        seed=_seed(
+            platform=Platform.INSTAGRAM,
+            external_id="ig-seed",
+            handle="creator",
+            title="Creator",
+            description="English teacher",
+            url="https://www.instagram.com/creator/",
+        ),
+        competitors=[],
+        linked_accounts=[],
+        max_youtube_search_calls=1,
+        max_candidates_per_platform=20,
+    )
+
+    assert [(candidate.platform, candidate.external_id) for candidate in outcome.candidates] == [
+        (Platform.YOUTUBE, "yt-good"),
+    ]
+
+
 def test_retry_cache_reuses_youtube_collectible_probe_across_setup_retries(monkeypatch):
     clear_retry_cache()
     calls = {"youtube": 0}
