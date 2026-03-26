@@ -1525,7 +1525,7 @@ def _discover_youtube_search_candidates(
             platform=Platform.YOUTUBE,
             query_index=index,
             unique_candidates=len(query_hits),
-            max_candidates=_DISCOVERY_EARLY_STOP_CANDIDATES.get(platform, 3),
+            max_candidates=_DISCOVERY_EARLY_STOP_CANDIDATES.get(Platform.YOUTUBE, 3),
         ):
             break
     if not query_hits:

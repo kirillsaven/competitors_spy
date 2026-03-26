@@ -219,6 +219,50 @@ def test_discover_competitors_for_onboarding_reports_empty_after_attempted_searc
     ]
 
 
+def test_discover_youtube_search_candidates_respects_budget_without_nameerror(monkeypatch):
+    queries_seen: list[str] = []
+
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_discovery_queries",
+        lambda **kwargs: ["english teachers", "teacher groups", "lesson plans"],
+    )
+
+    def fake_cached_youtube_search_channel_ids(*, query, max_results, context=None):
+        queries_seen.append(query)
+        return {
+            "english teachers": ["yt-1", "yt-2"],
+            "teacher groups": ["yt-2", "yt-3"],
+            "lesson plans": ["yt-4"],
+        }[query]
+
+    class FakeClient:
+        def channels_list(self, *, part, ids):
+            return [
+                {
+                    "id": channel_id,
+                    "snippet": {"title": f"Channel {channel_id}", "description": "English teaching shorts"},
+                    "statistics": {"subscriberCount": "1000"},
+                }
+                for channel_id in ids
+            ]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(platform_onboarding, "_cached_youtube_search_channel_ids", fake_cached_youtube_search_channel_ids)
+    monkeypatch.setattr(platform_onboarding, "get_youtube_client", lambda: FakeClient())
+
+    candidates = platform_onboarding._discover_youtube_search_candidates(
+        keywords=["english teachers", "teacher groups"],
+        competitors=[],
+        max_search_calls=3,
+    )
+
+    assert queries_seen == ["english teachers", "teacher groups", "lesson plans"]
+    assert [candidate.external_id for candidate in candidates] == ["yt-1", "yt-2", "yt-3", "yt-4"]
+
+
 def test_discover_competitors_for_onboarding_ranks_and_dedupes_candidates(monkeypatch):
     monkeypatch.setattr(
         platform_onboarding,
