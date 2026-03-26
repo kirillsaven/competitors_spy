@@ -142,19 +142,19 @@ _DISCOVERY_INITIAL_QUERY_BUDGET = {
     Platform.TIKTOK: 1,
 }
 _DISCOVERY_RESULT_BUDGET = {
-    Platform.YOUTUBE: 3,
+    Platform.YOUTUBE: 10,
     Platform.INSTAGRAM: 3,
-    Platform.TIKTOK: 3,
+    Platform.TIKTOK: 10,
 }
 _DISCOVERY_EARLY_STOP_CANDIDATES = {
-    Platform.YOUTUBE: 6,
-    Platform.INSTAGRAM: 3,
-    Platform.TIKTOK: 3,
+    Platform.YOUTUBE: 20,
+    Platform.INSTAGRAM: 20,
+    Platform.TIKTOK: 20,
 }
 _DISCOVERY_VALIDATION_BUDGET = {
-    Platform.YOUTUBE: 3,
-    Platform.INSTAGRAM: 1,
-    Platform.TIKTOK: 1,
+    Platform.YOUTUBE: 10,
+    Platform.INSTAGRAM: 20,
+    Platform.TIKTOK: 20,
 }
 _GENERIC_DISCOVERY_STEMS = {
     "coach",
@@ -398,6 +398,120 @@ def fetch_instagram_profiles_cached(
     return ordered
 
 
+def fetch_tiktok_profile_feeds_cached(
+    *,
+    handles: list[str],
+    results_per_page: int,
+    context: SetupRunContext | None = None,
+    purpose: str = "profile_feed",
+    context_id: str | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    normalized_handles: list[str] = []
+    seen_handles: set[str] = set()
+    for raw in handles:
+        normalized = str(raw or "").strip()
+        if not normalized or normalized in seen_handles:
+            continue
+        seen_handles.add(normalized)
+        normalized_handles.append(normalized)
+    if not normalized_handles:
+        return {}
+    if platform_is_blocked(context, Platform.TIKTOK):
+        state = get_platform_state(context, Platform.TIKTOK)
+        raise PlatformOnboardingError(state.reason or "TikTok is unavailable for this setup")
+
+    requested = max(1, int(results_per_page))
+    config = get_tiktok_apify_config()
+    actor = str(getattr(config, "profile_actor_id", getattr(config, "actor_id", "")) or "")
+    trace_id = _provider_context_id(context=context, context_id=context_id)
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    missing_handles: list[str] = []
+
+    for normalized_handle in normalized_handles:
+        cache_key = _profile_cache_key(Platform.TIKTOK, normalized_handle)
+        cached_items = context.profile_cache.get(cache_key) if context is not None else None
+        if isinstance(cached_items, list) and len(cached_items) >= requested:
+            grouped[normalized_handle] = [item for item in cached_items[:requested] if isinstance(item, dict)]
+            log_provider_call(
+                actor=actor,
+                platform=Platform.TIKTOK,
+                purpose=purpose,
+                cache="runtime_hit",
+                normalized_input=normalized_handle.lower(),
+                requested_limit=requested,
+                returned_count=len(grouped[normalized_handle]),
+                context_id=trace_id,
+            )
+            continue
+        retry_cached, retry_found = get_cached_retry_value(_retry_cache_key(layer="tiktok-feed", key=cache_key))
+        if retry_found and isinstance(retry_cached, list) and len(retry_cached) >= requested:
+            if context is not None:
+                context.profile_cache[cache_key] = list(retry_cached)
+            grouped[normalized_handle] = [item for item in retry_cached[:requested] if isinstance(item, dict)]
+            log_provider_call(
+                actor=actor,
+                platform=Platform.TIKTOK,
+                purpose=purpose,
+                cache="ttl_hit",
+                normalized_input=normalized_handle.lower(),
+                requested_limit=requested,
+                returned_count=len(grouped[normalized_handle]),
+                context_id=trace_id,
+            )
+            continue
+        missing_handles.append(normalized_handle)
+
+    if missing_handles:
+        client = _get_tiktok_client()
+        try:
+            if hasattr(client, "fetch_profile_feeds"):
+                items = client.fetch_profile_feeds(handles=missing_handles, results_per_profile=requested)
+            elif len(missing_handles) == 1:
+                items = client.fetch_profile_feed(handle=missing_handles[0], results_per_page=requested)
+            else:
+                raise PlatformOnboardingError("TikTok client does not support batched profile feeds")
+            mark_platform_available(context, Platform.TIKTOK)
+        except (PlatformOnboardingError, TikTokApiError, RuntimeError) as exc:
+            mark_platform_failure(context, platform=Platform.TIKTOK, reason=str(exc))
+            raise
+        finally:
+            client.close()
+
+        grouped_fetched: dict[str, list[dict[str, Any]]] = {handle: [] for handle in missing_handles}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            author_meta = item.get("authorMeta") or {}
+            item_handle = str(author_meta.get("name") or "").strip()
+            normalized_item_handle = _normalize_handle(item_handle)
+            matched_handle = next(
+                (handle for handle in missing_handles if _normalize_handle(handle) == normalized_item_handle),
+                None,
+            )
+            if matched_handle:
+                grouped_fetched[matched_handle].append(item)
+
+        log_provider_call(
+            actor=actor,
+            platform=Platform.TIKTOK,
+            purpose=purpose,
+            cache="miss",
+            normalized_input="|".join(sorted(handle.lower() for handle in missing_handles)),
+            requested_limit=requested,
+            returned_count=len([item for item in items if isinstance(item, dict)]),
+            context_id=trace_id,
+        )
+
+        for normalized_handle in missing_handles:
+            found_items = [item for item in grouped_fetched.get(normalized_handle, [])[:requested] if isinstance(item, dict)]
+            store_retry_value(_retry_cache_key(layer="tiktok-feed", key=_profile_cache_key(Platform.TIKTOK, normalized_handle)), list(found_items))
+            if context is not None:
+                context.profile_cache[_profile_cache_key(Platform.TIKTOK, normalized_handle)] = list(found_items)
+            grouped[normalized_handle] = found_items
+
+    return {handle: list(grouped.get(handle, [])) for handle in normalized_handles}
+
+
 def fetch_tiktok_profile_feed_cached(
     *,
     handle: str,
@@ -409,67 +523,13 @@ def fetch_tiktok_profile_feed_cached(
     normalized_handle = str(handle or "").strip()
     if not normalized_handle:
         return []
-    if platform_is_blocked(context, Platform.TIKTOK):
-        state = get_platform_state(context, Platform.TIKTOK)
-        raise PlatformOnboardingError(state.reason or "TikTok is unavailable for this setup")
-
-    cache_key = _profile_cache_key(Platform.TIKTOK, normalized_handle)
-    requested = max(1, int(results_per_page))
-    config = get_tiktok_apify_config()
-    actor = str(getattr(config, "profile_actor_id", getattr(config, "actor_id", "")) or "")
-    trace_id = _provider_context_id(context=context, context_id=context_id)
-    cached_items = context.profile_cache.get(cache_key) if context is not None else None
-    if isinstance(cached_items, list) and len(cached_items) >= requested:
-        log_provider_call(
-            actor=actor,
-            platform=Platform.TIKTOK,
-            purpose=purpose,
-            cache="runtime_hit",
-            normalized_input=normalized_handle.lower(),
-            requested_limit=requested,
-            returned_count=min(len(cached_items), requested),
-            context_id=trace_id,
-        )
-        return [item for item in cached_items[:requested] if isinstance(item, dict)]
-    retry_cached, retry_found = get_cached_retry_value(_retry_cache_key(layer="tiktok-feed", key=cache_key))
-    if retry_found and isinstance(retry_cached, list) and len(retry_cached) >= requested:
-        if context is not None:
-            context.profile_cache[cache_key] = list(retry_cached)
-        log_provider_call(
-            actor=actor,
-            platform=Platform.TIKTOK,
-            purpose=purpose,
-            cache="ttl_hit",
-            normalized_input=normalized_handle.lower(),
-            requested_limit=requested,
-            returned_count=min(len(retry_cached), requested),
-            context_id=trace_id,
-        )
-        return [item for item in retry_cached[:requested] if isinstance(item, dict)]
-
-    client = _get_tiktok_client()
-    try:
-        items = client.fetch_profile_feed(handle=normalized_handle, results_per_page=requested)
-        mark_platform_available(context, Platform.TIKTOK)
-    except (PlatformOnboardingError, TikTokApiError, RuntimeError) as exc:
-        mark_platform_failure(context, platform=Platform.TIKTOK, reason=str(exc))
-        raise
-    finally:
-        client.close()
-    log_provider_call(
-        actor=actor,
-        platform=Platform.TIKTOK,
+    return fetch_tiktok_profile_feeds_cached(
+        handles=[normalized_handle],
+        results_per_page=results_per_page,
+        context=context,
         purpose=purpose,
-        cache="miss",
-        normalized_input=normalized_handle.lower(),
-        requested_limit=requested,
-        returned_count=len([item for item in items if isinstance(item, dict)]),
-        context_id=trace_id,
-    )
-    store_retry_value(_retry_cache_key(layer="tiktok-feed", key=cache_key), [item for item in items if isinstance(item, dict)])
-    if context is not None:
-        context.profile_cache[cache_key] = [item for item in items if isinstance(item, dict)]
-    return [item for item in items if isinstance(item, dict)]
+        context_id=context_id,
+    ).get(normalized_handle, [])
 
 
 def _cached_youtube_search_channel_ids(
@@ -520,10 +580,10 @@ def _cached_instagram_search_results(
             cache="runtime_hit",
             normalized_input=" ".join(query.strip().lower().split()),
             requested_limit=limit,
-            returned_count=min(len(cached), limit),
+            returned_count=len(cached),
             context_id=trace_id,
         )
-        return [item for item in cached[:limit] if isinstance(item, dict)]
+        return [item for item in cached if isinstance(item, dict)]
     retry_cached, retry_found = get_cached_retry_value(_retry_cache_key(layer="instagram-search", key=cache_key))
     if retry_found and isinstance(retry_cached, list):
         if context is not None:
@@ -535,10 +595,10 @@ def _cached_instagram_search_results(
             cache="ttl_hit",
             normalized_input=" ".join(query.strip().lower().split()),
             requested_limit=limit,
-            returned_count=min(len(retry_cached), limit),
+            returned_count=len(retry_cached),
             context_id=trace_id,
         )
-        return [item for item in retry_cached[:limit] if isinstance(item, dict)]
+        return [item for item in retry_cached if isinstance(item, dict)]
     if platform_is_blocked(context, Platform.INSTAGRAM):
         state = get_platform_state(context, Platform.INSTAGRAM)
         raise PlatformOnboardingError(state.reason or "Instagram is unavailable for this setup")
@@ -568,7 +628,7 @@ def _cached_instagram_search_results(
     if context is not None:
         context.search_cache[cache_key] = list(filtered)
     store_retry_value(_retry_cache_key(layer="instagram-search", key=cache_key), list(filtered))
-    return filtered[:limit]
+    return filtered
 
 
 def _cached_tiktok_search_results(
@@ -592,10 +652,10 @@ def _cached_tiktok_search_results(
             cache="runtime_hit",
             normalized_input=" ".join(query.strip().lower().split()),
             requested_limit=limit,
-            returned_count=min(len(cached), limit),
+            returned_count=len(cached),
             context_id=trace_id,
         )
-        return [item for item in cached[:limit] if isinstance(item, dict)]
+        return [item for item in cached if isinstance(item, dict)]
     retry_cached, retry_found = get_cached_retry_value(_retry_cache_key(layer="tiktok-search", key=cache_key))
     if retry_found and isinstance(retry_cached, list):
         if context is not None:
@@ -607,10 +667,10 @@ def _cached_tiktok_search_results(
             cache="ttl_hit",
             normalized_input=" ".join(query.strip().lower().split()),
             requested_limit=limit,
-            returned_count=min(len(retry_cached), limit),
+            returned_count=len(retry_cached),
             context_id=trace_id,
         )
-        return [item for item in retry_cached[:limit] if isinstance(item, dict)]
+        return [item for item in retry_cached if isinstance(item, dict)]
     if platform_is_blocked(context, Platform.TIKTOK):
         state = get_platform_state(context, Platform.TIKTOK)
         raise PlatformOnboardingError(state.reason or "TikTok is unavailable for this setup")
@@ -640,7 +700,7 @@ def _cached_tiktok_search_results(
     if context is not None:
         context.search_cache[cache_key] = list(filtered)
     store_retry_value(_retry_cache_key(layer="tiktok-search", key=cache_key), list(filtered))
-    return filtered[:limit]
+    return filtered
 
 
 def _normalize_token(token: str) -> str:
@@ -1308,6 +1368,119 @@ def _fetch_recent_tiktok_texts(
     return texts, [int(item.views or 0) for item in details]
 
 
+def _batch_fetch_recent_instagram_reel_texts(
+    *,
+    candidates: list[_DiscoveryCandidate],
+    n: int,
+    context: SetupRunContext | None = None,
+) -> dict[str, tuple[list[str], list[int]]]:
+    results: dict[str, tuple[list[str], list[int]]] = {}
+    missing: list[_DiscoveryCandidate] = []
+    for candidate in candidates:
+        cached = _get_cached_collectible_texts(
+            platform=Platform.INSTAGRAM,
+            external_id=candidate.external_id,
+            handle=candidate.handle,
+            n=n,
+            context=context,
+        )
+        if cached is not None:
+            results[candidate.external_id] = (cached, [])
+            continue
+        missing.append(candidate)
+    if not missing:
+        return results
+
+    lookups = [str(candidate.url or candidate.handle or candidate.external_id or "").strip() for candidate in missing]
+    profiles = fetch_instagram_profiles_cached(
+        inputs=lookups,
+        context=context,
+        purpose="candidate_validation",
+    )
+    for candidate, lookup in zip(missing, lookups):
+        profile = _find_instagram_profile_for_lookup(profiles, lookup)
+        if not profile:
+            texts = _store_cached_collectible_texts(
+                platform=Platform.INSTAGRAM,
+                external_id=candidate.external_id,
+                handle=candidate.handle,
+                n=n,
+                texts=[],
+                context=context,
+            )
+            results[candidate.external_id] = (texts, [])
+            continue
+        details = profile_to_video_details(profile)
+        texts = [
+            str(item.description or item.title or "").strip()
+            for item in details[:n]
+            if str(item.description or item.title or "").strip()
+        ]
+        texts = _store_cached_collectible_texts(
+            platform=Platform.INSTAGRAM,
+            external_id=candidate.external_id,
+            handle=candidate.handle,
+            n=n,
+            texts=texts,
+            context=context,
+        )
+        results[candidate.external_id] = (texts, [int(item.views or 0) for item in details])
+    return results
+
+
+def _batch_fetch_recent_tiktok_texts(
+    *,
+    candidates: list[_DiscoveryCandidate],
+    n: int,
+    context: SetupRunContext | None = None,
+) -> dict[str, tuple[list[str], list[int]]]:
+    results: dict[str, tuple[list[str], list[int]]] = {}
+    missing: list[_DiscoveryCandidate] = []
+    handles: list[str] = []
+    for candidate in candidates:
+        cached = _get_cached_collectible_texts(
+            platform=Platform.TIKTOK,
+            external_id=candidate.external_id,
+            handle=candidate.handle,
+            n=n,
+            context=context,
+        )
+        if cached is not None:
+            results[candidate.external_id] = (cached, [])
+            continue
+        missing.append(candidate)
+        handles.append(str(candidate.handle or "").strip())
+    if not missing:
+        return results
+
+    grouped_items = fetch_tiktok_profile_feeds_cached(
+        handles=handles,
+        results_per_page=max(1, n),
+        context=context,
+        purpose="candidate_validation",
+    )
+    for candidate in missing:
+        candidate_handle = str(candidate.handle or "").strip()
+        items = grouped_items.get(candidate_handle, [])
+        details = [item_to_video_details(item) for item in items]
+        details = [item for item in details if int(item.views or 0) > 0]
+        texts = [
+            str(item.description or item.title or "").strip()
+            for item in details[:n]
+            if str(item.description or item.title or "").strip()
+        ]
+        texts = _store_cached_collectible_texts(
+            platform=Platform.TIKTOK,
+            external_id=candidate.external_id,
+            handle=candidate.handle,
+            n=n,
+            texts=texts,
+            context=context,
+        )
+        results[candidate.external_id] = (texts, [int(item.views or 0) for item in details])
+    return results
+
+
 def _fetch_candidate_collectible_texts(
     *,
     candidate: _DiscoveryCandidate,
@@ -1390,8 +1563,17 @@ def _collector_aware_candidates(
 
     budget = min(len(strong_profile_candidates), max(1, _DISCOVERY_VALIDATION_BUDGET.get(platform, 1)))
     validated: list[_DiscoveryCandidate] = []
-    for candidate in strong_profile_candidates[:budget]:
-        texts, views = _fetch_candidate_collectible_texts(candidate=candidate, context=context)
+    candidate_batch = strong_profile_candidates[:budget]
+    batch_texts: dict[str, tuple[list[str], list[int]]] = {}
+    if platform == Platform.INSTAGRAM:
+        batch_texts = _batch_fetch_recent_instagram_reel_texts(candidates=candidate_batch, n=3, context=context)
+    elif platform == Platform.TIKTOK:
+        batch_texts = _batch_fetch_recent_tiktok_texts(candidates=candidate_batch, n=3, context=context)
+    for candidate in candidate_batch:
+        if platform in {Platform.INSTAGRAM, Platform.TIKTOK}:
+            texts, views = batch_texts.get(candidate.external_id, ([], []))
+        else:
+            texts, views = _fetch_candidate_collectible_texts(candidate=candidate, context=context)
         if not texts:
             continue
         _mark_candidate_collectible(
@@ -1402,7 +1584,7 @@ def _collector_aware_candidates(
         if not _theme_content_passes(candidate=candidate, texts=texts, keywords=keywords):
             continue
         validated.append(candidate)
-        if len(validated) >= min(max_candidates, _DISCOVERY_EARLY_STOP_CANDIDATES.get(platform, 3)):
+        if len(validated) >= min(max_candidates, _DISCOVERY_EARLY_STOP_CANDIDATES.get(platform, max_candidates)):
             break
     if validated:
         ranked = sorted(

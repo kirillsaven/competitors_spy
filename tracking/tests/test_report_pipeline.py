@@ -210,3 +210,27 @@ def test_build_setup_verification_preview_keeps_all_three_collectible_sections(m
     assert "English teacher lesson plans [Shorts]" in preview.text
     assert "English tutor worksheet ideas" in preview.text
     assert "Reels for english teachers [Reels]" in preview.text
+
+
+@pytest.mark.django_db
+def test_create_and_send_setup_verification_report_splits_long_messages(monkeypatch):
+    user = TgUser.objects.create(tg_user_id=1005, tg_chat_id=1005, timezone_str="UTC")
+    preview = ReportPreview(
+        payload={"report_kind": "setup_verification", "sections": []},
+        text=("A" * 3500) + "\n\n" + ("B" * 3500),
+        section_counts={"youtube": 1},
+        collection_failures=[],
+    )
+    sent: list[str] = []
+
+    monkeypatch.setattr(report_pipeline, "build_setup_verification_preview", lambda **kwargs: preview)
+    monkeypatch.setattr(report_pipeline, "send_message", lambda *, chat_id, text: sent.append(text) or {"message_id": len(sent)})
+
+    result = report_pipeline.create_and_send_setup_verification_report(
+        user=user,
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+    )
+
+    assert len(sent) == 2
+    assert result.telegram_result["message_ids"] == [1, 2]

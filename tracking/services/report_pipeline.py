@@ -11,7 +11,12 @@ from botapp.telegram_api import send_message
 from tracking.models import Competitor, ContentItem, Platform, Report, ReportStatus, TgUser, UserCompetitor
 from tracking.services.collector import refresh_competitor
 from tracking.services.provider_runtime import ProviderFetchCache
-from tracking.services.reporting import build_report_payload, build_setup_verification_payload, render_report_text
+from tracking.services.reporting import (
+    build_report_payload,
+    build_setup_verification_payload,
+    render_report_text,
+    split_telegram_text,
+)
 from tracking.services.scoring import compute_competitor_baseline, score_items_for_period
 
 logger = logging.getLogger(__name__)
@@ -51,6 +56,14 @@ class CollectionPassResult:
     updated_items: list[ContentItem]
     successful_competitors: list[Competitor]
     collection_failures: list[ReportCollectionFailure]
+
+
+def _send_report_messages(*, chat_id: int, text: str) -> dict[str, Any]:
+    message_results = [send_message(chat_id=chat_id, text=chunk) for chunk in split_telegram_text(text=text)]
+    return {
+        "message_id": message_results[0]["message_id"],
+        "message_ids": [result["message_id"] for result in message_results],
+    }
 
 
 def get_active_competitors(*, user: TgUser) -> list[Competitor]:
@@ -299,7 +312,7 @@ def create_and_send_report(
         status=ReportStatus.CREATED,
         payload=preview.payload,
     )
-    telegram_result = send_message(chat_id=int(user.tg_chat_id), text=preview.text)
+    telegram_result = _send_report_messages(chat_id=int(user.tg_chat_id), text=preview.text)
 
     report.status = ReportStatus.SENT
     report.sent_at = timezone.now()
@@ -326,7 +339,7 @@ def create_and_send_setup_verification_report(
         status=ReportStatus.CREATED,
         payload=preview.payload,
     )
-    telegram_result = send_message(chat_id=int(user.tg_chat_id), text=preview.text)
+    telegram_result = _send_report_messages(chat_id=int(user.tg_chat_id), text=preview.text)
 
     report.status = ReportStatus.SENT
     report.sent_at = timezone.now()

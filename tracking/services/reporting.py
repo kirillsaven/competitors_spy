@@ -13,6 +13,9 @@ PLATFORM_SECTION_ORDER = [
     Platform.TIKTOK,
     Platform.INSTAGRAM,
 ]
+TELEGRAM_TEXT_LIMIT = 4000
+SETUP_VERIFICATION_MAX_EXAMPLES = 2
+SETUP_VERIFICATION_MAX_FAILURES = 2
 
 
 def _platform_label(platform: str) -> str:
@@ -30,6 +33,13 @@ def _content_type_tag(content_type: str) -> str:
     if kind == "reel":
         return " [Reels]"
     return ""
+
+
+def _shorten_reason(reason: str, max_len: int = 140) -> str:
+    value = " ".join(str(reason or "").split()).strip()
+    if len(value) <= max_len:
+        return value
+    return value[: max_len - 3] + "..."
 
 
 def build_report_payload(
@@ -194,7 +204,7 @@ def render_setup_verification_text(*, payload: dict, timezone_str: str) -> str:
         examples = [example for example in (section.get("examples") or []) if isinstance(example, dict)]
         if examples:
             lines.append("Примеры последних собранных материалов:")
-            for idx, example in enumerate(examples[:3], start=1):
+            for idx, example in enumerate(examples[:SETUP_VERIFICATION_MAX_EXAMPLES], start=1):
                 title = str(example.get("title") or "Без названия").strip()
                 tag = _content_type_tag(str(example.get("content_type") or ""))
                 competitor = str(example.get("competitor") or "").strip()
@@ -218,12 +228,57 @@ def render_setup_verification_text(*, payload: dict, timezone_str: str) -> str:
         failures = [failure for failure in (section.get("failures") or []) if isinstance(failure, dict)]
         if failures:
             lines.append("Проблемы при сборе:")
-            for failure in failures[:3]:
+            for failure in failures[:SETUP_VERIFICATION_MAX_FAILURES]:
                 competitor = str(failure.get("competitor") or "").strip() or "unknown"
-                reason = str(failure.get("reason") or "").strip() or "unknown error"
+                reason = _shorten_reason(str(failure.get("reason") or "").strip() or "unknown error")
                 lines.append(f"- {competitor}: {reason}")
 
     return "\n".join(lines).rstrip() + "\n"
+
+
+def split_telegram_text(*, text: str, max_len: int = TELEGRAM_TEXT_LIMIT) -> list[str]:
+    value = str(text or "").strip()
+    if not value:
+        return []
+    if len(value) <= max_len:
+        return [value]
+
+    chunks: list[str] = []
+    current = ""
+    for block in value.split("\n\n"):
+        block_text = block.strip()
+        if not block_text:
+            continue
+        candidate = block_text if not current else f"{current}\n\n{block_text}"
+        if len(candidate) <= max_len:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current)
+            current = ""
+        if len(block_text) <= max_len:
+            current = block_text
+            continue
+        lines = [line.rstrip() for line in block_text.splitlines() if line.strip()]
+        current_line_chunk = ""
+        for line in lines:
+            line_candidate = line if not current_line_chunk else f"{current_line_chunk}\n{line}"
+            if len(line_candidate) <= max_len:
+                current_line_chunk = line_candidate
+                continue
+            if current_line_chunk:
+                chunks.append(current_line_chunk)
+                current_line_chunk = ""
+            remaining = line
+            while len(remaining) > max_len:
+                chunks.append(remaining[:max_len])
+                remaining = remaining[max_len:]
+            current_line_chunk = remaining
+        if current_line_chunk:
+            current = current_line_chunk
+    if current:
+        chunks.append(current)
+    return [chunk for chunk in chunks if chunk.strip()]
 
 
 def _render_platform_section(

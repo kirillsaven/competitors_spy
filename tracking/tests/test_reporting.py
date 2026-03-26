@@ -4,7 +4,12 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from tracking.models import Platform
-from tracking.services.reporting import build_report_payload, build_setup_verification_payload, render_report_text
+from tracking.services.reporting import (
+    build_report_payload,
+    build_setup_verification_payload,
+    render_report_text,
+    split_telegram_text,
+)
 
 
 def _make_scored_item(*, platform: str, suffix: str):
@@ -158,3 +163,12 @@ def test_render_report_text_renders_setup_verification_mode():
     assert "1) Lesson Breakdown [Shorts]" in text
     assert "Проблемы при сборе:" in text
     assert "- Broken Channel: quota exceeded" in text
+
+
+def test_split_telegram_text_splits_long_text_safely():
+    block = "Строка " * 700
+
+    chunks = split_telegram_text(text=f"{block}\n\n{block}", max_len=1000)
+
+    assert len(chunks) >= 2
+    assert all(len(chunk) <= 1000 for chunk in chunks)

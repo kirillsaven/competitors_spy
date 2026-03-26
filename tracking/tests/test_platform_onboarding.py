@@ -439,26 +439,30 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
             }
         ]
 
-    def fake_fetch_tiktok_profile_feed_cached(*, handle, results_per_page, context=None, purpose=None, context_id=None):
-        if handle == "teachertok":
-            return [
-                {
-                    "id": "vid-1",
-                    "text": "english teacher short lesson",
-                    "createTimeISO": "2024-04-03T14:22:40.000Z",
-                    "authorMeta": {"id": "auth-1", "name": "teachertok", "nickName": "TeacherTok"},
-                    "webVideoUrl": "https://www.tiktok.com/@teachertok/video/vid-1",
-                    "videoMeta": {"duration": 19},
-                    "playCount": 8800,
-                    "diggCount": 200,
-                    "commentCount": 11,
-                    "shareCount": 4,
-                }
-            ]
-        return []
+    def fake_fetch_tiktok_profile_feeds_cached(*, handles, results_per_page, context=None, purpose=None, context_id=None):
+        out = {}
+        for handle in handles:
+            if handle == "teachertok":
+                out[handle] = [
+                    {
+                        "id": "vid-1",
+                        "text": "english teacher short lesson",
+                        "createTimeISO": "2024-04-03T14:22:40.000Z",
+                        "authorMeta": {"id": "auth-1", "name": "teachertok", "nickName": "TeacherTok"},
+                        "webVideoUrl": "https://www.tiktok.com/@teachertok/video/vid-1",
+                        "videoMeta": {"duration": 19},
+                        "playCount": 8800,
+                        "diggCount": 200,
+                        "commentCount": 11,
+                        "shareCount": 4,
+                    }
+                ]
+            else:
+                out[handle] = []
+        return out
 
     monkeypatch.setattr(platform_onboarding, "fetch_instagram_profiles_cached", fake_fetch_instagram_profiles_cached)
-    monkeypatch.setattr(platform_onboarding, "fetch_tiktok_profile_feed_cached", fake_fetch_tiktok_profile_feed_cached)
+    monkeypatch.setattr(platform_onboarding, "fetch_tiktok_profile_feeds_cached", fake_fetch_tiktok_profile_feeds_cached)
 
     outcome = platform_onboarding.discover_competitors_for_onboarding(
         keywords=["english teachers"],
@@ -911,6 +915,30 @@ def test_setup_context_reuses_instagram_search_query_results(monkeypatch):
     assert calls == {"search": 1}
 
 
+def test_cached_instagram_search_results_uses_full_overreturned_pool(monkeypatch):
+    clear_retry_cache()
+    calls = {"search": 0}
+
+    class FakeClient:
+        def search_profiles(self, *, query, limit=None):
+            calls["search"] += 1
+            assert limit == 3
+            return [
+                {"id": f"ig-{idx}", "username": f"teacher_{idx}", "full_name": f"Teacher {idx}"}
+                for idx in range(5)
+            ]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(platform_onboarding, "_get_instagram_client", lambda: FakeClient())
+
+    results = platform_onboarding._cached_instagram_search_results(query="english tutors", limit=3, context=None)
+
+    assert [item["id"] for item in results] == ["ig-0", "ig-1", "ig-2", "ig-3", "ig-4"]
+    assert calls == {"search": 1}
+
+
 def test_retry_cache_reuses_instagram_search_results_across_setup_retries(monkeypatch):
     clear_retry_cache()
     calls = {"search": 0}
@@ -934,3 +962,123 @@ def test_retry_cache_reuses_instagram_search_results_across_setup_retries(monkey
     assert [item["id"] for item in first] == ["ig-1", "ig-2"]
     assert [item["id"] for item in second] == ["ig-1", "ig-2"]
     assert calls == {"search": 1}
+
+
+def test_discover_competitors_for_onboarding_validates_multiple_ig_tt_candidates(monkeypatch):
+    monkeypatch.setattr(platform_onboarding, "_discover_youtube_search_candidates", lambda **kwargs: [])
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_search_instagram_candidates_raw",
+        lambda **kwargs: [
+            platform_onboarding._DiscoveryCandidate(
+                platform=Platform.INSTAGRAM,
+                external_id="ig-1",
+                handle="teacherone",
+                url="https://www.instagram.com/teacherone/",
+                display_name="Teacher One",
+                description="english teacher reels",
+                query_hits={"english teachers"},
+            ),
+            platform_onboarding._DiscoveryCandidate(
+                platform=Platform.INSTAGRAM,
+                external_id="ig-2",
+                handle="teachertwo",
+                url="https://www.instagram.com/teachertwo/",
+                display_name="Teacher Two",
+                description="english teacher reels",
+                query_hits={"english teachers"},
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_search_tiktok_candidates_raw",
+        lambda **kwargs: [
+            platform_onboarding._DiscoveryCandidate(
+                platform=Platform.TIKTOK,
+                external_id="tt-1",
+                handle="teachertok1",
+                url="https://www.tiktok.com/@teachertok1",
+                display_name="TeacherTok 1",
+                description="english short lessons",
+                query_hits={"english teachers"},
+            ),
+            platform_onboarding._DiscoveryCandidate(
+                platform=Platform.TIKTOK,
+                external_id="tt-2",
+                handle="teachertok2",
+                url="https://www.tiktok.com/@teachertok2",
+                display_name="TeacherTok 2",
+                description="english short lessons",
+                query_hits={"english teachers"},
+            ),
+        ],
+    )
+
+    def fake_fetch_instagram_profiles_cached(*, inputs, context=None, purpose=None, context_id=None):
+        out = []
+        for lookup in inputs:
+            handle = lookup.rstrip("/").split("/")[-1]
+            out.append(
+                {
+                    "id": f"{handle}-id",
+                    "username": handle,
+                    "url": f"https://www.instagram.com/{handle}/",
+                    "latestPosts": [
+                        {
+                            "id": f"{handle}-reel-1",
+                            "productType": "clips",
+                            "url": f"https://www.instagram.com/reel/{handle}-reel-1/",
+                            "caption": "English teacher reel ideas",
+                            "timestamp": "2024-07-03T10:30:00.000Z",
+                            "videoViewCount": 2400,
+                        }
+                    ],
+                }
+            )
+        return out
+
+    def fake_fetch_tiktok_profile_feeds_cached(*, handles, results_per_page, context=None, purpose=None, context_id=None):
+        return {
+            handle: [
+                {
+                    "id": f"{handle}-vid-1",
+                    "text": "english teacher short lesson",
+                    "createTimeISO": "2024-04-03T14:22:40.000Z",
+                    "authorMeta": {"id": f"{handle}-author", "name": handle, "nickName": handle},
+                    "webVideoUrl": f"https://www.tiktok.com/@{handle}/video/{handle}-vid-1",
+                    "videoMeta": {"duration": 19},
+                    "playCount": 8800,
+                    "diggCount": 200,
+                    "commentCount": 11,
+                    "shareCount": 4,
+                }
+            ]
+            for handle in handles
+        }
+
+    monkeypatch.setattr(platform_onboarding, "fetch_instagram_profiles_cached", fake_fetch_instagram_profiles_cached)
+    monkeypatch.setattr(platform_onboarding, "fetch_tiktok_profile_feeds_cached", fake_fetch_tiktok_profile_feeds_cached)
+
+    outcome = platform_onboarding.discover_competitors_for_onboarding(
+        keywords=["english teachers"],
+        seed=_seed(
+            platform=Platform.INSTAGRAM,
+            external_id="ig-seed",
+            handle="creator",
+            title="Creator",
+            description="English teacher",
+            url="https://www.instagram.com/creator/",
+        ),
+        competitors=[],
+        linked_accounts=[],
+        max_youtube_search_calls=3,
+        max_candidates_per_platform=20,
+    )
+
+    assert [(candidate.platform, candidate.handle) for candidate in outcome.candidates] == [
+        (Platform.INSTAGRAM, "teacherone"),
+        (Platform.INSTAGRAM, "teachertwo"),
+        (Platform.TIKTOK, "teachertok1"),
+        (Platform.TIKTOK, "teachertok2"),
+    ]
