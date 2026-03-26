@@ -190,6 +190,8 @@ def score_items_for_period(
                 score_type = "delta"
 
         if velocity is None:
+            if int(baseline.n or 0) > 0:
+                continue
             # Warm-up fallback: avoid tiny videos where vph is too noisy.
             if views_end < min_views_end:
                 continue
