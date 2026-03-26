@@ -164,3 +164,29 @@ def test_setup_finalize_schedule_triggers_setup_report_with_follow_up(monkeypatc
 
     assert delayed == [((user.id,), {"trigger": "setup"})]
     assert "Сейчас соберу первый отчет, чтобы все проверить." in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_run_user_report_now_uses_setup_verification_report_for_setup_trigger(monkeypatch):
+    user, schedule = _make_user_with_schedule(tg_user_id=9005)
+    called = {"setup": 0, "scheduled": 0}
+
+    monkeypatch.setattr(
+        tasks,
+        "create_and_send_setup_verification_report",
+        lambda **kwargs: called.__setitem__("setup", called["setup"] + 1)
+        or SimpleNamespace(report=SimpleNamespace(status="sent")),
+    )
+    monkeypatch.setattr(
+        tasks,
+        "create_and_send_report",
+        lambda **kwargs: called.__setitem__("scheduled", called["scheduled"] + 1)
+        or SimpleNamespace(report=SimpleNamespace(status="sent")),
+    )
+    monkeypatch.setattr(tasks.notify_report_still_running, "apply_async", lambda *args, **kwargs: None)
+
+    tasks.run_user_report_now.run(user.id, trigger="setup")
+
+    schedule.refresh_from_db()
+    assert called == {"setup": 1, "scheduled": 0}
+    assert schedule.is_running is False

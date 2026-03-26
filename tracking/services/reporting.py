@@ -15,6 +15,14 @@ PLATFORM_SECTION_ORDER = [
 ]
 
 
+def _platform_label(platform: str) -> str:
+    return {
+        Platform.YOUTUBE: "YouTube",
+        Platform.TIKTOK: "TikTok",
+        Platform.INSTAGRAM: "Instagram",
+    }.get(str(platform or ""), str(platform or "Platform"))
+
+
 def build_report_payload(
     *,
     scored: list[ScoredItem],
@@ -56,6 +64,7 @@ def build_report_payload(
         )
 
     return {
+        "report_kind": "scheduled",
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
         "sections": [
@@ -66,7 +75,22 @@ def build_report_payload(
     }
 
 
+def build_setup_verification_payload(
+    *,
+    generated_at: datetime,
+    sections: list[dict],
+) -> dict:
+    return {
+        "report_kind": "setup_verification",
+        "generated_at": generated_at.isoformat(),
+        "sections": list(sections or []),
+    }
+
+
 def render_report_text(*, payload: dict, timezone_str: str) -> str:
+    if str(payload.get("report_kind") or "") == "setup_verification":
+        return render_setup_verification_text(payload=payload, timezone_str=timezone_str)
+
     ps = payload.get("period_start")
     pe = payload.get("period_end")
     period_start = datetime.fromisoformat(ps.replace("Z", "+00:00")) if isinstance(ps, str) else None
@@ -136,6 +160,59 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
                 )
                 reason = str(failure.get("reason") or "").strip() or "unknown error"
                 lines.append(f"- {label}: {reason}")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def render_setup_verification_text(*, payload: dict, timezone_str: str) -> str:
+    generated_raw = payload.get("generated_at")
+    generated_at = datetime.fromisoformat(generated_raw.replace("Z", "+00:00")) if isinstance(generated_raw, str) else None
+    lines: list[str] = ["Проверка настройки завершена"]
+    if generated_at is not None:
+        lines.append(f"Время: {format_dt_local(generated_at, timezone_str)}")
+
+    for section in (payload.get("sections") or []):
+        if not isinstance(section, dict):
+            continue
+        platform = str(section.get("platform") or "")
+        selected = int(section.get("selected_competitors") or 0)
+        successful = int(section.get("successful_competitors") or 0)
+        failed = int(section.get("failed_competitors") or 0)
+        lines.append("")
+        lines.append(
+            f"{_platform_label(platform)}: выбрано {selected}, успешно {successful}, ошибок {failed}"
+        )
+
+        examples = [example for example in (section.get("examples") or []) if isinstance(example, dict)]
+        if examples:
+            lines.append("Примеры последних собранных материалов:")
+            for idx, example in enumerate(examples[:3], start=1):
+                title = str(example.get("title") or "Без названия").strip()
+                competitor = str(example.get("competitor") or "").strip()
+                published_at = example.get("published_at")
+                lines.append(f"{idx}) {title}")
+                if competitor:
+                    lines.append(f"Источник: {competitor}")
+                if isinstance(published_at, str) and published_at:
+                    try:
+                        lines.append(
+                            f"Опубликовано: {format_dt_local(datetime.fromisoformat(published_at.replace('Z', '+00:00')), timezone_str)}"
+                        )
+                    except Exception:
+                        pass
+                url = str(example.get("url") or "").strip()
+                if url:
+                    lines.append(url)
+        else:
+            lines.append("Примеры не добавлены: провайдер не вернул подходящие материалы в этом сборе.")
+
+        failures = [failure for failure in (section.get("failures") or []) if isinstance(failure, dict)]
+        if failures:
+            lines.append("Проблемы при сборе:")
+            for failure in failures[:3]:
+                competitor = str(failure.get("competitor") or "").strip() or "unknown"
+                reason = str(failure.get("reason") or "").strip() or "unknown error"
+                lines.append(f"- {competitor}: {reason}")
+
     return "\n".join(lines).rstrip() + "\n"
 
 

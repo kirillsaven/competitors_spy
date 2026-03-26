@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 from tracking.models import Platform
-from tracking.services.reporting import build_report_payload, render_report_text
+from tracking.services.reporting import build_report_payload, build_setup_verification_payload, render_report_text
 
 
 def _make_scored_item(*, platform: str, suffix: str):
@@ -125,3 +125,35 @@ def test_render_report_text_includes_partial_failure_summary():
     assert "Проблемы при сборе:" in text
     assert "Instagram:" in text
     assert "- Broken Gram: Instagram profile returned no recent items with views: username=broken-gram" in text
+
+
+def test_render_report_text_renders_setup_verification_mode():
+    payload = build_setup_verification_payload(
+        generated_at=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        sections=[
+            {
+                "platform": Platform.YOUTUBE,
+                "selected_competitors": 2,
+                "successful_competitors": 1,
+                "failed_competitors": 1,
+                "examples": [
+                    {
+                        "title": "Lesson Breakdown",
+                        "competitor": "Teacher Hub",
+                        "published_at": datetime(2026, 3, 23, 12, 0, tzinfo=UTC).isoformat(),
+                        "url": "https://example.com/lesson",
+                    }
+                ],
+                "failures": [{"competitor": "Broken Channel", "reason": "quota exceeded"}],
+            }
+        ],
+    )
+
+    text = render_report_text(payload=payload, timezone_str="UTC")
+
+    assert "Проверка настройки завершена" in text
+    assert "YouTube: выбрано 2, успешно 1, ошибок 1" in text
+    assert "Примеры последних собранных материалов:" in text
+    assert "1) Lesson Breakdown" in text
+    assert "Проблемы при сборе:" in text
+    assert "- Broken Channel: quota exceeded" in text

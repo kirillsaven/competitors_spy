@@ -8,10 +8,10 @@ from django.conf import settings
 from django.utils import timezone
 
 from botapp.telegram_api import send_message
-from tracking.models import Competitor, Platform, Report, ReportStatus, TgUser, UserCompetitor
+from tracking.models import Competitor, ContentItem, Platform, Report, ReportStatus, TgUser, UserCompetitor
 from tracking.services.collector import refresh_competitor
 from tracking.services.provider_runtime import ProviderFetchCache
-from tracking.services.reporting import build_report_payload, render_report_text
+from tracking.services.reporting import build_report_payload, build_setup_verification_payload, render_report_text
 from tracking.services.scoring import compute_competitor_baseline, score_items_for_period
 
 logger = logging.getLogger(__name__)
@@ -45,6 +45,14 @@ class SentReportResult:
     telegram_result: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class CollectionPassResult:
+    competitors: list[Competitor]
+    updated_items: list[ContentItem]
+    successful_competitors: list[Competitor]
+    collection_failures: list[ReportCollectionFailure]
+
+
 def get_active_competitors(*, user: TgUser) -> list[Competitor]:
     max_competitors = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
     competitors: list[Competitor] = []
@@ -68,18 +76,17 @@ def _short_reason(exc: Exception) -> str:
     return text
 
 
-def build_report_preview(
+def _run_collection_pass(
     *,
     user: TgUser,
-    period_start,
     period_end,
     provider_fetch_cache: ProviderFetchCache | None = None,
-) -> ReportPreview:
+) -> CollectionPassResult:
     competitors = get_active_competitors(user=user)
-
-    updated_items = []
+    updated_items: list[ContentItem] = []
     successful_competitors: list[Competitor] = []
     collection_failures: list[ReportCollectionFailure] = []
+
     for competitor in competitors:
         try:
             competitor_items = refresh_competitor(
@@ -108,20 +115,41 @@ def build_report_preview(
         successful_competitors.append(competitor)
         updated_items.extend(competitor_items)
 
-    if not successful_competitors and collection_failures:
-        first_failure = collection_failures[0]
+    return CollectionPassResult(
+        competitors=competitors,
+        updated_items=updated_items,
+        successful_competitors=successful_competitors,
+        collection_failures=collection_failures,
+    )
+
+
+def build_report_preview(
+    *,
+    user: TgUser,
+    period_start,
+    period_end,
+    provider_fetch_cache: ProviderFetchCache | None = None,
+) -> ReportPreview:
+    collection = _run_collection_pass(
+        user=user,
+        period_end=period_end,
+        provider_fetch_cache=provider_fetch_cache,
+    )
+
+    if not collection.successful_competitors and collection.collection_failures:
+        first_failure = collection.collection_failures[0]
         label = first_failure.competitor_display_name or first_failure.competitor_handle or str(first_failure.competitor_id)
         raise ReportPipelineError(
             f"all competitor refreshes failed; first failure: {first_failure.platform}:{label}: {first_failure.reason}"
         )
 
-    competitor_by_item_id = {item.id: item.competitor for item in updated_items}
+    competitor_by_item_id = {item.id: item.competitor for item in collection.updated_items}
     baseline_by_competitor_id = {
         competitor.id: compute_competitor_baseline(competitor=competitor, now=period_end)
-        for competitor in successful_competitors
+        for competitor in collection.successful_competitors
     }
     scored = score_items_for_period(
-        items=updated_items,
+        items=collection.updated_items,
         competitor_by_item_id=competitor_by_item_id,
         baseline_by_competitor_id=baseline_by_competitor_id,
         period_start=period_start,
@@ -142,7 +170,7 @@ def build_report_preview(
                 },
                 "reason": failure.reason,
             }
-            for failure in collection_failures
+            for failure in collection.collection_failures
         ],
     )
     text = render_report_text(payload=payload, timezone_str=user.timezone_str)
@@ -153,7 +181,84 @@ def build_report_preview(
         payload=payload,
         text=text,
         section_counts=section_counts,
-        collection_failures=collection_failures,
+        collection_failures=collection.collection_failures,
+    )
+
+
+def build_setup_verification_preview(
+    *,
+    user: TgUser,
+    period_end,
+    provider_fetch_cache: ProviderFetchCache | None = None,
+) -> ReportPreview:
+    collection = _run_collection_pass(
+        user=user,
+        period_end=period_end,
+        provider_fetch_cache=provider_fetch_cache,
+    )
+    selected_counts = {platform: 0 for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)}
+    successful_counts = {platform: 0 for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)}
+    failures_by_platform: dict[str, list[ReportCollectionFailure]] = {
+        platform: [] for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)
+    }
+    examples_by_platform: dict[str, list[dict[str, Any]]] = {
+        platform: [] for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)
+    }
+
+    for competitor in collection.competitors:
+        selected_counts[str(competitor.platform or "")] = selected_counts.get(str(competitor.platform or ""), 0) + 1
+    for competitor in collection.successful_competitors:
+        successful_counts[str(competitor.platform or "")] = successful_counts.get(str(competitor.platform or ""), 0) + 1
+    for failure in collection.collection_failures:
+        failures_by_platform.setdefault(failure.platform, []).append(failure)
+    sorted_items = sorted(
+        collection.updated_items,
+        key=lambda item: (str(item.platform or ""), item.published_at, item.id),
+        reverse=True,
+    )
+    for item in sorted_items:
+        platform = str(item.platform or "")
+        if len(examples_by_platform.setdefault(platform, [])) >= 3:
+            continue
+        competitor = item.competitor
+        examples_by_platform[platform].append(
+            {
+                "title": str(item.title or "").strip() or str(item.external_id or ""),
+                "url": str(item.url or "").strip(),
+                "published_at": item.published_at.isoformat(),
+                "competitor": str(competitor.display_name or competitor.handle or competitor.external_id or "").strip(),
+            }
+        )
+
+    sections: list[dict[str, Any]] = []
+    for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM):
+        sections.append(
+            {
+                "platform": platform,
+                "selected_competitors": selected_counts.get(platform, 0),
+                "successful_competitors": successful_counts.get(platform, 0),
+                "failed_competitors": len(failures_by_platform.get(platform, [])),
+                "examples": examples_by_platform.get(platform, []),
+                "failures": [
+                    {
+                        "competitor": failure.competitor_display_name or failure.competitor_handle or str(failure.competitor_id),
+                        "reason": failure.reason,
+                    }
+                    for failure in failures_by_platform.get(platform, [])[:3]
+                ],
+            }
+        )
+
+    payload = build_setup_verification_payload(generated_at=period_end, sections=sections)
+    text = render_report_text(payload=payload, timezone_str=user.timezone_str)
+    section_counts = {
+        str(section.get("platform")): len(section.get("examples") or []) for section in sections
+    }
+    return ReportPreview(
+        payload=payload,
+        text=text,
+        section_counts=section_counts,
+        collection_failures=collection.collection_failures,
     )
 
 
@@ -182,6 +287,33 @@ def create_and_send_report(
     if required_platforms:
         assert_required_platform_sections(preview=preview, required_platforms=required_platforms)
 
+    report = Report.objects.create(
+        user=user,
+        period_start=period_start,
+        period_end=period_end,
+        status=ReportStatus.CREATED,
+        payload=preview.payload,
+    )
+    telegram_result = send_message(chat_id=int(user.tg_chat_id), text=preview.text)
+
+    report.status = ReportStatus.SENT
+    report.sent_at = timezone.now()
+    report.save(update_fields=["status", "sent_at"])
+    return SentReportResult(report=report, preview=preview, telegram_result=telegram_result)
+
+
+def create_and_send_setup_verification_report(
+    *,
+    user: TgUser,
+    period_start,
+    period_end,
+    provider_fetch_cache: ProviderFetchCache | None = None,
+) -> SentReportResult:
+    preview = build_setup_verification_preview(
+        user=user,
+        period_end=period_end,
+        provider_fetch_cache=provider_fetch_cache,
+    )
     report = Report.objects.create(
         user=user,
         period_start=period_start,
