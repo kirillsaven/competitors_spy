@@ -320,7 +320,7 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
                 handle="reelhub",
                 url="https://www.instagram.com/reelhub/",
                 display_name="Reel Hub",
-                description="teacher reels",
+                description="english teacher reels",
                 query_hits={"english teachers"},
             ),
             platform_onboarding._DiscoveryCandidate(
@@ -344,7 +344,7 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
                 handle="teachertok",
                 url="https://www.tiktok.com/@teachertok",
                 display_name="TeacherTok",
-                description="short lessons",
+                description="english short lessons",
                 query_hits={"english teachers"},
             ),
             platform_onboarding._DiscoveryCandidate(
@@ -371,7 +371,7 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
                             "id": "reel-1",
                             "productType": "clips",
                             "url": "https://www.instagram.com/reel/reel-1/",
-                            "caption": "Teacher reel",
+                            "caption": "English teacher reel",
                             "timestamp": "2024-07-03T10:30:00.000Z",
                             "videoViewCount": 2400,
                         }
@@ -400,7 +400,7 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
             return [
                 {
                     "id": "vid-1",
-                    "text": "Short lesson",
+                    "text": "english teacher short lesson",
                     "createTimeISO": "2024-04-03T14:22:40.000Z",
                     "authorMeta": {"id": "auth-1", "name": "teachertok", "nickName": "TeacherTok"},
                     "webVideoUrl": "https://www.tiktok.com/@teachertok/video/vid-1",
@@ -443,6 +443,149 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
     ]
 
 
+def test_discover_competitors_for_onboarding_rejects_offtopic_education_channels_for_english_niche(monkeypatch):
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_discover_youtube_search_candidates",
+        lambda **kwargs: [
+            platform_onboarding._DiscoveryCandidate(
+                platform=Platform.YOUTUBE,
+                external_id="yt-english",
+                handle="englishnotes",
+                url="https://www.youtube.com/@englishnotes",
+                display_name="English Notes",
+                description="lesson plans for english teachers",
+                query_hits={"english teachers", "lesson plans"},
+                metadata={"rank_hint": 5000},
+            ),
+            platform_onboarding._DiscoveryCandidate(
+                platform=Platform.YOUTUBE,
+                external_id="yt-history",
+                handle="historyege",
+                url="https://www.youtube.com/@historyege",
+                display_name="History EGE",
+                description="егэ по истории и обществознанию",
+                query_hits={"english teachers"},
+                metadata={"rank_hint": 9000},
+            ),
+        ],
+    )
+    monkeypatch.setattr(platform_onboarding, "_search_instagram_candidates_raw", lambda **kwargs: [])
+    monkeypatch.setattr(platform_onboarding, "_search_tiktok_candidates_raw", lambda **kwargs: [])
+
+    calls = {"youtube": 0}
+
+    def fake_recent_youtube_short_texts(*, candidate, n, context=None):
+        calls["youtube"] += 1
+        if candidate.external_id == "yt-english":
+            return ["english teacher lesson plans", "worksheet ideas for english tutors"]
+        return ["разбор егэ по истории", "история россии для егэ"]
+
+    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_texts", fake_recent_youtube_short_texts)
+
+    outcome = platform_onboarding.discover_competitors_for_onboarding(
+        keywords=["english teachers", "lesson plans"],
+        seed=_seed(
+            platform=Platform.INSTAGRAM,
+            external_id="ig-seed",
+            handle="creator",
+            title="Creator",
+            description="English teacher",
+            url="https://www.instagram.com/creator/",
+        ),
+        competitors=[],
+        linked_accounts=[],
+        max_youtube_search_calls=1,
+        max_candidates_per_platform=20,
+    )
+
+    assert [(candidate.platform, candidate.external_id) for candidate in outcome.candidates] == [
+        (Platform.YOUTUBE, "yt-english"),
+    ]
+    assert calls == {"youtube": 1}
+
+
+def test_candidate_survives_only_if_recent_short_form_content_matches_niche(monkeypatch):
+    candidate = platform_onboarding._DiscoveryCandidate(
+        platform=Platform.YOUTUBE,
+        external_id="yt-1",
+        handle="teacherhub",
+        url="https://www.youtube.com/@teacherhub",
+        display_name="Teacher Hub",
+        description="lesson planning for english teachers",
+        query_hits={"english teachers", "lesson plans"},
+        metadata={"rank_hint": 1000},
+    )
+
+    def fake_recent_youtube_short_texts(*, candidate, n, context=None):
+        return ["history exam tips", "егэ по истории"]
+
+    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_texts", fake_recent_youtube_short_texts)
+
+    validated, reason = platform_onboarding._collector_aware_candidates(
+        platform=Platform.YOUTUBE,
+        candidates=[candidate],
+        keywords=["english teachers", "lesson plans"],
+        max_candidates=20,
+        context=None,
+    )
+
+    assert validated == []
+    assert "recent Shorts по теме" in reason
+
+
+def test_retry_cache_reuses_youtube_collectible_probe_across_setup_retries(monkeypatch):
+    clear_retry_cache()
+    calls = {"youtube": 0}
+
+    class FakeClient:
+        def channels_list(self, *, part, ids=None, for_handle=None):
+            assert ids == ["yt-1"]
+            return [{"id": "yt-1", "contentDetails": {"relatedPlaylists": {"uploads": "UU1"}}}]
+
+        def playlist_items(self, *, playlist_id, max_results):
+            return [
+                {"contentDetails": {"videoId": "short-1"}},
+                {"contentDetails": {"videoId": "short-2"}},
+            ]
+
+        def videos_list(self, *, ids, part):
+            calls["youtube"] += 1
+            return [
+                {
+                    "id": "short-1",
+                    "snippet": {"title": "English lesson plan", "publishedAt": "2026-03-20T12:00:00Z"},
+                    "contentDetails": {"duration": "PT45S"},
+                },
+                {
+                    "id": "short-2",
+                    "snippet": {"title": "Teacher worksheet ideas", "publishedAt": "2026-03-20T12:05:00Z"},
+                    "contentDetails": {"duration": "PT52S"},
+                },
+            ]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(platform_onboarding, "get_youtube_client", lambda: FakeClient())
+    candidate = platform_onboarding._DiscoveryCandidate(
+        platform=Platform.YOUTUBE,
+        external_id="yt-1",
+        handle="teacherhub",
+        url="https://www.youtube.com/@teacherhub",
+        display_name="Teacher Hub",
+        description="lesson planning for english teachers",
+        query_hits={"english teachers"},
+    )
+
+    first = platform_onboarding._fetch_recent_youtube_short_texts(candidate=candidate, n=3, context=None)
+    second = platform_onboarding._fetch_recent_youtube_short_texts(candidate=candidate, n=3, context=None)
+
+    assert first == ["English lesson plan", "Teacher worksheet ideas"]
+    assert second == first
+    assert calls == {"youtube": 1}
+
+
 def test_discover_competitors_for_onboarding_preserves_manual_competitors_as_query_and_ranking_hints(monkeypatch):
     seen_competitors: list[SeedResolution] = []
 
@@ -474,6 +617,7 @@ def test_discover_competitors_for_onboarding_preserves_manual_competitors_as_que
     monkeypatch.setattr(platform_onboarding, "_discover_youtube_search_candidates", fake_youtube_search)
     monkeypatch.setattr(platform_onboarding, "_search_instagram_candidates_raw", lambda **kwargs: [])
     monkeypatch.setattr(platform_onboarding, "_search_tiktok_candidates_raw", lambda **kwargs: [])
+    monkeypatch.setattr(platform_onboarding, "_collector_aware_candidates", lambda **kwargs: (kwargs["candidates"], ""))
 
     competitors = [
         _seed(

@@ -176,12 +176,17 @@ def test_build_setup_verification_preview_keeps_all_three_collectible_sections(m
 
     def fake_refresh_competitor(*, competitor, mode, captured_at, provider_fetch_cache=None):
         content_type = {"youtube": "short", "tiktok": "video", "instagram": "reel"}[competitor.platform]
+        titles = {
+            "youtube": "English teacher lesson plans",
+            "tiktok": "English tutor worksheet ideas",
+            "instagram": "Reels for english teachers",
+        }
         return [
             SimpleNamespace(
                 id=100 + competitor.id,
                 platform=competitor.platform,
                 external_id=f"item-{competitor.id}",
-                title=f"{competitor.display_name} item",
+                title=titles[competitor.platform],
                 url=f"https://example.com/{competitor.platform}/{competitor.id}",
                 published_at=datetime(2026, 3, 24, 10, 0, tzinfo=UTC),
                 competitor=competitor,
@@ -202,5 +207,6 @@ def test_build_setup_verification_preview_keeps_all_three_collectible_sections(m
     assert sections["instagram"]["successful_competitors"] == 1
     assert sections["youtube"]["examples"][0]["content_type"] == "short"
     assert sections["instagram"]["examples"][0]["content_type"] == "reel"
-    assert "YT Hub item [Shorts]" in preview.text
-    assert "IG Hub item [Reels]" in preview.text
+    assert "English teacher lesson plans [Shorts]" in preview.text
+    assert "English tutor worksheet ideas" in preview.text
+    assert "Reels for english teachers [Reels]" in preview.text

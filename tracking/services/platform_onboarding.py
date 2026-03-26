@@ -19,7 +19,7 @@ from tracking.adapters.tiktok import (
     build_profile_url as build_tiktok_profile_url,
     item_to_video_details,
 )
-from tracking.adapters.youtube import YouTubeApiError
+from tracking.adapters.youtube import YouTubeApiError, playlist_items_to_video_ids, video_items_to_details
 from tracking.models import Platform
 from tracking.services.provider_config import get_instagram_apify_config, get_tiktok_apify_config
 from tracking.services.setup_retry_cache import get_cached_retry_value, store_retry_value
@@ -141,14 +141,47 @@ _DISCOVERY_INITIAL_QUERY_BUDGET = {
     Platform.TIKTOK: 1,
 }
 _DISCOVERY_RESULT_BUDGET = {
-    Platform.YOUTUBE: 4,
-    Platform.INSTAGRAM: 4,
-    Platform.TIKTOK: 4,
+    Platform.YOUTUBE: 3,
+    Platform.INSTAGRAM: 3,
+    Platform.TIKTOK: 3,
 }
-_DISCOVERY_EARLY_STOP_CANDIDATES = 4
+_DISCOVERY_EARLY_STOP_CANDIDATES = 3
 _DISCOVERY_VALIDATION_BUDGET = {
-    Platform.INSTAGRAM: 2,
-    Platform.TIKTOK: 2,
+    Platform.YOUTUBE: 1,
+    Platform.INSTAGRAM: 1,
+    Platform.TIKTOK: 1,
+}
+_GENERIC_DISCOVERY_STEMS = {
+    "coach",
+    "course",
+    "ege",
+    "education",
+    "educat",
+    "learn",
+    "lesson",
+    "mentor",
+    "oge",
+    "online",
+    "prep",
+    "school",
+    "student",
+    "study",
+    "teach",
+    "teacher",
+    "tutor",
+    "егэ",
+    "занят",
+    "обуч",
+    "огэ",
+    "онлайн",
+    "преподав",
+    "репетитор",
+    "студент",
+    "урок",
+    "учеб",
+    "ученик",
+    "учител",
+    "школ",
 }
 
 
@@ -547,6 +580,117 @@ def _query_stems(query: str) -> set[str]:
     return _token_stems(query)
 
 
+def _theme_token_stems(*values: str | None) -> set[str]:
+    excluded = set(_GENERIC_QUERY_TOKENS) - {"english"}
+    stems: set[str] = set()
+    for value in values:
+        for token in _TOKEN_RE.findall(str(value or "")):
+            norm = _normalize_token(token)
+            if len(norm) < 3 or norm in excluded:
+                continue
+            stems.add(_stem_token(norm))
+    return stems
+
+
+def _theme_phrase_stems(keywords: list[str]) -> list[tuple[set[str], set[str]]]:
+    phrases: list[tuple[set[str], set[str]]] = []
+    seen: set[tuple[str, ...]] = set()
+    for query in _search_queries(keywords, max_queries=8):
+        full_stems = _theme_token_stems(query)
+        if not full_stems:
+            continue
+        specific_stems = {stem for stem in full_stems if stem not in _GENERIC_DISCOVERY_STEMS}
+        normalized = tuple(sorted(specific_stems or full_stems))
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        phrases.append((full_stems, specific_stems or full_stems))
+    return phrases
+
+
+def _strong_phrase_overlap(stems: set[str], phrase_stems: set[str]) -> int:
+    if not stems or not phrase_stems:
+        return 0
+    overlap = len(stems & phrase_stems)
+    if overlap <= 0:
+        return 0
+    if len(phrase_stems) <= 1:
+        return 1 if overlap >= 1 else 0
+    required = min(2, len(phrase_stems))
+    if overlap >= required or (overlap / float(len(phrase_stems))) >= 0.75:
+        return overlap
+    return 0
+
+
+def _theme_specific_stems(keywords: list[str]) -> set[str]:
+    out: set[str] = set()
+    for _full, specific in _theme_phrase_stems(keywords):
+        out |= specific
+    return out
+
+
+def _theme_agreement_metrics(*, texts: list[str], keywords: list[str]) -> dict[str, int]:
+    phrase_defs = _theme_phrase_stems(keywords)
+    if not phrase_defs:
+        return {
+            "full_overlap": 0,
+            "specific_overlap": 0,
+            "matched_phrases": 0,
+            "strong_text_matches": 0,
+        }
+
+    text_stem_sets = [_theme_token_stems(text) for text in texts if str(text or "").strip()]
+    union_stems: set[str] = set()
+    for stems in text_stem_sets:
+        union_stems |= stems
+
+    matched_phrases = 0
+    specific_overlap = 0
+    full_overlap = 0
+    for full_stems, specific_stems in phrase_defs:
+        if _strong_phrase_overlap(union_stems, specific_stems):
+            matched_phrases += 1
+        specific_overlap += len(union_stems & specific_stems)
+        full_overlap += len(union_stems & full_stems)
+
+    strong_text_matches = 0
+    for stems in text_stem_sets:
+        if any(_strong_phrase_overlap(stems, specific_stems) for _, specific_stems in phrase_defs):
+            strong_text_matches += 1
+
+    return {
+        "full_overlap": full_overlap,
+        "specific_overlap": specific_overlap,
+        "matched_phrases": matched_phrases,
+        "strong_text_matches": strong_text_matches,
+    }
+
+
+def _theme_profile_passes(*, candidate: _DiscoveryCandidate, keywords: list[str]) -> bool:
+    texts = [
+        str(candidate.display_name or "").strip(),
+        str(candidate.description or "").strip(),
+        str(candidate.handle or "").strip(),
+    ]
+    metrics = _theme_agreement_metrics(texts=texts, keywords=keywords)
+    candidate.metadata["profile_theme_score"] = (
+        metrics["matched_phrases"] * 3 + metrics["specific_overlap"] + metrics["strong_text_matches"]
+    )
+    candidate.metadata["profile_theme_matches"] = metrics["matched_phrases"]
+    candidate.metadata["profile_theme_specific_overlap"] = metrics["specific_overlap"]
+    return metrics["matched_phrases"] >= 1 or metrics["specific_overlap"] >= 2
+
+
+def _theme_content_passes(*, candidate: _DiscoveryCandidate, texts: list[str], keywords: list[str]) -> bool:
+    metrics = _theme_agreement_metrics(texts=texts, keywords=keywords)
+    candidate.metadata["content_theme_score"] = (
+        metrics["matched_phrases"] * 4 + metrics["specific_overlap"] + metrics["strong_text_matches"] * 2
+    )
+    candidate.metadata["content_theme_matches"] = metrics["matched_phrases"]
+    candidate.metadata["content_theme_specific_overlap"] = metrics["specific_overlap"]
+    return metrics["matched_phrases"] >= 1 and metrics["strong_text_matches"] >= 1
+
+
 def _candidate_search_overlap(candidate: _DiscoveryCandidate) -> int:
     candidate_stems = _token_stems(candidate.handle, candidate.display_name, candidate.description)
     overlap = 0
@@ -566,6 +710,8 @@ def _score_candidate(candidate: _DiscoveryCandidate) -> float:
     competitor_overlap_bonus = float(candidate.metadata.get("competitor_overlap") or 0) * 1.8
     collectible_count_bonus = min(int(candidate.metadata.get("collectible_count") or 0), 3) * 3.0
     collectible_views_bonus = min(int(candidate.metadata.get("collectible_views") or 0), 1_000_000) / 250_000
+    profile_theme_bonus = float(candidate.metadata.get("profile_theme_score") or 0) * 2.0
+    content_theme_bonus = float(candidate.metadata.get("content_theme_score") or 0) * 2.4
     return (
         query_repeat_bonus
         + overlap_bonus
@@ -576,6 +722,8 @@ def _score_candidate(candidate: _DiscoveryCandidate) -> float:
         + competitor_overlap_bonus
         + collectible_count_bonus
         + collectible_views_bonus
+        + profile_theme_bonus
+        + content_theme_bonus
     )
 
 
@@ -749,24 +897,216 @@ def _mark_candidate_collectible(candidate: _DiscoveryCandidate, *, item_count: i
     candidate.metadata["collectible_views"] = max(0, int(max_views))
 
 
+def _get_cached_collectible_texts(
+    *,
+    platform: str,
+    external_id: str,
+    handle: str | None,
+    n: int,
+    context: SetupRunContext | None = None,
+) -> list[str] | None:
+    cache_key = _recent_cache_key(platform, external_id, handle, n)
+    if context is not None and cache_key in context.recent_content_cache:
+        return list(context.recent_content_cache[cache_key])
+    retry_cached, retry_found = get_cached_retry_value(_retry_cache_key(layer="collectible-texts", key=cache_key))
+    if retry_found and isinstance(retry_cached, list):
+        if context is not None:
+            context.recent_content_cache[cache_key] = list(retry_cached)
+        return list(retry_cached)
+    return None
+
+
+def _store_cached_collectible_texts(
+    *,
+    platform: str,
+    external_id: str,
+    handle: str | None,
+    n: int,
+    texts: list[str],
+    context: SetupRunContext | None = None,
+) -> list[str]:
+    cache_key = _recent_cache_key(platform, external_id, handle, n)
+    normalized = [str(text) for text in texts if str(text or "").strip()]
+    if context is not None:
+        context.recent_content_cache[cache_key] = list(normalized)
+    store_retry_value(_retry_cache_key(layer="collectible-texts", key=cache_key), list(normalized))
+    return normalized
+
+
+def _fetch_recent_youtube_short_texts(
+    *,
+    candidate: _DiscoveryCandidate,
+    n: int,
+    context: SetupRunContext | None = None,
+) -> list[str]:
+    cached = _get_cached_collectible_texts(
+        platform=Platform.YOUTUBE,
+        external_id=candidate.external_id,
+        handle=candidate.handle,
+        n=n,
+        context=context,
+    )
+    if cached is not None:
+        return cached
+
+    client = get_youtube_client()
+    try:
+        items = client.channels_list(part="contentDetails", ids=[candidate.external_id])
+        if not items:
+            return _store_cached_collectible_texts(
+                platform=Platform.YOUTUBE,
+                external_id=candidate.external_id,
+                handle=candidate.handle,
+                n=n,
+                texts=[],
+                context=context,
+            )
+        uploads = ((items[0].get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads")
+        if not uploads:
+            return _store_cached_collectible_texts(
+                platform=Platform.YOUTUBE,
+                external_id=candidate.external_id,
+                handle=candidate.handle,
+                n=n,
+                texts=[],
+                context=context,
+            )
+        playlist_items = client.playlist_items(playlist_id=str(uploads), max_results=max(6, n * 3))
+        video_ids = playlist_items_to_video_ids(playlist_items)
+        if not video_ids:
+            return _store_cached_collectible_texts(
+                platform=Platform.YOUTUBE,
+                external_id=candidate.external_id,
+                handle=candidate.handle,
+                n=n,
+                texts=[],
+                context=context,
+            )
+        video_items = client.videos_list(ids=video_ids[: max(6, n * 3)], part="snippet,contentDetails")
+        texts = [
+            str(detail.title or "").strip()
+            for detail in video_items_to_details(video_items)
+            if detail.duration_seconds is not None and detail.duration_seconds <= 60 and str(detail.title or "").strip()
+        ][:n]
+        return _store_cached_collectible_texts(
+            platform=Platform.YOUTUBE,
+            external_id=candidate.external_id,
+            handle=candidate.handle,
+            n=n,
+            texts=texts,
+            context=context,
+        )
+    finally:
+        client.close()
+
+
+def _fetch_recent_instagram_reel_texts(
+    *,
+    candidate: _DiscoveryCandidate,
+    n: int,
+    context: SetupRunContext | None = None,
+) -> tuple[list[str], list[int]]:
+    cached = _get_cached_collectible_texts(
+        platform=Platform.INSTAGRAM,
+        external_id=candidate.external_id,
+        handle=candidate.handle,
+        n=n,
+        context=context,
+    )
+    if cached is not None:
+        return cached, []
+
+    lookup = str(candidate.url or candidate.handle or candidate.external_id or "").strip()
+    profiles = fetch_instagram_profiles_cached(inputs=[lookup], context=context)
+    if not profiles:
+        texts = _store_cached_collectible_texts(
+            platform=Platform.INSTAGRAM,
+            external_id=candidate.external_id,
+            handle=candidate.handle,
+            n=n,
+            texts=[],
+            context=context,
+        )
+        return texts, []
+    details = profile_to_video_details(profiles[0])
+    texts = [
+        str(item.description or item.title or "").strip()
+        for item in details[:n]
+        if str(item.description or item.title or "").strip()
+    ]
+    texts = _store_cached_collectible_texts(
+        platform=Platform.INSTAGRAM,
+        external_id=candidate.external_id,
+        handle=candidate.handle,
+        n=n,
+        texts=texts,
+        context=context,
+    )
+    return texts, [int(item.views or 0) for item in details]
+
+
+def _fetch_recent_tiktok_texts(
+    *,
+    candidate: _DiscoveryCandidate,
+    n: int,
+    context: SetupRunContext | None = None,
+) -> tuple[list[str], list[int]]:
+    cached = _get_cached_collectible_texts(
+        platform=Platform.TIKTOK,
+        external_id=candidate.external_id,
+        handle=candidate.handle,
+        n=n,
+        context=context,
+    )
+    if cached is not None:
+        return cached, []
+
+    handle = str(candidate.handle or "").strip()
+    items = fetch_tiktok_profile_feed_cached(handle=handle, results_per_page=max(1, n), context=context)
+    details = [item_to_video_details(item) for item in items]
+    details = [item for item in details if int(item.views or 0) > 0]
+    texts = [
+        str(item.description or item.title or "").strip()
+        for item in details[:n]
+        if str(item.description or item.title or "").strip()
+    ]
+    texts = _store_cached_collectible_texts(
+        platform=Platform.TIKTOK,
+        external_id=candidate.external_id,
+        handle=candidate.handle,
+        n=n,
+        texts=texts,
+        context=context,
+    )
+    return texts, [int(item.views or 0) for item in details]
+
+
+def _fetch_candidate_collectible_texts(
+    *,
+    candidate: _DiscoveryCandidate,
+    context: SetupRunContext | None = None,
+) -> tuple[list[str], list[int]]:
+    if candidate.platform == Platform.YOUTUBE:
+        return _fetch_recent_youtube_short_texts(candidate=candidate, n=3, context=context), []
+    if candidate.platform == Platform.INSTAGRAM:
+        return _fetch_recent_instagram_reel_texts(candidate=candidate, n=3, context=context)
+    if candidate.platform == Platform.TIKTOK:
+        return _fetch_recent_tiktok_texts(candidate=candidate, n=3, context=context)
+    return [], []
+
+
 def _validate_instagram_candidate_collectible(
     *,
     candidate: _DiscoveryCandidate,
     context: SetupRunContext | None = None,
 ) -> bool:
-    lookup = str(candidate.url or candidate.handle or candidate.external_id or "").strip()
-    if not lookup:
-        return False
-    profiles = fetch_instagram_profiles_cached(inputs=[lookup], context=context)
-    if not profiles:
-        return False
-    details = profile_to_video_details(profiles[0])
-    if not details:
+    texts, views = _fetch_recent_instagram_reel_texts(candidate=candidate, n=3, context=context)
+    if not texts:
         return False
     _mark_candidate_collectible(
         candidate,
-        item_count=len(details),
-        max_views=max(int(item.views or 0) for item in details),
+        item_count=len(texts),
+        max_views=max(views) if views else 0,
     )
     return True
 
@@ -776,18 +1116,29 @@ def _validate_tiktok_candidate_collectible(
     candidate: _DiscoveryCandidate,
     context: SetupRunContext | None = None,
 ) -> bool:
-    handle = str(candidate.handle or "").strip()
-    if not handle:
-        return False
-    items = fetch_tiktok_profile_feed_cached(handle=handle, results_per_page=2, context=context)
-    details = [item_to_video_details(item) for item in items]
-    details = [item for item in details if int(item.views or 0) > 0]
-    if not details:
+    texts, views = _fetch_recent_tiktok_texts(candidate=candidate, n=3, context=context)
+    if not texts:
         return False
     _mark_candidate_collectible(
         candidate,
-        item_count=len(details),
-        max_views=max(int(item.views or 0) for item in details),
+        item_count=len(texts),
+        max_views=max(views) if views else 0,
+    )
+    return True
+
+
+def _validate_youtube_candidate_collectible(
+    *,
+    candidate: _DiscoveryCandidate,
+    context: SetupRunContext | None = None,
+) -> bool:
+    texts = _fetch_recent_youtube_short_texts(candidate=candidate, n=3, context=context)
+    if not texts:
+        return False
+    _mark_candidate_collectible(
+        candidate,
+        item_count=len(texts),
+        max_views=0,
     )
     return True
 
@@ -796,30 +1147,48 @@ def _collector_aware_candidates(
     *,
     platform: str,
     candidates: list[_DiscoveryCandidate],
+    keywords: list[str],
     max_candidates: int,
     context: SetupRunContext | None = None,
 ) -> tuple[list[_DiscoveryCandidate], str]:
-    if platform not in {Platform.INSTAGRAM, Platform.TIKTOK} or not candidates:
+    if platform not in {Platform.YOUTUBE, Platform.INSTAGRAM, Platform.TIKTOK} or not candidates:
         return candidates, ""
-
-    validator = (
-        _validate_instagram_candidate_collectible
-        if platform == Platform.INSTAGRAM
-        else _validate_tiktok_candidate_collectible
+    strong_profile_candidates = [candidate for candidate in candidates if _theme_profile_passes(candidate=candidate, keywords=keywords)]
+    if not strong_profile_candidates:
+        return [], "поиск выполнен, но кандидаты не совпали с темой ниши на уровне профиля."
+    strong_profile_candidates = sorted(
+        strong_profile_candidates,
+        key=lambda item: (-_score_candidate(item), -len(item.query_hits), item.sort_tiebreak),
     )
-    budget = min(len(candidates), max(1, _DISCOVERY_VALIDATION_BUDGET.get(platform, 1)))
+
+    budget = min(len(strong_profile_candidates), max(1, _DISCOVERY_VALIDATION_BUDGET.get(platform, 1)))
     validated: list[_DiscoveryCandidate] = []
-    for candidate in candidates[:budget]:
-        if validator(candidate=candidate, context=context):
-            validated.append(candidate)
+    for candidate in strong_profile_candidates[:budget]:
+        texts, views = _fetch_candidate_collectible_texts(candidate=candidate, context=context)
+        if not texts:
+            continue
+        _mark_candidate_collectible(
+            candidate,
+            item_count=len(texts),
+            max_views=max(views) if views else 0,
+        )
+        if not _theme_content_passes(candidate=candidate, texts=texts, keywords=keywords):
+            continue
+        validated.append(candidate)
         if len(validated) >= min(max_candidates, _DISCOVERY_EARLY_STOP_CANDIDATES):
             break
     if validated:
-        return validated, ""
+        ranked = sorted(
+            validated,
+            key=lambda item: (-_score_candidate(item), -len(item.query_hits), item.sort_tiebreak),
+        )
+        return ranked[:max_candidates], ""
 
+    if platform == Platform.YOUTUBE:
+        return [], "поиск выполнен, но топ-кандидаты не прошли проверку recent Shorts по теме."
     if platform == Platform.INSTAGRAM:
-        return [], "поиск выполнен, но топ-кандидаты не прошли быструю проверку сбором reels."
-    return [], "поиск выполнен, но топ-кандидаты не прошли быструю проверку сбором коротких TikTok-видео."
+        return [], "поиск выполнен, но топ-кандидаты не прошли проверку reels по теме."
+    return [], "поиск выполнен, но топ-кандидаты не прошли проверку recent TikTok-видео по теме."
 
 
 def get_recent_seed_content_texts(
@@ -1269,11 +1638,12 @@ def discover_competitors_for_onboarding(
     for platform in (Platform.YOUTUBE, Platform.INSTAGRAM, Platform.TIKTOK):
         if platform in errored_platforms:
             continue
-        if platform in {Platform.INSTAGRAM, Platform.TIKTOK}:
+        if platform in {Platform.YOUTUBE, Platform.INSTAGRAM, Platform.TIKTOK}:
             try:
                 validated_candidates, empty_reason = _collector_aware_candidates(
                     platform=platform,
                     candidates=candidates_by_platform[platform],
+                    keywords=keywords,
                     max_candidates=max_candidates_per_platform,
                     context=context,
                 )
