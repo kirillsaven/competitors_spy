@@ -274,28 +274,50 @@ def _candidate_display_name(c: dict) -> str:
 def _build_prune_text(
     *,
     selected_total: int,
-    total: int,
     selected_by_platform: dict[str, int],
-    total_by_platform: dict[str, int],
     limit: int,
     discovery_notes: list[str],
 ) -> str:
+    total_limit = limit * 3
     lines = [
         "Нашел конкурентов.",
         "Нажимай на профили, чтобы исключить лишних. По умолчанию выбраны все.",
-        f"Выбрано всего: {selected_total}/{total}.",
-        f"YouTube: {selected_by_platform.get(Platform.YOUTUBE, 0)}/{total_by_platform.get(Platform.YOUTUBE, 0)} (лимит {limit}).",
-        f"TikTok: {selected_by_platform.get(Platform.TIKTOK, 0)}/{total_by_platform.get(Platform.TIKTOK, 0)}.",
-        f"Instagram: {selected_by_platform.get(Platform.INSTAGRAM, 0)}/{total_by_platform.get(Platform.INSTAGRAM, 0)}.",
+        f"Выбрано всего: {selected_total}/{total_limit}.",
+        f"YouTube: {selected_by_platform.get(Platform.YOUTUBE, 0)}/{limit}.",
+        f"TikTok: {selected_by_platform.get(Platform.TIKTOK, 0)}/{limit}.",
+        f"Instagram: {selected_by_platform.get(Platform.INSTAGRAM, 0)}/{limit}.",
     ]
-    selected_youtube = selected_by_platform.get(Platform.YOUTUBE, 0)
-    if selected_youtube > limit:
-        lines.append(f"Нужно исключить YouTube-конкурентов еще: {selected_youtube - limit}.")
+    for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM):
+        selected = selected_by_platform.get(platform, 0)
+        if selected > limit:
+            lines.append(f"Нужно исключить {_platform_label(platform)}-конкурентов еще: {selected - limit}.")
     if discovery_notes:
         lines.append("")
         lines.extend(discovery_notes)
     lines.append("Когда готово, нажми «Готово».")
     return "\n".join(lines)
+
+
+def _selected_counts_by_platform(*, candidates: list[dict], excluded: set[int]) -> dict[str, int]:
+    return {
+        platform: sum(
+            1
+            for idx, candidate in enumerate(candidates)
+            if idx not in excluded and str(candidate.get("platform") or "") == platform
+        )
+        for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)
+    }
+
+
+def _quota_error_text(*, selected_by_platform: dict[str, int], limit: int) -> str | None:
+    overflow: list[str] = []
+    for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM):
+        selected = selected_by_platform.get(platform, 0)
+        if selected > limit:
+            overflow.append(f"{_platform_label(platform)}: исключи еще {selected - limit}")
+    if not overflow:
+        return None
+    return "Слишком много выбранных конкурентов.\n" + "\n".join(overflow)
 
 
 def _build_keywords_edit_text(*, keywords: list[str], excluded: set[str]) -> str:
@@ -1132,16 +1154,10 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
     excluded: set[int] = set()
     competitor_rows = [(i, _candidate_display_name(c)) for i, c in enumerate(candidates)]
     selected_total = len(candidates) - len(excluded)
-    total_by_platform = {
-        platform: sum(1 for c in candidates if str(c.get("platform") or "") == platform)
-        for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)
-    }
-    selected_by_platform = dict(total_by_platform)
+    selected_by_platform = _selected_counts_by_platform(candidates=candidates, excluded=excluded)
     text = _build_prune_text(
         selected_total=selected_total,
-        total=len(candidates),
         selected_by_platform=selected_by_platform,
-        total_by_platform=total_by_platform,
         limit=limit,
         discovery_notes=discovery_notes,
     )
@@ -1214,14 +1230,10 @@ async def on_prune_done(cb: CallbackQuery, state: FSMContext) -> None:
         return
 
     limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
-    selected_youtube = sum(
-        1 for i in selected_indices if str((candidates[i] or {}).get("platform") or "") == Platform.YOUTUBE
-    )
-    if selected_youtube > limit:
-        await cb.answer(
-            f"Слишком много YouTube-конкурентов. Исключи еще: {selected_youtube - limit}.",
-            show_alert=True,
-        )
+    selected_by_platform = _selected_counts_by_platform(candidates=candidates, excluded=excluded)
+    quota_error = _quota_error_text(selected_by_platform=selected_by_platform, limit=limit)
+    if quota_error:
+        await cb.answer(quota_error, show_alert=True)
         return
 
     await db_run(lambda: UserCompetitor.objects.filter(user=user).update(is_active=False))
@@ -1253,23 +1265,10 @@ async def _render_prune(message: Message, state: FSMContext) -> None:
     limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
     competitor_rows = [(i, _candidate_display_name(c)) for i, c in enumerate(candidates)]
     selected_total = len(candidates) - len(excluded)
-    total_by_platform = {
-        platform: sum(1 for c in candidates if str(c.get("platform") or "") == platform)
-        for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)
-    }
-    selected_by_platform = {
-        platform: sum(
-            1
-            for idx, candidate in enumerate(candidates)
-            if idx not in excluded and str(candidate.get("platform") or "") == platform
-        )
-        for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)
-    }
+    selected_by_platform = _selected_counts_by_platform(candidates=candidates, excluded=excluded)
     text = _build_prune_text(
         selected_total=selected_total,
-        total=len(candidates),
         selected_by_platform=selected_by_platform,
-        total_by_platform=total_by_platform,
         limit=limit,
         discovery_notes=discovery_notes,
     )
@@ -1577,4 +1576,4 @@ async def _finalize_schedule(message: Message, state: FSMContext) -> None:
         "Сейчас соберу первый отчет, чтобы все проверить.",
     )
 
-    run_user_report_now.delay(user.id)
+    run_user_report_now.delay(user.id, "setup")

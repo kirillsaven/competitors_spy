@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 from common.time import format_dt_local, format_timezone_label
@@ -7,6 +8,8 @@ from common.time import format_dt_local, format_timezone_label
 from tracking.models import Platform
 from tracking.services.scoring import ScoredItem
 
+
+TELEGRAM_TEXT_LIMIT = 4096
 
 PLATFORM_SECTION_ORDER = [
     Platform.YOUTUBE,
@@ -59,7 +62,18 @@ def build_report_payload(*, scored: list[ScoredItem], period_start: datetime, pe
     }
 
 
+def build_setup_verification_payload(*, generated_at: datetime, sections: list[dict]) -> dict:
+    return {
+        "report_kind": "setup_verification",
+        "generated_at": generated_at.isoformat(),
+        "sections": sections,
+    }
+
+
 def render_report_text(*, payload: dict, timezone_str: str) -> str:
+    if str(payload.get("report_kind") or "") == "setup_verification":
+        return render_setup_verification_text(payload=payload)
+
     ps = payload.get("period_start")
     pe = payload.get("period_end")
     period_start = datetime.fromisoformat(ps.replace("Z", "+00:00")) if isinstance(ps, str) else None
@@ -105,6 +119,151 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
         empty_line="За этот период ничего не выбилось выше обычного.",
     )
     return "\n".join(lines).rstrip() + "\n"
+
+
+def split_telegram_text(*, text: str, max_len: int = TELEGRAM_TEXT_LIMIT) -> list[str]:
+    if len(text) <= max_len:
+        return [text]
+
+    chunks: list[str] = []
+    current = ""
+    for block in text.split("\n\n"):
+        candidate = block if not current else f"{current}\n\n{block}"
+        if len(candidate) <= max_len:
+            current = candidate
+            continue
+        if current:
+            chunks.append(current.rstrip() + "\n")
+            current = ""
+        if len(block) <= max_len:
+            current = block
+            continue
+        partial = ""
+        for line in block.splitlines():
+            candidate_line = line if not partial else f"{partial}\n{line}"
+            if len(candidate_line) <= max_len:
+                partial = candidate_line
+                continue
+            if partial:
+                chunks.append(partial.rstrip() + "\n")
+                partial = ""
+            if len(line) <= max_len:
+                partial = line
+                continue
+            start = 0
+            while start < len(line):
+                piece = line[start : start + max_len]
+                start += max_len
+                if len(piece) == max_len:
+                    chunks.append(piece.rstrip() + "\n")
+                else:
+                    partial = piece
+        current = partial
+    if current:
+        chunks.append(current.rstrip() + "\n")
+    return chunks
+
+
+def render_setup_verification_text(*, payload: dict) -> str:
+    generated_raw = payload.get("generated_at")
+    generated_at = datetime.fromisoformat(generated_raw.replace("Z", "+00:00")) if isinstance(generated_raw, str) else None
+    lines = ["Проверка настройки завершена"]
+    if generated_at is not None:
+        lines.append(f"Время: {generated_at.isoformat()}")
+
+    sections = {
+        str(section.get("platform") or ""): section
+        for section in (payload.get("sections") or [])
+        if isinstance(section, dict)
+    }
+    for platform in PLATFORM_SECTION_ORDER:
+        entries = list((sections.get(platform) or {}).get("entries") or [])
+        if not entries:
+            continue
+        lines.append("")
+        lines.append(f"{_platform_title(platform)}:")
+        for idx, entry in enumerate(entries, start=1):
+            lines.extend(_render_setup_competitor_block(index=idx, entry=entry))
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _platform_title(platform: str) -> str:
+    return {
+        Platform.YOUTUBE: "YouTube",
+        Platform.TIKTOK: "TikTok",
+        Platform.INSTAGRAM: "Instagram",
+    }.get(str(platform or ""), str(platform or "Platform"))
+
+
+def _render_setup_competitor_block(*, index: int, entry: dict) -> list[str]:
+    competitor = entry.get("competitor") or {}
+    latest_item = entry.get("latest_item") or {}
+    lines = [f"{index}) {competitor.get('display_name') or competitor.get('handle') or competitor.get('external_id') or 'Без названия'}"]
+    account_url = competitor.get("url") or ""
+    if account_url:
+        lines.append(str(account_url))
+    reason = str(entry.get("reason") or "").strip()
+    if reason:
+        lines.append(f"Причина: {reason}")
+        lines.append("")
+        return lines
+
+    lines.append(
+        "Среднее: "
+        f"{_format_decimal(entry.get('avg_views_per_hour'))} views/h | "
+        f"{_format_decimal(entry.get('avg_reactions_per_hour'))} reactions/h | "
+        f"ER {_format_percent(entry.get('avg_er'))} | "
+        f"virality {_format_decimal(entry.get('avg_virality'))}x"
+    )
+    lines.append(f"Последнее: {_clean_setup_title(str(latest_item.get('title') or 'Без названия'))}")
+    item_url = latest_item.get("url") or ""
+    if item_url:
+        lines.append(str(item_url))
+    lines.append(
+        f"Просмотры: {_format_int(latest_item.get('views'))} vs {_format_int(latest_item.get('avg_views_same_age'))} "
+        f"({_format_delta_pct(latest_item.get('views_delta_pct'))})"
+    )
+    lines.append(
+        f"Реакции: {_format_int(latest_item.get('reactions'))} vs {_format_int(latest_item.get('avg_reactions_same_age'))} "
+        f"({_format_delta_pct(latest_item.get('reactions_delta_pct'))})"
+    )
+    lines.append("")
+    return lines
+
+
+def _clean_setup_title(title: str) -> str:
+    text = re.sub(r"(?<!\S)#[^\s#]+", "", str(title or "")).strip()
+    text = re.sub(r"\s{2,}", " ", text)
+    return text or "Без названия"
+
+
+def _format_decimal(value: object) -> str:
+    try:
+        return f"{float(value):.1f}"
+    except Exception:
+        return "0.0"
+
+
+def _format_percent(value: object) -> str:
+    try:
+        return f"{float(value) * 100.0:.1f}%"
+    except Exception:
+        return "0.0%"
+
+
+def _format_delta_pct(value: object) -> str:
+    try:
+        return f"{float(value):+.1f}%"
+    except Exception:
+        return "0.0%"
+
+
+def _format_int(value: object) -> str:
+    try:
+        return str(int(value))
+    except Exception:
+        return "0"
 
 
 def _render_platform_section(

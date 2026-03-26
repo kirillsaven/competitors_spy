@@ -14,11 +14,16 @@ from tracking.models import (
     Competitor,
     JobRun,
     JobStatus,
+    Report,
     ReportStatus,
     Schedule,
     TgUser,
 )
-from tracking.services.report_pipeline import create_and_send_report, get_active_competitors
+from tracking.services.report_pipeline import (
+    create_and_send_report,
+    create_and_send_setup_verification_report,
+    get_active_competitors,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +32,13 @@ def _get_active_competitors(*, user: TgUser) -> list[Competitor]:
     return get_active_competitors(user=user)
 
 
-def _generate_and_send_report(*, user: TgUser, period_start, period_end):
+def _generate_and_send_report(*, user: TgUser, period_start, period_end, trigger: str = "manual"):
+    if trigger == "setup":
+        return create_and_send_setup_verification_report(
+            user=user,
+            period_start=period_start,
+            period_end=period_end,
+        ).report
     return create_and_send_report(user=user, period_start=period_start, period_end=period_end).report
 
 
@@ -144,7 +155,7 @@ def run_user_report(self, user_id: int) -> None:
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
-def run_user_report_now(self, user_id: int) -> None:
+def run_user_report_now(self, user_id: int, trigger: str = "manual") -> None:
     """
     Manual report trigger ("Отчет сейчас").
 
@@ -185,7 +196,7 @@ def run_user_report_now(self, user_id: int) -> None:
 
     report: Report | None = None
     try:
-        report = _generate_and_send_report(user=user, period_start=period_start, period_end=period_end)
+        report = _generate_and_send_report(user=user, period_start=period_start, period_end=period_end, trigger=trigger)
 
         with transaction.atomic():
             schedule = Schedule.objects.select_for_update().get(user=user)

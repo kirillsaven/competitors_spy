@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from django.test import override_settings
 
-from tracking.models import Competitor, Platform, TgUser, UserCompetitor
+from tracking.models import Competitor, Platform, Schedule, TgUser, UserCompetitor
+from tracking import tasks
 from tracking.tasks import _get_active_competitors
 
 
@@ -44,3 +47,31 @@ def test_get_active_competitors_respects_per_platform_cap(db):
         (Platform.YOUTUBE, "yt-1"),
         (Platform.TIKTOK, "tt-1"),
     ]
+
+
+def test_run_user_report_now_uses_setup_verification_path_for_setup_trigger(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=3, tg_chat_id=3)
+    Schedule.objects.create(user=user, is_enabled=True, times=["09:00"])
+    called = {}
+
+    monkeypatch.setattr(
+        tasks,
+        "create_and_send_setup_verification_report",
+        lambda *, user, period_start, period_end: (
+            called.setdefault("setup", {"user_id": user.id}),
+            SimpleNamespace(report=None),
+        )[1],
+    )
+    monkeypatch.setattr(
+        tasks,
+        "create_and_send_report",
+        lambda *, user, period_start, period_end: (
+            called.setdefault("regular", {"user_id": user.id}),
+            SimpleNamespace(report=None),
+        )[1],
+    )
+
+    tasks.run_user_report_now.run(user.id, "setup")
+
+    assert "setup" in called
+    assert "regular" not in called
