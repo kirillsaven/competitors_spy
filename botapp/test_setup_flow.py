@@ -484,6 +484,63 @@ def test_instagram_provider_failure_falls_back_to_manual_niche(monkeypatch):
 
 
 @pytest.mark.django_db
+def test_clean_handle_ambiguity_shows_selectable_cross_platform_candidates(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=607, tg_chat_id=607)
+    state = DummyState({"user_id": user.id, "setup_runtime_id": "run-handle"})
+    message = DummyMessage()
+    message.from_user = SimpleNamespace(id=user.tg_user_id)
+    message.text = "dariapancho"
+
+    monkeypatch.setattr(setup, "db_call", _db_call)
+    monkeypatch.setattr(setup, "db_run", _db_run)
+    monkeypatch.setattr(
+        setup,
+        "resolve_exact_seed",
+        lambda raw_input, context=None: (_ for _ in ()).throw(
+            setup.SeedResolveAmbiguity(
+                candidates=[
+                    SeedResolution(
+                        platform="instagram",
+                        external_id="ig-1",
+                        handle="dariapancho",
+                        url="https://www.instagram.com/dariapancho/",
+                        title="Daria Pancho",
+                        description="Instagram",
+                        uploads_playlist_id=None,
+                    ),
+                    SeedResolution(
+                        platform="youtube",
+                        external_id="yt-1",
+                        handle="dariapancho",
+                        url="https://www.youtube.com/@dariapancho",
+                        title="Daria Pancho",
+                        description="YouTube",
+                        uploads_playlist_id="UU1",
+                    ),
+                    SeedResolution(
+                        platform="tiktok",
+                        external_id="tt-1",
+                        handle="dariapancho",
+                        url="https://www.tiktok.com/@dariapancho",
+                        title="Daria Pancho",
+                        description="TikTok",
+                        uploads_playlist_id=None,
+                    ),
+                ]
+            )
+        ),
+    )
+
+    async_to_sync(setup.on_seed_input)(message, state)
+
+    assert state.state == SetupStates.PICK_SEED_CANDIDATE
+    assert "Нашел точные совпадения на нескольких платформах" in message.answers[-1]
+    assert [candidate["platform"] for candidate in state.data["seed_candidates"]] == ["instagram", "tiktok", "youtube"]
+    seed_profile = async_to_sync(sync_to_async(SeedProfile.objects.get, thread_sensitive=True))(user=user)
+    assert seed_profile.status == SeedStatus.PENDING
+
+
+@pytest.mark.django_db
 def test_start_discovery_continues_when_zero_platforms_available(monkeypatch):
     user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=707, tg_chat_id=707)
     state = DummyState(

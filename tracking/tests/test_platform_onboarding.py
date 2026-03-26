@@ -6,6 +6,7 @@ from tracking.adapters.base import SeedResolution
 from tracking.models import Platform
 from tracking.services import platform_onboarding
 from tracking.services import seed_resolver
+from tracking.services.setup_retry_cache import clear_retry_cache
 from tracking.services.setup_runtime import PLATFORM_STATE_UNAVAILABLE, SetupRunContext, get_platform_state
 
 
@@ -396,6 +397,7 @@ def test_discover_competitors_for_onboarding_respects_zero_youtube_search_calls(
 
 
 def test_setup_context_reuses_instagram_profile_between_seed_resolve_and_recent_content(monkeypatch):
+    clear_retry_cache()
     calls = {"profiles": 0}
     context = SetupRunContext()
 
@@ -483,6 +485,31 @@ def test_setup_context_reuses_instagram_search_query_results(monkeypatch):
 
     first = platform_onboarding._cached_instagram_search_results(query="english tutors", limit=5, context=context)
     second = platform_onboarding._cached_instagram_search_results(query="english tutors", limit=5, context=context)
+
+    assert [item["id"] for item in first] == ["ig-1", "ig-2"]
+    assert [item["id"] for item in second] == ["ig-1", "ig-2"]
+    assert calls == {"search": 1}
+
+
+def test_retry_cache_reuses_instagram_search_results_across_setup_retries(monkeypatch):
+    clear_retry_cache()
+    calls = {"search": 0}
+
+    class FakeClient:
+        def search_profiles(self, *, query, limit=None):
+            calls["search"] += 1
+            return [
+                {"id": "ig-1", "username": "teacher_hub", "full_name": "Teacher Hub"},
+                {"id": "ig-2", "username": "lessonlab", "full_name": "Lesson Lab"},
+            ]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(platform_onboarding, "_get_instagram_client", lambda: FakeClient())
+
+    first = platform_onboarding._cached_instagram_search_results(query="english tutors", limit=4, context=None)
+    second = platform_onboarding._cached_instagram_search_results(query="english tutors", limit=4, context=None)
 
     assert [item["id"] for item in first] == ["ig-1", "ig-2"]
     assert [item["id"] for item in second] == ["ig-1", "ig-2"]

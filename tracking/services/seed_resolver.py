@@ -15,6 +15,7 @@ from tracking.services.platform_onboarding import (
     fetch_instagram_profiles_cached,
     fetch_tiktok_profile_feed_cached,
 )
+from tracking.services.setup_retry_cache import get_cached_retry_value, store_retry_value
 from tracking.services.setup_runtime import (
     SetupRunContext,
     get_platform_state,
@@ -28,6 +29,21 @@ class SeedResolveError(RuntimeError):
     pass
 
 
+class SeedResolveAmbiguity(SeedResolveError):
+    def __init__(self, *, candidates: list[SeedResolution], errors: list[str] | None = None) -> None:
+        ordered = sorted(
+            list(candidates or []),
+            key=lambda seed: (str(seed.platform or ""), str(seed.title or seed.handle or "").lower(), seed.external_id),
+        )
+        self.candidates = ordered
+        self.errors = [str(error or "").strip() for error in (errors or []) if str(error or "").strip()]
+        platforms = ", ".join(sorted(str(seed.platform or "") for seed in ordered))
+        message = f"Input resolves on multiple platforms ({platforms}); pick the intended profile."
+        if self.errors:
+            message += f" Other matching platforms could not be checked: {self.errors[0]}"
+        super().__init__(message)
+
+
 @dataclass(frozen=True)
 class SeedResolveAttempt:
     platform: str
@@ -37,6 +53,10 @@ class SeedResolveAttempt:
 
 def _cache_key(*, platform: str, raw_input: str) -> str:
     return f"{str(platform).strip()}::{str(raw_input or '').strip().lower()}"
+
+
+def _retry_cache_key(*, platform: str, raw_input: str) -> str:
+    return f"setup-retry::seed::{_cache_key(platform=platform, raw_input=raw_input)}"
 
 
 def _resolve_youtube_seed(raw_input: str) -> SeedResolution | None:
@@ -95,6 +115,14 @@ def resolve_seed_for_platform(
         if cached_error:
             raise SeedResolveError(cached_error)
         return cached_seed if isinstance(cached_seed, SeedResolution) else None
+    retry_cached, retry_found = get_cached_retry_value(_retry_cache_key(platform=platform_key, raw_input=raw_input))
+    if retry_found and isinstance(retry_cached, tuple) and len(retry_cached) == 2:
+        cached_seed, cached_error = retry_cached
+        if context is not None:
+            context.seed_resolution_cache[cache_key] = (cached_seed, cached_error)
+        if cached_error:
+            raise SeedResolveError(str(cached_error))
+        return cached_seed if isinstance(cached_seed, SeedResolution) else None
     try:
         if platform_key == Platform.YOUTUBE:
             seed = _resolve_youtube_seed(raw_input)
@@ -108,14 +136,17 @@ def resolve_seed_for_platform(
         if context is not None:
             context.seed_resolution_cache[cache_key] = (None, str(exc))
             mark_platform_failure(context, platform=platform_key, reason=str(exc))
+        store_retry_value(_retry_cache_key(platform=platform_key, raw_input=raw_input), (None, str(exc)))
         raise
     except Exception as exc:
         if context is not None:
             context.seed_resolution_cache[cache_key] = (None, str(exc))
             mark_platform_failure(context, platform=platform_key, reason=str(exc))
+        store_retry_value(_retry_cache_key(platform=platform_key, raw_input=raw_input), (None, str(exc)))
         raise SeedResolveError(str(exc)) from exc
     if context is not None:
         context.seed_resolution_cache[cache_key] = (seed, None)
+    store_retry_value(_retry_cache_key(platform=platform_key, raw_input=raw_input), (seed, None))
     return seed
 
 
@@ -149,16 +180,9 @@ def resolve_exact_seed(raw_input: str, *, context: SetupRunContext | None = None
     successes = [attempt.seed for attempt in attempts if attempt.seed is not None]
     errors = [attempt.error for attempt in attempts if attempt.error]
     if len(successes) == 1:
-        if errors:
-            raise SeedResolveError(
-                f"Input could not be checked on every matching platform ({errors[0]}); send a full profile link to disambiguate."
-            )
         return successes[0]
     if len(successes) > 1:
-        platforms = ", ".join(sorted(str(seed.platform) for seed in successes))
-        raise SeedResolveError(
-            f"Input resolves on multiple platforms ({platforms}); send a full profile link to disambiguate."
-        )
+        raise SeedResolveAmbiguity(candidates=successes, errors=errors)
 
     if errors:
         raise SeedResolveError(errors[0] or "Seed resolution failed")

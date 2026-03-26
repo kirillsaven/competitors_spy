@@ -22,13 +22,19 @@ TIME_PRESETS = [
 def kb_seed_candidates(*, candidates: list[dict]) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     for idx, c in enumerate((candidates or [])[:8]):
+        platform = str(c.get("platform") or "").strip().lower()
+        platform_label = {
+            "youtube": "YouTube",
+            "tiktok": "TikTok",
+            "instagram": "Instagram",
+        }.get(platform, platform or "Profile")
         title = (c.get("title") or "").strip()
         handle = (c.get("handle") or "").strip()
         if not title:
             title = handle or (c.get("external_id") or "")
-        txt = title
+        txt = f"{platform_label}: {title}"
         if handle:
-            txt = f"{title} (@{handle})"
+            txt = f"{platform_label}: {title} (@{handle})"
         b.row(InlineKeyboardButton(text=txt[:64], callback_data=f"seed_pick:{idx}"))
     b.row(InlineKeyboardButton(text="Это не то", callback_data="seed_retry"))
     return b.as_markup()

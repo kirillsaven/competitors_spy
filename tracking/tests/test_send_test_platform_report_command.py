@@ -35,6 +35,7 @@ def test_send_test_platform_report_prints_report_text_and_message_id(monkeypatch
                 payload={"sections": []},
                 text="TikTok:\n1) Test item\n",
                 section_counts={"tiktok": 1},
+                collection_failures=[],
             ),
             telegram_result={"message_id": 777, "chat": {"id": 123}},
         )

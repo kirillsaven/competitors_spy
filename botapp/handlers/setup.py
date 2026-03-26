@@ -58,6 +58,7 @@ from tracking.services.llm_usage import decide_and_consume_llm_call
 from tracking.services.niche_service import infer_niche_keywords
 from tracking.services.platform_onboarding import PlatformOnboardingError, discover_competitors_for_onboarding
 from tracking.services.seed_resolver import (
+    SeedResolveAmbiguity,
     SeedResolveError,
     SeedResolveAttempt,
     can_search_youtube_seed_candidates,
@@ -658,6 +659,22 @@ async def on_seed_input(message: Message, state: FSMContext) -> None:
     else:
         try:
             seed = await asyncio.to_thread(resolve_exact_seed, raw, context=runtime)
+        except SeedResolveAmbiguity as e:
+            candidates = [_seed_to_dict(candidate) for candidate in e.candidates]
+            await state.update_data(
+                seed_profile_id=sp.id,
+                seed_candidates=candidates,
+            )
+            await state.set_state(SetupStates.PICK_SEED_CANDIDATE)
+            note = ""
+            if e.errors:
+                note = "\n\nНе все платформы удалось проверить:\n" + "\n".join(f"- {error}" for error in e.errors[:2])
+            await message.answer(
+                "Нашел точные совпадения на нескольких платформах. Выбери нужный профиль:"
+                + note,
+                reply_markup=kb_seed_candidates(candidates=candidates),
+            )
+            return
         except SeedResolveError as e:
             await db_run(lambda: SeedProfile.objects.filter(id=sp.id).update(status=SeedStatus.FAILED))
             await message.answer("Не получилось подтвердить профиль.\n" f"Причина: {e}")

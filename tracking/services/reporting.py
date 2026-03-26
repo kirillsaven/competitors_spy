@@ -15,7 +15,13 @@ PLATFORM_SECTION_ORDER = [
 ]
 
 
-def build_report_payload(*, scored: list[ScoredItem], period_start: datetime, period_end: datetime) -> dict:
+def build_report_payload(
+    *,
+    scored: list[ScoredItem],
+    period_start: datetime,
+    period_end: datetime,
+    collection_failures: list[dict] | None = None,
+) -> dict:
     section_items: dict[str, list[dict]] = {platform: [] for platform in PLATFORM_SECTION_ORDER}
     for s in scored:
         platform = str(s.content_item.platform or s.competitor.platform or "")
@@ -56,6 +62,7 @@ def build_report_payload(*, scored: list[ScoredItem], period_start: datetime, pe
             {"platform": platform, "items": section_items[platform]}
             for platform in PLATFORM_SECTION_ORDER
         ],
+        "collection_failures": list(collection_failures or []),
     }
 
 
@@ -104,6 +111,31 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
         timezone_str=timezone_str,
         empty_line="За этот период ничего не выбилось выше обычного.",
     )
+
+    failures = [failure for failure in (payload.get("collection_failures") or []) if isinstance(failure, dict)]
+    if failures:
+        platform_labels = {
+            Platform.YOUTUBE: "YouTube",
+            Platform.TIKTOK: "TikTok",
+            Platform.INSTAGRAM: "Instagram",
+        }
+        lines.append("")
+        lines.append("Проблемы при сборе:")
+        for platform in PLATFORM_SECTION_ORDER:
+            platform_failures = [failure for failure in failures if str(failure.get("platform") or "") == platform]
+            if not platform_failures:
+                continue
+            lines.append(f"{platform_labels.get(platform, str(platform))}:")
+            for failure in platform_failures[:5]:
+                competitor = failure.get("competitor") or {}
+                label = (
+                    str(competitor.get("display_name") or "").strip()
+                    or str(competitor.get("handle") or "").strip()
+                    or str(competitor.get("id") or "").strip()
+                    or "unknown"
+                )
+                reason = str(failure.get("reason") or "").strip() or "unknown error"
+                lines.append(f"- {label}: {reason}")
     return "\n".join(lines).rstrip() + "\n"
 
 

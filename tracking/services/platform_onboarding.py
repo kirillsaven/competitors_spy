@@ -21,6 +21,7 @@ from tracking.adapters.tiktok import (
 from tracking.adapters.youtube import YouTubeApiError
 from tracking.models import Platform
 from tracking.services.provider_config import get_instagram_apify_config, get_tiktok_apify_config
+from tracking.services.setup_retry_cache import get_cached_retry_value, store_retry_value
 from tracking.services.setup_runtime import (
     PLATFORM_STATE_ERROR,
     PLATFORM_STATE_SKIPPED,
@@ -129,21 +130,21 @@ _EN_SUFFIXES = (
 )
 
 _DISCOVERY_QUERY_BUDGET = {
-    Platform.YOUTUBE: 2,
-    Platform.INSTAGRAM: 3,
-    Platform.TIKTOK: 3,
-}
-_DISCOVERY_INITIAL_QUERY_BUDGET = {
-    Platform.YOUTUBE: 2,
+    Platform.YOUTUBE: 1,
     Platform.INSTAGRAM: 2,
     Platform.TIKTOK: 2,
 }
-_DISCOVERY_RESULT_BUDGET = {
-    Platform.YOUTUBE: 6,
-    Platform.INSTAGRAM: 6,
-    Platform.TIKTOK: 6,
+_DISCOVERY_INITIAL_QUERY_BUDGET = {
+    Platform.YOUTUBE: 1,
+    Platform.INSTAGRAM: 1,
+    Platform.TIKTOK: 1,
 }
-_DISCOVERY_EARLY_STOP_CANDIDATES = 6
+_DISCOVERY_RESULT_BUDGET = {
+    Platform.YOUTUBE: 4,
+    Platform.INSTAGRAM: 4,
+    Platform.TIKTOK: 4,
+}
+_DISCOVERY_EARLY_STOP_CANDIDATES = 4
 
 
 @dataclass(frozen=True)
@@ -212,6 +213,10 @@ def _search_cache_key(platform: str, query: str) -> str:
     return f"search::{platform}::{' '.join(str(query or '').strip().lower().split())}"
 
 
+def _retry_cache_key(*, layer: str, key: str) -> str:
+    return f"setup-retry::{str(layer or '').strip()}::{str(key or '').strip()}"
+
+
 def _normalize_instagram_lookup(value: str) -> tuple[str, str]:
     raw = str(value or "").strip()
     if not raw:
@@ -264,6 +269,13 @@ def fetch_instagram_profiles_cached(
             if isinstance(cached, dict):
                 cached_profiles.append(cached)
             continue
+        retry_cached, retry_found = get_cached_retry_value(_retry_cache_key(layer="instagram-profile", key=cache_key))
+        if retry_found:
+            if context is not None:
+                context.profile_cache[cache_key] = retry_cached
+            if isinstance(retry_cached, dict) and retry_cached:
+                cached_profiles.append(retry_cached)
+            continue
         missing_inputs.append(lookup)
 
     if missing_inputs:
@@ -278,6 +290,7 @@ def fetch_instagram_profiles_cached(
             client.close()
         for lookup in missing_inputs:
             matched = _find_instagram_profile_for_lookup(fetched, lookup)
+            store_retry_value(_retry_cache_key(layer="instagram-profile", key=_profile_cache_key(Platform.INSTAGRAM, lookup)), matched or {})
             if context is not None:
                 context.profile_cache[_profile_cache_key(Platform.INSTAGRAM, lookup)] = matched or {}
             if matched:
@@ -315,6 +328,11 @@ def fetch_tiktok_profile_feed_cached(
     cached_items = context.profile_cache.get(cache_key) if context is not None else None
     if isinstance(cached_items, list) and len(cached_items) >= requested:
         return [item for item in cached_items[:requested] if isinstance(item, dict)]
+    retry_cached, retry_found = get_cached_retry_value(_retry_cache_key(layer="tiktok-feed", key=cache_key))
+    if retry_found and isinstance(retry_cached, list) and len(retry_cached) >= requested:
+        if context is not None:
+            context.profile_cache[cache_key] = list(retry_cached)
+        return [item for item in retry_cached[:requested] if isinstance(item, dict)]
 
     client = _get_tiktok_client()
     try:
@@ -325,6 +343,7 @@ def fetch_tiktok_profile_feed_cached(
         raise
     finally:
         client.close()
+    store_retry_value(_retry_cache_key(layer="tiktok-feed", key=cache_key), [item for item in items if isinstance(item, dict)])
     if context is not None:
         context.profile_cache[cache_key] = [item for item in items if isinstance(item, dict)]
     return [item for item in items if isinstance(item, dict)]
@@ -340,6 +359,11 @@ def _cached_youtube_search_channel_ids(
     if context is not None and cache_key in context.search_cache:
         cached = context.search_cache[cache_key]
         return [str(item) for item in cached[:max_results]]
+    retry_cached, retry_found = get_cached_retry_value(_retry_cache_key(layer="youtube-search", key=cache_key))
+    if retry_found and isinstance(retry_cached, list):
+        if context is not None:
+            context.search_cache[cache_key] = list(retry_cached)
+        return [str(item) for item in retry_cached[:max_results]]
     client = get_youtube_client()
     try:
         channel_ids = list(client.search_channels(q=query, max_results=max_results))
@@ -348,6 +372,7 @@ def _cached_youtube_search_channel_ids(
         client.close()
     if context is not None:
         context.search_cache[cache_key] = list(channel_ids)
+    store_retry_value(_retry_cache_key(layer="youtube-search", key=cache_key), list(channel_ids))
     return channel_ids
 
 
@@ -361,6 +386,11 @@ def _cached_instagram_search_results(
     if context is not None and cache_key in context.search_cache:
         cached = context.search_cache[cache_key]
         return [item for item in cached[:limit] if isinstance(item, dict)]
+    retry_cached, retry_found = get_cached_retry_value(_retry_cache_key(layer="instagram-search", key=cache_key))
+    if retry_found and isinstance(retry_cached, list):
+        if context is not None:
+            context.search_cache[cache_key] = list(retry_cached)
+        return [item for item in retry_cached[:limit] if isinstance(item, dict)]
     if platform_is_blocked(context, Platform.INSTAGRAM):
         state = get_platform_state(context, Platform.INSTAGRAM)
         raise PlatformOnboardingError(state.reason or "Instagram is unavailable for this setup")
@@ -379,6 +409,7 @@ def _cached_instagram_search_results(
     filtered = [item for item in results if isinstance(item, dict)]
     if context is not None:
         context.search_cache[cache_key] = list(filtered)
+    store_retry_value(_retry_cache_key(layer="instagram-search", key=cache_key), list(filtered))
     return filtered[:limit]
 
 
@@ -392,6 +423,11 @@ def _cached_tiktok_search_results(
     if context is not None and cache_key in context.search_cache:
         cached = context.search_cache[cache_key]
         return [item for item in cached[:limit] if isinstance(item, dict)]
+    retry_cached, retry_found = get_cached_retry_value(_retry_cache_key(layer="tiktok-search", key=cache_key))
+    if retry_found and isinstance(retry_cached, list):
+        if context is not None:
+            context.search_cache[cache_key] = list(retry_cached)
+        return [item for item in retry_cached[:limit] if isinstance(item, dict)]
     if platform_is_blocked(context, Platform.TIKTOK):
         state = get_platform_state(context, Platform.TIKTOK)
         raise PlatformOnboardingError(state.reason or "TikTok is unavailable for this setup")
@@ -410,6 +446,7 @@ def _cached_tiktok_search_results(
     filtered = [item for item in results if isinstance(item, dict)]
     if context is not None:
         context.search_cache[cache_key] = list(filtered)
+    store_retry_value(_retry_cache_key(layer="tiktok-search", key=cache_key), list(filtered))
     return filtered[:limit]
 
 
@@ -713,11 +750,17 @@ def get_recent_seed_content_texts(
     cache_key = _recent_cache_key(seed.platform, seed.external_id, seed.handle, n)
     if context is not None and cache_key in context.recent_content_cache:
         return list(context.recent_content_cache[cache_key])
+    retry_cached, retry_found = get_cached_retry_value(_retry_cache_key(layer="recent-content", key=cache_key))
+    if retry_found and isinstance(retry_cached, list):
+        if context is not None:
+            context.recent_content_cache[cache_key] = list(retry_cached)
+        return list(retry_cached)
 
     if seed.platform == Platform.YOUTUBE:
         texts = get_recent_video_titles(seed, n=n)
         if context is not None:
             context.recent_content_cache[cache_key] = list(texts)
+        store_retry_value(_retry_cache_key(layer="recent-content", key=cache_key), list(texts))
         return texts
 
     if seed.platform == Platform.TIKTOK:
@@ -734,6 +777,7 @@ def get_recent_seed_content_texts(
                 texts.append(text)
         if context is not None:
             context.recent_content_cache[cache_key] = list(texts)
+        store_retry_value(_retry_cache_key(layer="recent-content", key=cache_key), list(texts))
         return texts
 
     if seed.platform == Platform.INSTAGRAM:
@@ -741,10 +785,12 @@ def get_recent_seed_content_texts(
         if not profiles:
             if context is not None:
                 context.recent_content_cache[cache_key] = []
+            store_retry_value(_retry_cache_key(layer="recent-content", key=cache_key), [])
             return []
         texts = _instagram_profile_texts(profiles[0], n=n)
         if context is not None:
             context.recent_content_cache[cache_key] = list(texts)
+        store_retry_value(_retry_cache_key(layer="recent-content", key=cache_key), list(texts))
         return texts
 
     return []

@@ -104,3 +104,24 @@ def test_render_report_text_renders_instagram_items():
     assert "Title 4" in text
     assert "репосты: 5" in text
     assert "https://example.com/4" in text
+
+
+def test_render_report_text_includes_partial_failure_summary():
+    payload = build_report_payload(
+        scored=[],
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        collection_failures=[
+            {
+                "platform": Platform.INSTAGRAM,
+                "competitor": {"id": 7, "display_name": "Broken Gram", "handle": "broken-gram"},
+                "reason": "Instagram profile returned no recent items with views: username=broken-gram",
+            }
+        ],
+    )
+
+    text = render_report_text(payload=payload, timezone_str="UTC")
+
+    assert "Проблемы при сборе:" in text
+    assert "Instagram:" in text
+    assert "- Broken Gram: Instagram profile returned no recent items with views: username=broken-gram" in text
