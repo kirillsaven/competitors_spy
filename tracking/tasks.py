@@ -21,6 +21,7 @@ from tracking.models import (
 from tracking.services.report_pipeline import create_and_send_report, get_active_competitors
 
 logger = logging.getLogger(__name__)
+FIRST_REPORT_STATUS_DELAY_SECONDS = 90
 
 
 def _get_active_competitors(*, user: TgUser) -> list[Competitor]:
@@ -29,6 +30,49 @@ def _get_active_competitors(*, user: TgUser) -> list[Competitor]:
 
 def _generate_and_send_report(*, user: TgUser, period_start, period_end):
     return create_and_send_report(user=user, period_start=period_start, period_end=period_end).report
+
+
+def _safe_send_user_message(*, user: TgUser, text: str) -> None:
+    if not user.tg_chat_id:
+        logger.warning("Cannot send Telegram status: missing tg_chat_id (user_id=%s)", user.id)
+        return
+    try:
+        send_message(chat_id=int(user.tg_chat_id), text=text)
+    except Exception:
+        logger.exception("Failed to send user-facing report status (user_id=%s)", user.id)
+
+
+def _short_error_reason(exc: Exception) -> str:
+    value = " ".join(str(exc or "").split()).strip()
+    if not value:
+        return exc.__class__.__name__
+    if len(value) > 280:
+        return value[:277] + "..."
+    return value
+
+
+def _already_running_text(*, trigger: str) -> str:
+    if trigger == "setup":
+        return "Первый отчет после настройки уже собирается. Пришлю его отдельным сообщением, когда он будет готов."
+    return "Отчет уже собирается. Пришлю его отдельным сообщением, когда он будет готов."
+
+
+def _failure_text(*, trigger: str, reason: str) -> str:
+    if trigger == "setup":
+        return "Не получилось собрать первый отчет после настройки.\n" f"Причина: {reason}"
+    return "Не получилось собрать отчет.\n" f"Причина: {reason}"
+
+
+def _still_running_text(*, trigger: str) -> str:
+    if trigger == "setup":
+        return (
+            "Первый отчет после настройки все еще собирается. "
+            "Это занимает дольше обычного, пришлю его отдельным сообщением или напишу, если сборка не получится."
+        )
+    return (
+        "Отчет все еще собирается. "
+        "Это занимает дольше обычного, пришлю его отдельным сообщением или напишу, если сборка не получится."
+    )
 
 
 @shared_task
@@ -143,8 +187,22 @@ def run_user_report(self, user_id: int) -> None:
         raise
 
 
+@shared_task
+def notify_report_still_running(user_id: int, job_id: int, trigger: str = "manual") -> None:
+    user = TgUser.objects.filter(id=user_id).first()
+    if not user:
+        return
+    job = JobRun.objects.filter(id=job_id, user=user).first()
+    schedule = Schedule.objects.filter(user=user).first()
+    if not job or job.status != JobStatus.RUNNING:
+        return
+    if not schedule or not schedule.is_running:
+        return
+    _safe_send_user_message(user=user, text=_still_running_text(trigger=trigger))
+
+
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
-def run_user_report_now(self, user_id: int) -> None:
+def run_user_report_now(self, user_id: int, trigger: str = "manual") -> None:
     """
     Manual report trigger ("Отчет сейчас").
 
@@ -159,6 +217,7 @@ def run_user_report_now(self, user_id: int) -> None:
         schedule = Schedule.objects.select_for_update().get(user=user)
         if schedule.is_running:
             logger.info("Skipping manual report: already running (user_id=%s)", user_id)
+            _safe_send_user_message(user=user, text=_already_running_text(trigger=trigger))
             return
 
         schedule.is_running = True
@@ -180,7 +239,14 @@ def run_user_report_now(self, user_id: int) -> None:
             status=JobStatus.RUNNING,
             started_at=now,
             attempts=int(getattr(self.request, "retries", 0)) + 1,
-            payload={"period_start": period_start.isoformat(), "period_end": period_end.isoformat()},
+            payload={"period_start": period_start.isoformat(), "period_end": period_end.isoformat(), "trigger": trigger},
+        )
+
+    if trigger == "setup":
+        notify_report_still_running.apply_async(
+            args=[user.id, job.id],
+            kwargs={"trigger": trigger},
+            countdown=FIRST_REPORT_STATUS_DELAY_SECONDS,
         )
 
     report: Report | None = None
@@ -222,6 +288,7 @@ def run_user_report_now(self, user_id: int) -> None:
         job.error = str(e)
         job.finished_at = timezone.now()
         job.save(update_fields=["status", "error", "finished_at"])
+        _safe_send_user_message(user=user, text=_failure_text(trigger=trigger, reason=_short_error_reason(e)))
 
         raise
 
