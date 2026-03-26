@@ -1,7 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import Any
+from uuid import uuid4
+
+
+logger = logging.getLogger(__name__)
 
 
 def _normalize_lookup(value: str | None) -> str:
@@ -10,6 +15,8 @@ def _normalize_lookup(value: str | None) -> str:
 
 @dataclass
 class ProviderFetchCache:
+    context_id: str = field(default_factory=lambda: uuid4().hex)
+    purpose: str = "report_collection"
     tiktok_feeds_by_handle: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     instagram_profiles_by_lookup: dict[str, dict[str, Any]] = field(default_factory=dict)
 
@@ -46,3 +53,27 @@ class ProviderFetchCache:
         if profile is None:
             return None
         return dict(profile)
+
+
+def log_provider_call(
+    *,
+    actor: str,
+    platform: str,
+    purpose: str,
+    cache: str,
+    normalized_input: str,
+    requested_limit: int | None,
+    returned_count: int,
+    context_id: str | None = None,
+) -> None:
+    logger.info(
+        "provider_call actor=%s platform=%s purpose=%s cache=%s input=%s requested_limit=%s returned_count=%s context_id=%s",
+        str(actor or ""),
+        str(platform or ""),
+        str(purpose or ""),
+        str(cache or ""),
+        str(normalized_input or ""),
+        requested_limit,
+        int(returned_count),
+        str(context_id or ""),
+    )

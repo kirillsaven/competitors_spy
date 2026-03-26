@@ -22,8 +22,13 @@ class TikTokApifyConfig:
     provider: str
     base_url: str
     access_token: str
-    actor_id: str
+    profile_actor_id: str
+    search_actor_id: str
     results_per_profile: int
+
+    @property
+    def actor_id(self) -> str:
+        return self.profile_actor_id
 
 
 @dataclass(frozen=True)
@@ -31,7 +36,12 @@ class InstagramApifyConfig:
     provider: str
     base_url: str
     access_token: str
-    actor_id: str
+    profile_actor_id: str
+    search_actor_id: str
+
+    @property
+    def actor_id(self) -> str:
+        return self.profile_actor_id
 
 
 def get_provider_config(platform: str) -> ProviderConfig:
@@ -66,9 +76,13 @@ def get_tiktok_apify_config() -> TikTokApifyConfig:
         provider=provider.provider,
         base_url=provider.base_url or "https://api.apify.com/v2",
         access_token=provider.access_token,
-        actor_id=str(
+        profile_actor_id=str(
             getattr(settings, "TIKTOK_APIFY_PROFILE_ACTOR_ID", "clockworks/tiktok-profile-scraper")
             or "clockworks/tiktok-profile-scraper"
+        ),
+        search_actor_id=str(
+            getattr(settings, "TIKTOK_APIFY_SEARCH_ACTOR_ID", "clockworks/tiktok-user-search-scraper")
+            or "clockworks/tiktok-user-search-scraper"
         ),
         results_per_profile=max(1, int(getattr(settings, "TIKTOK_APIFY_RESULTS_PER_PROFILE", 10) or 10)),
     )
@@ -80,8 +94,12 @@ def get_instagram_apify_config() -> InstagramApifyConfig:
         provider=provider.provider,
         base_url=provider.base_url or "https://api.apify.com/v2",
         access_token=provider.access_token,
-        actor_id=str(
+        profile_actor_id=str(
             getattr(settings, "INSTAGRAM_APIFY_PROFILE_ACTOR_ID", "apify/instagram-profile-scraper")
             or "apify/instagram-profile-scraper"
+        ),
+        search_actor_id=str(
+            getattr(settings, "INSTAGRAM_APIFY_SEARCH_ACTOR_ID", "iron-crawler/instagram-search-users")
+            or "iron-crawler/instagram-search-users"
         ),
     )

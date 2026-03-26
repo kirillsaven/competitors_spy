@@ -18,8 +18,17 @@ from tracking.adapters.tiktok import (
 )
 from tracking.adapters.youtube import extract_handle as extract_youtube_handle
 from tracking.models import Platform, TgUser, UserLinkedAccount
+from tracking.services.platform_onboarding import fetch_instagram_profiles_cached, fetch_tiktok_profile_feed_cached
 from tracking.services.provider_config import get_instagram_apify_config, get_tiktok_apify_config
 from tracking.services.seed_resolver import SeedResolveError, resolve_seed_for_platform
+from tracking.services.setup_runtime import (
+    PLATFORM_STATE_ERROR,
+    PLATFORM_STATE_UNAVAILABLE,
+    SetupRunContext,
+    get_platform_state,
+    mark_platform_failure,
+    platform_is_blocked,
+)
 from tracking.services.youtube_service import search_youtube_seed_candidates
 
 
@@ -53,6 +62,7 @@ class LinkedAccountSuggestion:
     platform: str
     candidates: list[LinkedAccountCandidate]
     note: str | None = None
+    status: str = "AVAILABLE"
 
 
 @dataclass(frozen=True)
@@ -65,28 +75,42 @@ class CandidateProfile:
 
 def _get_tiktok_client() -> ApifyTikTokClient:
     config = get_tiktok_apify_config()
+    profile_actor_id = str(getattr(config, "profile_actor_id", getattr(config, "actor_id", "")) or "")
+    search_actor_id = str(getattr(config, "search_actor_id", "") or "")
     if config.provider != "apify":
         raise SeedResolveError(f"Unsupported TikTok provider: {config.provider}")
     if not config.access_token:
         raise SeedResolveError("TIKTOK_PROVIDER_ACCESS_TOKEN is not set")
-    if not config.actor_id:
+    if not profile_actor_id:
         raise SeedResolveError("TIKTOK_APIFY_PROFILE_ACTOR_ID is not set")
     if not config.base_url:
         raise SeedResolveError("TIKTOK_PROVIDER_BASE_URL is not set")
-    return ApifyTikTokClient(access_token=config.access_token, actor_id=config.actor_id, base_url=config.base_url)
+    return ApifyTikTokClient(
+        access_token=config.access_token,
+        actor_id=profile_actor_id,
+        search_actor_id=search_actor_id,
+        base_url=config.base_url,
+    )
 
 
 def _get_instagram_client() -> ApifyInstagramClient:
     config = get_instagram_apify_config()
+    profile_actor_id = str(getattr(config, "profile_actor_id", getattr(config, "actor_id", "")) or "")
+    search_actor_id = str(getattr(config, "search_actor_id", "") or "")
     if config.provider != "apify":
         raise SeedResolveError(f"Unsupported Instagram provider: {config.provider}")
     if not config.access_token:
         raise SeedResolveError("INSTAGRAM_PROVIDER_ACCESS_TOKEN is not set")
-    if not config.actor_id:
+    if not profile_actor_id:
         raise SeedResolveError("INSTAGRAM_APIFY_PROFILE_ACTOR_ID is not set")
     if not config.base_url:
         raise SeedResolveError("INSTAGRAM_PROVIDER_BASE_URL is not set")
-    return ApifyInstagramClient(access_token=config.access_token, actor_id=config.actor_id, base_url=config.base_url)
+    return ApifyInstagramClient(
+        access_token=config.access_token,
+        actor_id=profile_actor_id,
+        search_actor_id=search_actor_id,
+        base_url=config.base_url,
+    )
 
 
 def _normalize_handle(value: str | None) -> str:
@@ -303,9 +327,16 @@ def _build_candidate_profile_from_seed(seed: SeedResolution) -> CandidateProfile
 
 
 class CheapAccountMatcher:
-    def __init__(self, *, seed: SeedResolution, max_candidates: int = 3) -> None:
+    def __init__(
+        self,
+        *,
+        seed: SeedResolution,
+        max_candidates: int = 3,
+        context: SetupRunContext | None = None,
+    ) -> None:
         self.seed = seed
         self.max_candidates = max_candidates
+        self.context = context
         self._suggestions: dict[str, LinkedAccountSuggestion] = {}
         self._source_domains = _extract_domains(seed.url, seed.description)
         self._source_tokens = _name_tokens(seed.title, seed.handle, seed.description)
@@ -359,6 +390,14 @@ class CheapAccountMatcher:
         )
 
     def _suggest_instagram(self) -> LinkedAccountSuggestion:
+        if platform_is_blocked(self.context, Platform.INSTAGRAM):
+            state = get_platform_state(self.context, Platform.INSTAGRAM)
+            return LinkedAccountSuggestion(
+                platform=Platform.INSTAGRAM,
+                candidates=[],
+                note=state.reason or "Instagram временно недоступен для автоподтверждения.",
+                status=state.state,
+            )
         handles = _candidate_handles_for_platform(self.seed, Platform.INSTAGRAM)
         if not handles:
             return LinkedAccountSuggestion(
@@ -366,15 +405,32 @@ class CheapAccountMatcher:
                 candidates=[],
                 note="Нет дешевых кандидатов для Instagram: нет хендла или явных Instagram-подсказок в профиле.",
             )
-        client = _get_instagram_client()
         try:
-            profiles = client.fetch_profiles(inputs=handles)
-        finally:
-            client.close()
+            profiles = fetch_instagram_profiles_cached(
+                inputs=handles,
+                context=self.context,
+                purpose="account_linking",
+            )
+        except Exception as exc:
+            status = mark_platform_failure(self.context, platform=Platform.INSTAGRAM, reason=str(exc))
+            return LinkedAccountSuggestion(
+                platform=Platform.INSTAGRAM,
+                candidates=[],
+                note=str(exc),
+                status=status,
+            )
         candidates = [profile for raw in profiles if (profile := _build_candidate_profile_from_instagram(raw)) is not None]
         return self._rank_profiles(Platform.INSTAGRAM, candidates, note="Instagram-провайдер не подтвердил дешевые кандидаты.")
 
     def _suggest_tiktok(self) -> LinkedAccountSuggestion:
+        if platform_is_blocked(self.context, Platform.TIKTOK):
+            state = get_platform_state(self.context, Platform.TIKTOK)
+            return LinkedAccountSuggestion(
+                platform=Platform.TIKTOK,
+                candidates=[],
+                note=state.reason or "TikTok временно недоступен для автоподтверждения.",
+                status=state.state,
+            )
         handles = _candidate_handles_for_platform(self.seed, Platform.TIKTOK)
         if not handles:
             return LinkedAccountSuggestion(
@@ -382,11 +438,25 @@ class CheapAccountMatcher:
                 candidates=[],
                 note="Нет дешевых кандидатов для TikTok: нет хендла или явных TikTok-подсказок в профиле.",
             )
-        client = _get_tiktok_client()
         try:
-            items = client.fetch_profile_feeds(handles=handles, results_per_profile=1)
-        finally:
-            client.close()
+            items: list[dict] = []
+            for handle in handles:
+                items.extend(
+                    fetch_tiktok_profile_feed_cached(
+                        handle=handle,
+                        results_per_page=1,
+                        context=self.context,
+                        purpose="account_linking",
+                    )
+                )
+        except Exception as exc:
+            status = mark_platform_failure(self.context, platform=Platform.TIKTOK, reason=str(exc))
+            return LinkedAccountSuggestion(
+                platform=Platform.TIKTOK,
+                candidates=[],
+                note=str(exc),
+                status=status,
+            )
         profiles = _build_candidate_profiles_from_tiktok(items)
         return self._rank_profiles(Platform.TIKTOK, profiles, note="TikTok-провайдер не подтвердил дешевые кандидаты.")
 
@@ -425,8 +495,14 @@ class CheapAccountMatcher:
         return suggestion
 
 
-def suggest_accounts_for_platform(*, seed: SeedResolution, target_platform: str, max_candidates: int = 3) -> LinkedAccountSuggestion:
-    matcher = CheapAccountMatcher(seed=seed, max_candidates=max_candidates)
+def suggest_accounts_for_platform(
+    *,
+    seed: SeedResolution,
+    target_platform: str,
+    max_candidates: int = 3,
+    context: SetupRunContext | None = None,
+) -> LinkedAccountSuggestion:
+    matcher = CheapAccountMatcher(seed=seed, max_candidates=max_candidates, context=context)
     return matcher.suggest_for_platform(target_platform)
 
 
@@ -435,8 +511,9 @@ def suggest_accounts_for_platforms(
     seed: SeedResolution,
     target_platforms: list[str],
     max_candidates: int = 3,
+    context: SetupRunContext | None = None,
 ) -> dict[str, LinkedAccountSuggestion]:
-    matcher = CheapAccountMatcher(seed=seed, max_candidates=max_candidates)
+    matcher = CheapAccountMatcher(seed=seed, max_candidates=max_candidates, context=context)
     return matcher.suggest_for_platforms(target_platforms)
 
 

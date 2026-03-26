@@ -187,7 +187,9 @@ MAX_COMPETITORS_YOUTUBE = MAX_COMPETITORS_PER_PLATFORM
 MIN_DELTA_VIEWS = _env_int("MIN_DELTA_VIEWS", 500)
 MIN_VIEWS_END = _env_int("MIN_VIEWS_END", 1000)
 YT_MAX_SEARCH_CALLS_PER_SETUP = _env_int("YT_MAX_SEARCH_CALLS_PER_SETUP", 3)
+SETUP_RETRY_CACHE_TTL_SECONDS = _env_int("SETUP_RETRY_CACHE_TTL_SECONDS", 300)
 SCHEDULE_RUNNING_STALE_MINUTES = _env_int("SCHEDULE_RUNNING_STALE_MINUTES", 60)
+SETUP_SCHEDULE_GRACE_MINUTES = _env_int("SETUP_SCHEDULE_GRACE_MINUTES", 15)
 
 # Integrations
 TELEGRAM_BOT_TOKEN = _env("TELEGRAM_BOT_TOKEN", "") or ""
@@ -204,6 +206,10 @@ TIKTOK_APIFY_PROFILE_ACTOR_ID = (
     _env("TIKTOK_APIFY_PROFILE_ACTOR_ID", "clockworks/tiktok-profile-scraper")
     or "clockworks/tiktok-profile-scraper"
 )
+TIKTOK_APIFY_SEARCH_ACTOR_ID = (
+    _env("TIKTOK_APIFY_SEARCH_ACTOR_ID", "clockworks/tiktok-user-search-scraper")
+    or "clockworks/tiktok-user-search-scraper"
+)
 TIKTOK_APIFY_RESULTS_PER_PROFILE = _env_int("TIKTOK_APIFY_RESULTS_PER_PROFILE", 10)
 INSTAGRAM_PROVIDER = _env("INSTAGRAM_PROVIDER", "stub") or "stub"
 INSTAGRAM_PROVIDER_BASE_URL = _env("INSTAGRAM_PROVIDER_BASE_URL", "") or ""
@@ -213,6 +219,10 @@ INSTAGRAM_PROVIDER_ACCESS_TOKEN = _env("INSTAGRAM_PROVIDER_ACCESS_TOKEN", "") or
 INSTAGRAM_APIFY_PROFILE_ACTOR_ID = (
     _env("INSTAGRAM_APIFY_PROFILE_ACTOR_ID", "apify/instagram-profile-scraper")
     or "apify/instagram-profile-scraper"
+)
+INSTAGRAM_APIFY_SEARCH_ACTOR_ID = (
+    _env("INSTAGRAM_APIFY_SEARCH_ACTOR_ID", "iron-crawler/instagram-search-users")
+    or "iron-crawler/instagram-search-users"
 )
 
 # Redis / Celery
