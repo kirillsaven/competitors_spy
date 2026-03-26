@@ -109,6 +109,11 @@ def resolve_seed_for_platform(
             context.seed_resolution_cache[cache_key] = (None, str(exc))
             mark_platform_failure(context, platform=platform_key, reason=str(exc))
         raise
+    except Exception as exc:
+        if context is not None:
+            context.seed_resolution_cache[cache_key] = (None, str(exc))
+            mark_platform_failure(context, platform=platform_key, reason=str(exc))
+        raise SeedResolveError(str(exc)) from exc
     if context is not None:
         context.seed_resolution_cache[cache_key] = (seed, None)
     return seed
