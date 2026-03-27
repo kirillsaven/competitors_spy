@@ -206,8 +206,10 @@ _SCHOOL_STEMS = {"school", "schools", "школ", "academy", "course", "courses"
 _SUBJECT_ALIAS_STEMS = {
     "английск": {"english"},
     "english": {"английск"},
-    "дота": {"dota"},
-    "dota": {"дота"},
+    "дота": {"dota", "dota2", "дота2"},
+    "дота2": {"дота", "dota", "dota2"},
+    "dota": {"дота", "dota2", "дота2"},
+    "dota2": {"dota", "дота", "дота2"},
 }
 _INSTRUCTIONAL_CONTENT_STEMS = {
     "guide",

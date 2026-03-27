@@ -796,6 +796,16 @@ def test_youtube_fallback_queries_add_dota_guide_intents():
     assert "dota 2 patch" in queries
 
 
+def test_dota_and_dota2_aliases_match_in_theme_metrics():
+    metrics = platform_onboarding._theme_agreement_metrics(
+        texts=["Top DOTA2 rampages #dota2"],
+        keywords=["dota"],
+    )
+
+    assert metrics["anchor_overlap"] >= 1
+    assert metrics["specific_overlap"] >= 1
+
+
 def test_candidate_survives_only_if_recent_short_form_content_matches_niche(monkeypatch):
     candidate = platform_onboarding._DiscoveryCandidate(
         platform=Platform.YOUTUBE,
