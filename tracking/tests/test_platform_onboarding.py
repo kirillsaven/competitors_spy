@@ -422,7 +422,15 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
                             "productType": "clips",
                             "url": "https://www.instagram.com/reel/reel-1/",
                             "caption": "English teacher reel",
-                            "timestamp": "2024-07-03T10:30:00.000Z",
+                            "timestamp": "2026-03-03T10:30:00.000Z",
+                            "videoViewCount": 2400,
+                        },
+                        {
+                            "id": "reel-2",
+                            "productType": "clips",
+                            "url": "https://www.instagram.com/reel/reel-2/",
+                            "caption": "Lesson planning for english teachers",
+                            "timestamp": "2026-03-18T10:30:00.000Z",
                             "videoViewCount": 2400,
                         }
                     ],
@@ -453,7 +461,7 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
                     {
                         "id": "vid-1",
                         "text": "english teacher short lesson",
-                        "createTimeISO": "2024-04-03T14:22:40.000Z",
+                        "createTimeISO": "2026-03-03T14:22:40.000Z",
                         "authorMeta": {"id": "auth-1", "name": "teachertok", "nickName": "TeacherTok"},
                         "webVideoUrl": "https://www.tiktok.com/@teachertok/video/vid-1",
                         "videoMeta": {"duration": 19},
@@ -461,7 +469,19 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
                         "diggCount": 200,
                         "commentCount": 11,
                         "shareCount": 4,
-                    }
+                    },
+                    {
+                        "id": "vid-2",
+                        "text": "lesson planning ideas for english tutors",
+                        "createTimeISO": "2026-03-18T14:22:40.000Z",
+                        "authorMeta": {"id": "auth-1", "name": "teachertok", "nickName": "TeacherTok"},
+                        "webVideoUrl": "https://www.tiktok.com/@teachertok/video/vid-2",
+                        "videoMeta": {"duration": 22},
+                        "playCount": 7600,
+                        "diggCount": 170,
+                        "commentCount": 9,
+                        "shareCount": 3,
+                    },
                 ]
             else:
                 out[handle] = []
@@ -532,8 +552,8 @@ def test_discover_competitors_for_onboarding_rejects_offtopic_education_channels
     def fake_recent_youtube_short_signals(*, candidate, n, context=None):
         calls["youtube"] += 1
         if candidate.external_id == "yt-english":
-            return ["english teacher lesson plans", "worksheet ideas for english tutors"], [12000, 9000]
-        return ["разбор егэ по истории", "история россии для егэ"], [15000, 11000]
+            return ["english teacher lesson plans", "worksheet ideas for english tutors"], [12000, 9000], 3
+        return ["разбор егэ по истории", "история россии для егэ"], [15000, 11000], 3
 
     monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_signals", fake_recent_youtube_short_signals)
 
@@ -633,6 +653,24 @@ def test_search_queries_drop_identity_and_marketing_phrases_for_youtube_teacher_
     assert any("англий" in query for query in queries)
 
 
+def test_search_queries_demote_self_referential_queries_for_teacher_seed():
+    queries = platform_onboarding.build_search_ready_keywords(
+        keywords=[
+            "открываю свою онлайн школу",
+            "помогаю ученикам заговорить на английском",
+            "репетитор английского",
+            "уроки английского",
+            "преподаватель английского",
+        ],
+        max_keywords=4,
+    )
+
+    assert "открываю свою онлайн школу" not in queries
+    assert "помогаю ученикам заговорить на английском" not in queries
+    assert "уроки английского" in queries
+    assert any("англий" in query and ("преподав" in query or "репетитор" in query) for query in queries)
+
+
 def test_candidate_survives_only_if_recent_short_form_content_matches_niche(monkeypatch):
     candidate = platform_onboarding._DiscoveryCandidate(
         platform=Platform.YOUTUBE,
@@ -646,7 +684,7 @@ def test_candidate_survives_only_if_recent_short_form_content_matches_niche(monk
     )
 
     def fake_recent_youtube_short_signals(*, candidate, n, context=None):
-        return ["history exam tips", "егэ по истории"], [5000, 4200]
+        return ["history exam tips", "егэ по истории"], [5000, 4200], 3
 
     monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_signals", fake_recent_youtube_short_signals)
 
@@ -660,6 +698,35 @@ def test_candidate_survives_only_if_recent_short_form_content_matches_niche(monk
 
     assert validated == []
     assert "recent Shorts по теме" in reason
+
+
+def test_candidate_is_dropped_if_it_has_less_than_two_recent_shorts(monkeypatch):
+    candidate = platform_onboarding._DiscoveryCandidate(
+        platform=Platform.YOUTUBE,
+        external_id="yt-1",
+        handle="teacherhub",
+        url="https://www.youtube.com/@teacherhub",
+        display_name="Teacher Hub",
+        description="lesson planning for english teachers",
+        query_hits={"english teachers", "lesson plans"},
+        metadata={"rank_hint": 1000},
+    )
+
+    def fake_recent_youtube_short_signals(*, candidate, n, context=None):
+        return ["english teacher lesson plans"], [5000], 1
+
+    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_signals", fake_recent_youtube_short_signals)
+
+    validated, reason = platform_onboarding._collector_aware_candidates(
+        platform=Platform.YOUTUBE,
+        candidates=[candidate],
+        keywords=["english teachers", "lesson plans"],
+        max_candidates=20,
+        context=None,
+    )
+
+    assert validated == []
+    assert "меньше 2 recent Shorts" in reason
 
 
 def test_youtube_discovery_checks_multiple_candidates_before_returning_empty(monkeypatch):
@@ -694,8 +761,8 @@ def test_youtube_discovery_checks_multiple_candidates_before_returning_empty(mon
 
     def fake_recent_youtube_short_signals(*, candidate, n, context=None):
         if candidate.external_id == "yt-good":
-            return ["english teacher lesson plans", "worksheet ideas for english tutors"], [10000, 8700]
-        return ["history exam tips", "егэ по истории"], [20000, 16000]
+            return ["english teacher lesson plans", "worksheet ideas for english tutors"], [10000, 8700], 3
+        return ["history exam tips", "егэ по истории"], [20000, 16000], 3
 
     monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_signals", fake_recent_youtube_short_signals)
 
@@ -767,7 +834,7 @@ def test_retry_cache_reuses_youtube_collectible_probe_across_setup_retries(monke
     first = platform_onboarding._fetch_recent_youtube_short_texts(candidate=candidate, n=3, context=None)
     second = platform_onboarding._fetch_recent_youtube_short_texts(candidate=candidate, n=3, context=None)
 
-    assert first == ["English lesson plan", "Teacher worksheet ideas"]
+    assert first == ["Teacher worksheet ideas", "English lesson plan"]
     assert second == first
     assert calls == {"youtube": 1}
 
