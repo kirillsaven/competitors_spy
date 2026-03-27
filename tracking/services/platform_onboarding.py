@@ -1199,12 +1199,38 @@ def _query_utility_score(query: str, *, anchor_stems: set[str]) -> int:
     )
 
 
+def _query_category_tags(stems: set[str]) -> set[str]:
+    tags: set[str] = set()
+    if stems & _TEACHER_STEMS:
+        tags.add("teacher")
+    if stems & _LESSON_STEMS:
+        tags.add("lesson")
+    if stems & _SCHOOL_STEMS:
+        tags.add("school")
+    if stems & _GROUP_STEMS:
+        tags.add("group")
+    return tags
+
+
+def _query_category_gain(tags: set[str], covered_tags: set[str]) -> int:
+    gain = 0
+    if "lesson" in tags and "lesson" not in covered_tags:
+        gain += 4
+    if "school" in tags and "school" not in covered_tags:
+        gain += 3
+    if "teacher" in tags and "teacher" not in covered_tags:
+        gain += 2
+    if "group" in tags and "group" not in covered_tags:
+        gain += 1
+    return gain
+
+
 def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
     if max_queries <= 0:
         return []
     anchor_stems = _theme_anchor_stems(keywords)
     seen: set[str] = set()
-    scored_queries: list[tuple[int, int, str, set[str]]] = []
+    scored_queries: list[tuple[int, int, str, set[str], set[str]]] = []
     source_queries = list(keywords or [])
     source_queries.extend(_synthetic_search_queries(keywords, anchor_stems=anchor_stems))
     for index, raw in enumerate(source_queries):
@@ -1236,27 +1262,32 @@ def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
             index,
             query,
             coverage_stems,
+            _query_category_tags(coverage_stems),
         ))
     remaining = sorted(scored_queries, key=lambda item: (-item[0], item[1], item[2]))
     selected: list[str] = []
     covered_stems: set[str] = set()
+    covered_tags: set[str] = set()
     if remaining:
-        score, index, query, stems = remaining.pop(0)
+        score, index, query, stems, tags = remaining.pop(0)
         selected.append(query)
         covered_stems |= stems
+        covered_tags |= tags
     while remaining and len(selected) < max_queries:
         best_idx = 0
-        best_value: tuple[int, int, int, int, str] | None = None
-        for idx, (score, index, query, stems) in enumerate(remaining):
+        best_value: tuple[int, int, int, int, int, str] | None = None
+        for idx, (score, index, query, stems, tags) in enumerate(remaining):
             new_stems = len(stems - covered_stems)
             overlap = len(stems & covered_stems)
-            value = (new_stems, score, -overlap, -index, query)
+            category_gain = _query_category_gain(tags, covered_tags)
+            value = (category_gain, new_stems, score, -overlap, -index, query)
             if best_value is None or value > best_value:
                 best_idx = idx
                 best_value = value
-        score, index, query, stems = remaining.pop(best_idx)
+        score, index, query, stems, tags = remaining.pop(best_idx)
         selected.append(query)
         covered_stems |= stems
+        covered_tags |= tags
     return selected
 
 

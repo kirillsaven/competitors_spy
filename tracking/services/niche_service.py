@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import re
 
-from common.text import KeywordSource, extract_keywords
+from common.text import KeywordSource, _USEFUL_THEME_STEMS, _stem_token, extract_keywords
 
 from tracking.adapters.base import SeedResolution
 from tracking.services.llm_gemini import GeminiError, infer_keywords_ru
@@ -11,6 +11,8 @@ from tracking.services.platform_onboarding import get_recent_seed_content_texts
 from tracking.services.setup_runtime import SetupRunContext
 
 logger = logging.getLogger(__name__)
+_IDENTITY_SAFE_THEME_STEMS = set(_USEFUL_THEME_STEMS) | {"ege", "exam", "егэ", "огэ", "экзам"}
+_EXAM_SUBJECT_RE = re.compile(r"\b(егэ|огэ)\s+по\s+([0-9a-zа-яё-]{3,})", flags=re.IGNORECASE)
 
 
 def _account_key(seed: SeedResolution) -> str:
@@ -191,16 +193,22 @@ def build_keyword_blocked_terms(
 ) -> set[str]:
     blocked: set[str] = set()
     supporting_tokens: set[str] = set()
+    supporting_counts: dict[str, int] = {}
     for source in keyword_sources or []:
+        seen_in_source: set[str] = set()
         for token in re.findall(r"[0-9a-zа-яё]+", str(source.text or ""), flags=re.IGNORECASE):
             norm = token.strip().lower().replace("ё", "е")
             if len(norm) >= 3:
                 supporting_tokens.add(norm)
+                if norm not in seen_in_source:
+                    supporting_counts[norm] = supporting_counts.get(norm, 0) + 1
+                    seen_in_source.add(norm)
 
     for account in _ordered_accounts(seed=seed, linked_accounts=linked_accounts):
         for token in re.findall(r"[0-9a-zа-яё]+", str(account.handle or ""), flags=re.IGNORECASE):
             norm = token.strip().lower().replace("ё", "е")
-            if len(norm) >= 3 and norm not in supporting_tokens:
+            stem = _stem_token(norm)
+            if len(norm) >= 3 and (stem not in _IDENTITY_SAFE_THEME_STEMS or supporting_counts.get(norm, 0) <= 1):
                 blocked.add(norm)
 
         title_tokens = [
@@ -208,10 +216,38 @@ def build_keyword_blocked_terms(
             for token in re.findall(r"[0-9a-zа-яё]+", str(account.title or ""), flags=re.IGNORECASE)
             if len(token.strip()) >= 3
         ]
-        unsupported_title_tokens = [token for token in title_tokens if token not in supporting_tokens]
+        unsupported_title_tokens = [
+            token
+            for token in title_tokens
+            if _stem_token(token) not in _IDENTITY_SAFE_THEME_STEMS or supporting_counts.get(token, 0) <= 1
+        ]
         blocked.update(unsupported_title_tokens)
 
     return blocked
+
+
+def _supplement_exam_subject_keywords(
+    *,
+    keywords: list[str],
+    keyword_sources: list[KeywordSource],
+) -> list[str]:
+    if not keywords:
+        return []
+    if not any(any(marker in keyword.lower() for marker in ("егэ", "огэ", "exam")) for keyword in keywords):
+        return keywords
+
+    candidates: dict[str, int] = {}
+    for source in keyword_sources:
+        for exam, subject in _EXAM_SUBJECT_RE.findall(str(source.text or "")):
+            phrase = f"{exam.lower()} по {subject.lower().replace('ё', 'е')}".strip()
+            candidates[phrase] = candidates.get(phrase, 0) + 1
+    if not candidates:
+        return keywords
+
+    best_phrase = sorted(candidates.items(), key=lambda item: (-item[1], -len(item[0]), item[0]))[0][0]
+    if any(best_phrase in keyword.lower() for keyword in keywords):
+        return keywords
+    return [best_phrase] + [keyword for keyword in keywords if keyword.lower() != best_phrase]
 
 
 def infer_niche_keywords(
@@ -246,6 +282,7 @@ def infer_niche_keywords(
             keyword_sources=keyword_sources,
         ),
     )
+    auto_keywords = _supplement_exam_subject_keywords(keywords=auto_keywords, keyword_sources=keyword_sources)[:8]
     if len(auto_keywords) >= 3 or not prefer_llm:
         return auto_keywords, "auto"
 

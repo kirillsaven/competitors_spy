@@ -671,6 +671,24 @@ def test_search_queries_demote_self_referential_queries_for_teacher_seed():
     assert any("англий" in query and ("преподав" in query or "репетитор" in query) for query in queries)
 
 
+def test_search_queries_keep_lesson_intent_in_top_youtube_budget():
+    queries = platform_onboarding.build_search_ready_keywords(
+        keywords=[
+            "преподаватель английского",
+            "онлайн репетитор по английскому",
+            "группы преподавателей английского",
+            "уроки английского",
+            "школа английского",
+            "репетитор английского",
+        ],
+        max_keywords=3,
+    )
+
+    assert len(queries) == 3
+    assert "уроки английского" in queries
+    assert any("преподав" in query or "репетитор" in query for query in queries)
+
+
 def test_candidate_survives_only_if_recent_short_form_content_matches_niche(monkeypatch):
     candidate = platform_onboarding._DiscoveryCandidate(
         platform=Platform.YOUTUBE,

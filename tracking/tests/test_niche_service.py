@@ -172,6 +172,35 @@ def test_infer_niche_keywords_auto_prefers_phrase_like_teacher_topics(monkeypatc
         assert all(banned not in keyword for keyword in keywords)
 
 
+def test_infer_niche_keywords_blocks_seed_identity_tokens_even_if_they_repeat_in_description(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: [
+            "ЕГЭ по английскому: аудирование и письмо",
+            "Как готовиться к ЕГЭ по английскому онлайн",
+            "Разбор заданий ЕГЭ по английскому",
+        ],
+    )
+    seed = SeedResolution(
+        platform=Platform.YOUTUBE,
+        external_id="yt-1",
+        handle="tanya_shibitova",
+        url="https://www.youtube.com/channel/UC91u057zoN-kYmo2z7G5RZg",
+        title="Таня Шибитова | Английский ЕГЭ | 100балльный",
+        description="Татьяна Шибитова — преподаватель по английскому языку. Готовлю к ЕГЭ онлайн.",
+        uploads_playlist_id="UU1",
+    )
+
+    keywords, source = niche_service.infer_niche_keywords(seed=seed, competitors=[], prefer_llm=False)
+
+    assert source == "auto"
+    assert any("егэ" in keyword for keyword in keywords)
+    assert any("англий" in keyword for keyword in keywords)
+    for banned in {"таня", "татьяна", "шибитова", "100балльный"}:
+        assert all(banned not in keyword for keyword in keywords)
+
+
 def test_infer_niche_keywords_keeps_topical_handle_words_when_supported_by_content(monkeypatch):
     monkeypatch.setattr(
         niche_service,
