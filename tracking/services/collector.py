@@ -25,6 +25,7 @@ from tracking.services.platform_onboarding import (
     fetch_instagram_profiles_cached,
     fetch_tiktok_profile_feed_cached,
 )
+from tracking.services.youtube_service import YouTubeNotConfigured, get_youtube_client
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +46,10 @@ def _normalize_content_text_fields(*, title: str | None, description: str | None
 
 
 def _get_youtube_client() -> YouTubeClient:
-    api_key = getattr(settings, "YOUTUBE_API_KEY", "") or ""
-    if not api_key:
-        raise CollectorError("YOUTUBE_API_KEY is not set")
-    return YouTubeClient(api_key=api_key)
+    try:
+        return get_youtube_client()
+    except YouTubeNotConfigured as exc:
+        raise CollectorError(str(exc)) from exc
 
 
 def _get_tiktok_client() -> ApifyTikTokClient:

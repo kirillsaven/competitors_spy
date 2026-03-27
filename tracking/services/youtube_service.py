@@ -29,9 +29,14 @@ def _seed_search_cache_key(*, query: str, max_results: int) -> str:
 
 
 def get_youtube_client() -> YouTubeClient:
-    if not getattr(settings, "YOUTUBE_API_KEY", ""):
-        raise YouTubeNotConfigured("YOUTUBE_API_KEY is not set")
-    return YouTubeClient(api_key=settings.YOUTUBE_API_KEY)
+    keys = [str(item).strip() for item in (getattr(settings, "YOUTUBE_API_KEYS", []) or []) if str(item).strip()]
+    if not keys:
+        single = str(getattr(settings, "YOUTUBE_API_KEY", "") or "").strip()
+        if single:
+            keys = [single]
+    if not keys:
+        raise YouTubeNotConfigured("YOUTUBE_API_KEY/YOUTUBE_API_KEYS is not set")
+    return YouTubeClient(api_keys=keys)
 
 
 def resolve_youtube_seed(raw_input: str) -> SeedResolution | None:

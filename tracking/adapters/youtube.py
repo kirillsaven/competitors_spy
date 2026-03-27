@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 import re
+from threading import Lock
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -18,6 +19,14 @@ class YouTubeApiError(RuntimeError):
 
 _PLAIN_HANDLE_RE = re.compile(r"^[0-9A-Za-z._-]{3,50}$")
 _PLAIN_CHANNEL_ID_RE = re.compile(r"^UC[0-9A-Za-z_-]{22}$")
+_QUOTA_ERROR_MARKERS = {
+    "quotaexceeded",
+    "dailylimitexceeded",
+    "userratelimitexceeded",
+    "ratelimitexceeded",
+}
+_KEY_POOL_LOCK = Lock()
+_KEY_POOL_INDEX: dict[tuple[str, ...], int] = {}
 
 
 def _parse_rfc3339(value: str) -> datetime:
@@ -101,16 +110,42 @@ def extract_video_id(raw: str) -> str | None:
 
 
 class YouTubeClient:
-    def __init__(self, api_key: str, timeout_s: float = 15.0) -> None:
-        self.api_key = api_key
+    def __init__(
+        self,
+        api_key: str | None = None,
+        *,
+        api_keys: list[str] | None = None,
+        timeout_s: float = 15.0,
+    ) -> None:
+        keys: list[str] = []
+        for raw in list(api_keys or []):
+            key = str(raw or "").strip()
+            if key and key not in keys:
+                keys.append(key)
+        single = str(api_key or "").strip()
+        if single and single not in keys:
+            keys.append(single)
+        if not keys:
+            raise ValueError("YouTubeClient requires at least one API key")
+        self.api_keys = keys
+        self.api_key = keys[0]
+        self._key_pool = tuple(keys)
         self._client = httpx.Client(timeout=timeout_s)
 
     def close(self) -> None:
         self._client.close()
 
-    def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+    def _pool_index(self) -> int:
+        with _KEY_POOL_LOCK:
+            return int(_KEY_POOL_INDEX.get(self._key_pool, 0) or 0) % len(self.api_keys)
+
+    def _set_pool_index(self, index: int) -> None:
+        with _KEY_POOL_LOCK:
+            _KEY_POOL_INDEX[self._key_pool] = int(index) % len(self.api_keys)
+
+    def _request(self, *, api_key: str, path: str, params: dict[str, Any]) -> dict[str, Any]:
         url = f"https://www.googleapis.com/youtube/v3/{path.lstrip('/')}"
-        params = {**params, "key": self.api_key}
+        params = {**params, "key": api_key}
         r = self._client.get(url, params=params)
         try:
             data = r.json()
@@ -119,6 +154,31 @@ class YouTubeClient:
         if r.status_code >= 400 or "error" in data:
             raise YouTubeApiError(f"YouTube API error: status={r.status_code} body={data}")
         return data
+
+    def _is_quota_error(self, exc: YouTubeApiError) -> bool:
+        message = str(exc).lower()
+        return any(marker in message for marker in _QUOTA_ERROR_MARKERS)
+
+    def _get(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
+        last_error: YouTubeApiError | None = None
+        start_index = self._pool_index()
+        for offset in range(len(self.api_keys)):
+            index = (start_index + offset) % len(self.api_keys)
+            api_key = self.api_keys[index]
+            try:
+                data = self._request(api_key=api_key, path=path, params=params)
+            except YouTubeApiError as exc:
+                last_error = exc
+                if self._is_quota_error(exc) and offset + 1 < len(self.api_keys):
+                    self._set_pool_index(index + 1)
+                    continue
+                raise
+            self.api_key = api_key
+            self._set_pool_index(index)
+            return data
+        if last_error is not None:
+            raise last_error
+        raise YouTubeApiError("YouTube API request failed without a specific error")
 
     def channels_list(self, *, part: str, for_handle: str | None = None, ids: list[str] | None = None) -> list[dict[str, Any]]:
         params: dict[str, Any] = {"part": part, "maxResults": 50}
