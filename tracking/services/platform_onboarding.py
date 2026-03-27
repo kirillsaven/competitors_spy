@@ -135,7 +135,7 @@ _EN_SUFFIXES = (
 )
 
 _DISCOVERY_QUERY_BUDGET = {
-    Platform.YOUTUBE: 3,
+    Platform.YOUTUBE: 5,
     Platform.INSTAGRAM: 4,
     Platform.TIKTOK: 4,
 }
