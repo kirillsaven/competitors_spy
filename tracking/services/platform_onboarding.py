@@ -2069,7 +2069,7 @@ def _collector_aware_candidates(
 
     budget = min(len(ranked_candidates), max(1, _DISCOVERY_VALIDATION_BUDGET.get(platform, 1)))
     validated: list[_DiscoveryCandidate] = []
-    candidate_batch = ranked_candidates[:budget]
+    candidate_batch = _balanced_validation_candidates(ranked_candidates, budget=budget)
     batch_texts: dict[str, tuple[list[str], list[int], int]] = {}
     failed_no_content = 0
     failed_low_activity = 0
@@ -2127,6 +2127,54 @@ def _collector_aware_candidates(
     if platform == Platform.INSTAGRAM:
         return [], "поиск выполнен, но топ-кандидаты не прошли проверку reels по теме."
     return [], "поиск выполнен, но топ-кандидаты не прошли проверку recent TikTok-видео по теме."
+
+
+def _balanced_validation_candidates(
+    candidates: list[_DiscoveryCandidate],
+    *,
+    budget: int,
+) -> list[_DiscoveryCandidate]:
+    if budget >= len(candidates):
+        return list(candidates)
+
+    buckets: dict[str, list[_DiscoveryCandidate]] = {}
+    for candidate in candidates:
+        for query in sorted(candidate.query_hits):
+            buckets.setdefault(query, []).append(candidate)
+
+    ordered_queries = sorted(
+        buckets,
+        key=lambda query: (-len(buckets[query]), query),
+    )
+    selected: list[_DiscoveryCandidate] = []
+    seen_ids: set[str] = set()
+    while len(selected) < budget:
+        progress = False
+        for query in ordered_queries:
+            bucket = buckets.get(query) or []
+            while bucket:
+                candidate = bucket.pop(0)
+                if candidate.external_id in seen_ids:
+                    continue
+                selected.append(candidate)
+                seen_ids.add(candidate.external_id)
+                progress = True
+                break
+            if len(selected) >= budget:
+                break
+        if not progress:
+            break
+
+    if len(selected) >= budget:
+        return selected[:budget]
+
+    for candidate in candidates:
+        if candidate.external_id in seen_ids:
+            continue
+        selected.append(candidate)
+        if len(selected) >= budget:
+            break
+    return selected[:budget]
 
 
 def get_recent_seed_content_texts(

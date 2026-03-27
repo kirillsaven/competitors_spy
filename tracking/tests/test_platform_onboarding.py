@@ -747,6 +747,45 @@ def test_candidate_is_dropped_if_it_has_less_than_two_recent_shorts(monkeypatch)
     assert "меньше 2 recent Shorts" in reason
 
 
+def test_collector_validation_batch_spreads_across_query_buckets():
+    candidates = [
+        platform_onboarding._DiscoveryCandidate(
+            platform=Platform.YOUTUBE,
+            external_id="yt-1",
+            handle="teacher-a",
+            url="https://www.youtube.com/@teacher-a",
+            display_name="Teacher A",
+            description="english teachers",
+            query_hits={"преподаватель английского"},
+            metadata={"rank_hint": 9000},
+        ),
+        platform_onboarding._DiscoveryCandidate(
+            platform=Platform.YOUTUBE,
+            external_id="yt-2",
+            handle="teacher-b",
+            url="https://www.youtube.com/@teacher-b",
+            display_name="Teacher B",
+            description="english teachers",
+            query_hits={"преподаватель английского"},
+            metadata={"rank_hint": 8000},
+        ),
+        platform_onboarding._DiscoveryCandidate(
+            platform=Platform.YOUTUBE,
+            external_id="yt-3",
+            handle="lesson-c",
+            url="https://www.youtube.com/@lesson-c",
+            display_name="Lesson C",
+            description="уроки английского",
+            query_hits={"уроки английского"},
+            metadata={"rank_hint": 1000},
+        ),
+    ]
+
+    batch = platform_onboarding._balanced_validation_candidates(candidates, budget=2)
+
+    assert [candidate.external_id for candidate in batch] == ["yt-1", "yt-3"]
+
+
 def test_youtube_discovery_checks_multiple_candidates_before_returning_empty(monkeypatch):
     monkeypatch.setattr(
         platform_onboarding,
