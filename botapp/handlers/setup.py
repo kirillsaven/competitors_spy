@@ -1329,7 +1329,7 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
 
     limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
     excluded: set[int] = set()
-    competitor_rows = [(i, _candidate_display_name(c)) for i, c in enumerate(candidates)]
+    competitor_rows = [(i, _candidate_display_name(c), str(c.get("url") or "").strip() or None) for i, c in enumerate(candidates)]
     selected_total = len(candidates) - len(excluded)
     selected_by_platform = _selected_counts_by_platform(candidates=candidates, excluded=excluded)
     text = _build_prune_text(
@@ -1440,7 +1440,7 @@ async def _render_prune(message: Message, state: FSMContext) -> None:
     discovery_notes = [str(item) for item in (data.get("discovery_notes") or []) if str(item).strip()]
 
     limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
-    competitor_rows = [(i, _candidate_display_name(c)) for i, c in enumerate(candidates)]
+    competitor_rows = [(i, _candidate_display_name(c), str(c.get("url") or "").strip() or None) for i, c in enumerate(candidates)]
     selected_total = len(candidates) - len(excluded)
     selected_by_platform = _selected_counts_by_platform(candidates=candidates, excluded=excluded)
     text = _build_prune_text(

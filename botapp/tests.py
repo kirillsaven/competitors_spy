@@ -1,5 +1,6 @@
 from django.test import TestCase
 
+from botapp.keyboards import kb_prune_competitors
 from botapp.user_sync import normalize_profile_text, normalize_tg_username, upsert_tg_user
 from tracking.models import TgUser
 
@@ -57,3 +58,31 @@ class UserSyncTests(TestCase):
         self.assertEqual(user.tg_first_name, "New")
         self.assertEqual(user.tg_last_name, "Person")
         self.assertEqual(user.tg_language_code, "ru")
+
+
+class CompetitorPickerKeyboardTests(TestCase):
+    def test_prune_keyboard_adds_profile_link_button_for_valid_url(self) -> None:
+        markup = kb_prune_competitors(
+            competitor_rows=[(0, "[YouTube] Daria Pancho", "https://www.youtube.com/@dariapancho")],
+            excluded_ids=set(),
+            page=0,
+            page_size=8,
+        )
+
+        first_row = markup.inline_keyboard[0]
+        self.assertEqual(len(first_row), 2)
+        self.assertEqual(first_row[0].callback_data, "prune_toggle:0")
+        self.assertEqual(first_row[1].text, "↗")
+        self.assertEqual(first_row[1].url, "https://www.youtube.com/@dariapancho")
+
+    def test_prune_keyboard_skips_profile_link_button_for_invalid_url(self) -> None:
+        markup = kb_prune_competitors(
+            competitor_rows=[(0, "[YouTube] Daria Pancho", "youtube.com/@dariapancho")],
+            excluded_ids=set(),
+            page=0,
+            page_size=8,
+        )
+
+        first_row = markup.inline_keyboard[0]
+        self.assertEqual(len(first_row), 1)
+        self.assertEqual(first_row[0].callback_data, "prune_toggle:0")

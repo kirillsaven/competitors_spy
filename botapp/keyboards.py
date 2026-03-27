@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from urllib.parse import urlparse
+
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -175,7 +177,26 @@ def kb_time_presets_second() -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
-def kb_prune_competitors(*, competitor_rows: list[tuple[int, str]], excluded_ids: set[int], page: int, page_size: int) -> InlineKeyboardMarkup:
+def _safe_http_url(raw_url: str | None) -> str | None:
+    url = str(raw_url or "").strip()
+    if not url:
+        return None
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return url
+
+
+def kb_prune_competitors(
+    *,
+    competitor_rows: list[tuple[int, str, str | None]],
+    excluded_ids: set[int],
+    page: int,
+    page_size: int,
+) -> InlineKeyboardMarkup:
     total = len(competitor_rows)
     if total == 0:
         b = InlineKeyboardBuilder()
@@ -187,10 +208,13 @@ def kb_prune_competitors(*, competitor_rows: list[tuple[int, str]], excluded_ids
     end = min(total, start + page_size)
     b = InlineKeyboardBuilder()
 
-    for cid, name in competitor_rows[start:end]:
+    for cid, name, url in competitor_rows[start:end]:
         mark = "❌" if cid in excluded_ids else "✅"
-        # One channel per row: easier to tap, avoids Telegram row limits.
-        b.row(InlineKeyboardButton(text=f"{mark} {name}", callback_data=f"prune_toggle:{cid}"))
+        buttons = [InlineKeyboardButton(text=f"{mark} {name}"[:64], callback_data=f"prune_toggle:{cid}")]
+        safe_url = _safe_http_url(url)
+        if safe_url:
+            buttons.append(InlineKeyboardButton(text="↗", url=safe_url))
+        b.row(*buttons)
 
     nav: list[InlineKeyboardButton] = []
     if page > 0:
