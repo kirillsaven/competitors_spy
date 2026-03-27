@@ -203,6 +203,39 @@ _TEACHER_STEMS = {"teacher", "teach", "tutor", "mentor", "репетитор", "
 _LESSON_STEMS = {"lesson", "lessons", "study", "course", "урок", "обуч", "курс"}
 _GROUP_STEMS = {"group", "groups", "student", "students", "групп", "ученик", "студент"}
 _SCHOOL_STEMS = {"school", "schools", "школ", "academy", "course", "courses"}
+_SUBJECT_ALIAS_STEMS = {
+    "английск": {"english"},
+    "english": {"английск"},
+    "дота": {"dota"},
+    "dota": {"дота"},
+}
+_INSTRUCTIONAL_CONTENT_STEMS = {
+    "guide",
+    "guid",
+    "lesson",
+    "vocab",
+    "vocabulary",
+    "phrase",
+    "phrases",
+    "grammar",
+    "pronunciation",
+    "tutorial",
+    "tips",
+    "гайд",
+    "граммат",
+    "лексик",
+    "объясн",
+    "предлог",
+    "произнош",
+    "разбор",
+    "словар",
+    "слово",
+    "урок",
+    "фраз",
+    "выражен",
+    "конструкц",
+    "правил",
+}
 _SELF_REFERENTIAL_QUERY_STEMS = {
     "i",
     "me",
@@ -956,6 +989,13 @@ def _theme_token_stems(*values: str | None) -> set[str]:
     return stems
 
 
+def _expand_alias_stems(stems: set[str]) -> set[str]:
+    expanded = set(stems)
+    for stem in list(stems):
+        expanded |= set(_SUBJECT_ALIAS_STEMS.get(stem, set()))
+    return expanded
+
+
 def _dedupe_keyword_queries(keywords: list[str], *, max_queries: int | None = None) -> list[str]:
     seen: set[str] = set()
     queries: list[str] = []
@@ -1054,16 +1094,19 @@ def _theme_agreement_metrics(*, texts: list[str], keywords: list[str]) -> dict[s
             "strong_text_matches": 0,
         }
 
-    text_stem_sets = [_theme_token_stems(text) for text in texts if str(text or "").strip()]
+    text_stem_sets = [_expand_alias_stems(_theme_token_stems(text)) for text in texts if str(text or "").strip()]
     union_stems: set[str] = set()
     for stems in text_stem_sets:
         union_stems |= stems
+    anchor_stems = _expand_alias_stems(anchor_stems)
 
     matched_phrases = 0
     anchor_overlap = len(union_stems & anchor_stems)
     specific_overlap = 0
     full_overlap = 0
     for full_stems, specific_stems in phrase_defs:
+        full_stems = _expand_alias_stems(full_stems)
+        specific_stems = _expand_alias_stems(specific_stems)
         if _strong_phrase_overlap(union_stems, specific_stems):
             matched_phrases += 1
         specific_overlap += len(union_stems & specific_stems)
@@ -1110,18 +1153,25 @@ def _theme_profile_passes(*, candidate: _DiscoveryCandidate, keywords: list[str]
 
 def _theme_content_passes(*, candidate: _DiscoveryCandidate, texts: list[str], keywords: list[str]) -> bool:
     metrics = _theme_agreement_metrics(texts=texts, keywords=keywords)
+    format_hits = len(_expand_alias_stems(_theme_token_stems(" ".join(texts))) & _INSTRUCTIONAL_CONTENT_STEMS)
     candidate.metadata["content_theme_score"] = (
         metrics["matched_phrases"] * 4
         + metrics["specific_overlap"]
         + metrics["strong_text_matches"] * 2
         + metrics["anchor_overlap"] * 2
         + metrics["strong_anchor_matches"] * 2
+        + format_hits
     )
     candidate.metadata["content_theme_matches"] = metrics["matched_phrases"]
     candidate.metadata["content_theme_anchor_overlap"] = metrics["anchor_overlap"]
     candidate.metadata["content_theme_specific_overlap"] = metrics["specific_overlap"]
+    candidate.metadata["content_format_hits"] = format_hits
     if metrics["anchor_overlap"] <= 0 or metrics["strong_anchor_matches"] <= 0:
-        return False
+        return (
+            float(candidate.metadata.get("profile_theme_score") or 0) >= 10
+            and int(candidate.metadata.get("recent_collectible_count") or 0) >= _DISCOVERY_MIN_RECENT_SHORTS
+            and format_hits >= 2
+        )
     return (
         (metrics["matched_phrases"] >= 1 and metrics["strong_text_matches"] >= 1)
         or metrics["specific_overlap"] >= 3

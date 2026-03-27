@@ -824,6 +824,72 @@ def test_candidate_is_dropped_if_it_has_less_than_two_recent_shorts(monkeypatch)
     assert "меньше 2 recent Shorts" in reason
 
 
+def test_candidate_with_english_profile_and_instructional_recent_shorts_survives(monkeypatch):
+    candidate = platform_onboarding._DiscoveryCandidate(
+        platform=Platform.YOUTUBE,
+        external_id="yt-english-club",
+        handle="english-club",
+        url="https://www.youtube.com/@english-club",
+        display_name="English Club. Английский для начинающих и знатоков",
+        description="Английский для начинающих, фразы и грамматика",
+        query_hits={"уроки английского", "английский для начинающих"},
+        metadata={"rank_hint": 8000},
+    )
+
+    def fake_recent_youtube_short_signals(*, candidate, n, context=None):
+        return [
+            "Предлоги IN AT ON",
+            "Фразы на каждый день",
+            "Запоминаем выражения с by",
+        ], [14000, 9000, 8500], 3
+
+    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_signals", fake_recent_youtube_short_signals)
+
+    validated, reason = platform_onboarding._collector_aware_candidates(
+        platform=Platform.YOUTUBE,
+        candidates=[candidate],
+        keywords=["уроки английского", "английский для начинающих", "преподаватель английского"],
+        max_candidates=20,
+        context=None,
+    )
+
+    assert [item.external_id for item in validated] == ["yt-english-club"]
+    assert reason == ""
+
+
+def test_candidate_with_strong_profile_but_offtopic_recent_shorts_is_still_dropped(monkeypatch):
+    candidate = platform_onboarding._DiscoveryCandidate(
+        platform=Platform.YOUTUBE,
+        external_id="yt-skyeng",
+        handle="skyeng",
+        url="https://www.youtube.com/@skyeng",
+        display_name="Skyeng – онлайн-школа иностранных языков",
+        description="Онлайн-школа английского языка",
+        query_hits={"онлайн школа английского", "уроки английского"},
+        metadata={"rank_hint": 10000},
+    )
+
+    def fake_recent_youtube_short_signals(*, candidate, n, context=None):
+        return [
+            "Кто лучше ухаживает? Русские или французы?",
+            "Ред флаги на свиданиях в Италии и Франции",
+            "Как ухаживают итальянцы",
+        ], [80000, 50000, 30000], 3
+
+    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_signals", fake_recent_youtube_short_signals)
+
+    validated, reason = platform_onboarding._collector_aware_candidates(
+        platform=Platform.YOUTUBE,
+        candidates=[candidate],
+        keywords=["уроки английского", "онлайн школа английского", "английский для начинающих"],
+        max_candidates=20,
+        context=None,
+    )
+
+    assert validated == []
+    assert "recent Shorts по теме" in reason
+
+
 def test_collector_validation_batch_spreads_across_query_buckets():
     candidates = [
         platform_onboarding._DiscoveryCandidate(
