@@ -111,6 +111,29 @@ def test_infer_niche_keywords_auto_uses_recent_content_not_structure(monkeypatch
     assert any("fashion" in keyword or "sneaker" in keyword for keyword in keywords)
 
 
+def test_infer_niche_keywords_uses_account_title_for_search_ready_subject_hints(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: ["Unit 1 practice", "Unit 2 listening"],
+    )
+    seed = SeedResolution(
+        platform=Platform.YOUTUBE,
+        external_id="yt-1",
+        handle="okenglish",
+        url="https://www.youtube.com/channel/UCQQpescDpZ6d3lu9j0fPA7g",
+        title="OK English - уроки английского языка",
+        description="Практика английского языка для начинающих и продолжающих.",
+        uploads_playlist_id="UU1",
+    )
+
+    keywords, source = niche_service.infer_niche_keywords(seed=seed, competitors=[], prefer_llm=False)
+
+    assert source == "auto"
+    assert any("англий" in keyword for keyword in keywords)
+    assert any("урок" in keyword or "english" in keyword for keyword in keywords)
+
+
 def test_infer_niche_keywords_auto_filters_ru_en_junk_words(monkeypatch):
     monkeypatch.setattr(
         niche_service,

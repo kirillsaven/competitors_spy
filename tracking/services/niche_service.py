@@ -192,23 +192,11 @@ def build_keyword_blocked_terms(
     keyword_sources: list[KeywordSource] | None = None,
 ) -> set[str]:
     blocked: set[str] = set()
-    supporting_tokens: set[str] = set()
-    supporting_counts: dict[str, int] = {}
-    for source in keyword_sources or []:
-        seen_in_source: set[str] = set()
-        for token in re.findall(r"[0-9a-zа-яё]+", str(source.text or ""), flags=re.IGNORECASE):
-            norm = token.strip().lower().replace("ё", "е")
-            if len(norm) >= 3:
-                supporting_tokens.add(norm)
-                if norm not in seen_in_source:
-                    supporting_counts[norm] = supporting_counts.get(norm, 0) + 1
-                    seen_in_source.add(norm)
-
     for account in _ordered_accounts(seed=seed, linked_accounts=linked_accounts):
         for token in re.findall(r"[0-9a-zа-яё]+", str(account.handle or ""), flags=re.IGNORECASE):
             norm = token.strip().lower().replace("ё", "е")
             stem = _stem_token(norm)
-            if len(norm) >= 3 and (stem not in _IDENTITY_SAFE_THEME_STEMS or supporting_counts.get(norm, 0) <= 1):
+            if len(norm) >= 3 and stem not in _IDENTITY_SAFE_THEME_STEMS:
                 blocked.add(norm)
 
         title_tokens = [
@@ -219,7 +207,7 @@ def build_keyword_blocked_terms(
         unsupported_title_tokens = [
             token
             for token in title_tokens
-            if _stem_token(token) not in _IDENTITY_SAFE_THEME_STEMS or supporting_counts.get(token, 0) <= 1
+            if _stem_token(token) not in _IDENTITY_SAFE_THEME_STEMS
         ]
         blocked.update(unsupported_title_tokens)
 
@@ -250,6 +238,40 @@ def _supplement_exam_subject_keywords(
     return [best_phrase] + [keyword for keyword in keywords if keyword.lower() != best_phrase]
 
 
+def _build_title_keyword_sources(
+    *,
+    seed: SeedResolution,
+    linked_accounts: list[SeedResolution] | None = None,
+) -> list[KeywordSource]:
+    sources: list[KeywordSource] = []
+    seen: set[tuple[str, str]] = set()
+    for account in _ordered_accounts(seed=seed, linked_accounts=linked_accounts):
+        if account.title:
+            _append_keyword_source(
+                sources,
+                text=account.title,
+                source_id=_account_key(account),
+                source_type="generic",
+                seen=seen,
+            )
+    return sources
+
+
+def _merge_keyword_lists(*lists: list[str], max_keywords: int = 8) -> list[str]:
+    merged: list[str] = []
+    seen: set[tuple[str, ...]] = set()
+    for items in lists:
+        for keyword in items:
+            tokens = tuple(sorted({_stem_token(token.strip().lower().replace("ё", "е")) for token in re.findall(r"[0-9a-zа-яё]+", keyword, flags=re.IGNORECASE) if len(token.strip()) >= 3}))
+            if not tokens or tokens in seen:
+                continue
+            seen.add(tokens)
+            merged.append(keyword)
+            if len(merged) >= max_keywords:
+                return merged
+    return merged
+
+
 def infer_niche_keywords(
     *,
     seed: SeedResolution,
@@ -273,16 +295,23 @@ def infer_niche_keywords(
         linked_accounts=linked_accounts,
         context=context,
     )
+    blocked_terms = build_keyword_blocked_terms(
+        seed=seed,
+        linked_accounts=linked_accounts,
+        keyword_sources=keyword_sources,
+    )
     auto_keywords = extract_keywords(
         keyword_sources,
         max_keywords=8,
-        blocked_terms=build_keyword_blocked_terms(
-            seed=seed,
-            linked_accounts=linked_accounts,
-            keyword_sources=keyword_sources,
-        ),
+        blocked_terms=blocked_terms,
     )
     auto_keywords = _supplement_exam_subject_keywords(keywords=auto_keywords, keyword_sources=keyword_sources)[:8]
+    title_keywords = extract_keywords(
+        _build_title_keyword_sources(seed=seed, linked_accounts=linked_accounts),
+        max_keywords=3,
+        blocked_terms=blocked_terms,
+    )
+    auto_keywords = _merge_keyword_lists(auto_keywords, title_keywords, max_keywords=8)
     if len(auto_keywords) >= 3 or not prefer_llm:
         return auto_keywords, "auto"
 
