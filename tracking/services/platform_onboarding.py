@@ -159,6 +159,11 @@ _DISCOVERY_VALIDATION_BUDGET = {
     Platform.INSTAGRAM: 25,
     Platform.TIKTOK: 25,
 }
+_DISCOVERY_VALIDATION_MAX_SCAN = {
+    Platform.YOUTUBE: 140,
+    Platform.INSTAGRAM: 40,
+    Platform.TIKTOK: 40,
+}
 _DISCOVERY_VALIDATION_ITEMS = 5
 _DISCOVERY_MIN_RECENT_SHORTS = 2
 _DISCOVERY_RECENT_WINDOW_DAYS = 60
@@ -2145,46 +2150,47 @@ def _collector_aware_candidates(
     if not ranked_candidates:
         return [], "поиск выполнен, но кандидаты не совпали с темой ниши на уровне профиля."
 
-    budget = min(len(ranked_candidates), max(1, _DISCOVERY_VALIDATION_BUDGET.get(platform, 1)))
     validated: list[_DiscoveryCandidate] = []
-    candidate_batch = _balanced_validation_candidates(ranked_candidates, budget=budget)
-    batch_texts: dict[str, tuple[list[str], list[int], int]] = {}
     failed_no_content = 0
     failed_low_activity = 0
     failed_offtopic = 0
-    if platform == Platform.INSTAGRAM:
-        batch_texts = _batch_fetch_recent_instagram_reel_texts(
-            candidates=candidate_batch,
-            n=_DISCOVERY_VALIDATION_ITEMS,
-            context=context,
-        )
-    elif platform == Platform.TIKTOK:
-        batch_texts = _batch_fetch_recent_tiktok_texts(
-            candidates=candidate_batch,
-            n=_DISCOVERY_VALIDATION_ITEMS,
-            context=context,
-        )
-    for candidate in candidate_batch:
-        if platform in {Platform.INSTAGRAM, Platform.TIKTOK}:
-            texts, views, recent_count = batch_texts.get(candidate.external_id, ([], [], 0))
-        else:
-            texts, views, recent_count = _fetch_candidate_collectible_texts(candidate=candidate, context=context)
-        if not texts:
-            failed_no_content += 1
-            continue
-        if recent_count < _DISCOVERY_MIN_RECENT_SHORTS:
-            failed_low_activity += 1
-            continue
-        _mark_candidate_collectible(
-            candidate,
-            item_count=len(texts),
-            max_views=max(views) if views else 0,
-            recent_count=recent_count,
-        )
-        if not _theme_content_passes(candidate=candidate, texts=texts, keywords=keywords):
-            failed_offtopic += 1
-            continue
-        validated.append(candidate)
+    for candidate_batch in _progressive_validation_batches(platform=platform, ranked_candidates=ranked_candidates):
+        batch_texts: dict[str, tuple[list[str], list[int], int]] = {}
+        if platform == Platform.INSTAGRAM:
+            batch_texts = _batch_fetch_recent_instagram_reel_texts(
+                candidates=candidate_batch,
+                n=_DISCOVERY_VALIDATION_ITEMS,
+                context=context,
+            )
+        elif platform == Platform.TIKTOK:
+            batch_texts = _batch_fetch_recent_tiktok_texts(
+                candidates=candidate_batch,
+                n=_DISCOVERY_VALIDATION_ITEMS,
+                context=context,
+            )
+        for candidate in candidate_batch:
+            if platform in {Platform.INSTAGRAM, Platform.TIKTOK}:
+                texts, views, recent_count = batch_texts.get(candidate.external_id, ([], [], 0))
+            else:
+                texts, views, recent_count = _fetch_candidate_collectible_texts(candidate=candidate, context=context)
+            if not texts:
+                failed_no_content += 1
+                continue
+            if recent_count < _DISCOVERY_MIN_RECENT_SHORTS:
+                failed_low_activity += 1
+                continue
+            _mark_candidate_collectible(
+                candidate,
+                item_count=len(texts),
+                max_views=max(views) if views else 0,
+                recent_count=recent_count,
+            )
+            if not _theme_content_passes(candidate=candidate, texts=texts, keywords=keywords):
+                failed_offtopic += 1
+                continue
+            validated.append(candidate)
+            if len(validated) >= min(max_candidates, _DISCOVERY_EARLY_STOP_CANDIDATES.get(platform, max_candidates)):
+                break
         if len(validated) >= min(max_candidates, _DISCOVERY_EARLY_STOP_CANDIDATES.get(platform, max_candidates)):
             break
     if validated:
@@ -2211,12 +2217,15 @@ def _balanced_validation_candidates(
     candidates: list[_DiscoveryCandidate],
     *,
     budget: int,
+    excluded_ids: set[str] | None = None,
 ) -> list[_DiscoveryCandidate]:
-    if budget >= len(candidates):
-        return list(candidates)
+    excluded = set(excluded_ids or set())
+    remaining_candidates = [candidate for candidate in candidates if candidate.external_id not in excluded]
+    if budget >= len(remaining_candidates):
+        return list(remaining_candidates)
 
     buckets: dict[str, list[_DiscoveryCandidate]] = {}
-    for candidate in candidates:
+    for candidate in remaining_candidates:
         for query in sorted(candidate.query_hits):
             buckets.setdefault(query, []).append(candidate)
 
@@ -2246,13 +2255,44 @@ def _balanced_validation_candidates(
     if len(selected) >= budget:
         return selected[:budget]
 
-    for candidate in candidates:
+    for candidate in remaining_candidates:
         if candidate.external_id in seen_ids:
             continue
         selected.append(candidate)
         if len(selected) >= budget:
             break
     return selected[:budget]
+
+
+def _progressive_validation_batches(
+    *,
+    platform: str,
+    ranked_candidates: list[_DiscoveryCandidate],
+) -> list[list[_DiscoveryCandidate]]:
+    if not ranked_candidates:
+        return []
+    batch_size = max(1, _DISCOVERY_VALIDATION_BUDGET.get(platform, 1))
+    max_scan = max(batch_size, _DISCOVERY_VALIDATION_MAX_SCAN.get(platform, batch_size))
+    batches: list[list[_DiscoveryCandidate]] = []
+    seen_ids: set[str] = set()
+    scanned = 0
+    while scanned < min(max_scan, len(ranked_candidates)):
+        remaining = [candidate for candidate in ranked_candidates if candidate.external_id not in seen_ids]
+        if not remaining:
+            break
+        batch = _balanced_validation_candidates(
+            remaining,
+            budget=min(batch_size, max_scan - scanned, len(remaining)),
+            excluded_ids=seen_ids,
+        )
+        if not batch:
+            break
+        batches.append(batch)
+        seen_ids.update(candidate.external_id for candidate in batch)
+        scanned += len(batch)
+        if len(batch) < batch_size:
+            break
+    return batches
 
 
 def get_recent_seed_content_texts(

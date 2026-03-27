@@ -543,7 +543,17 @@ def _merge_keyword_lists(*lists: list[str], max_keywords: int = 8) -> list[str]:
     seen: set[tuple[str, ...]] = set()
     for items in lists:
         for keyword in items:
-            tokens = tuple(sorted({_stem_token(token.strip().lower().replace("ё", "е")) for token in re.findall(r"[0-9a-zа-яё]+", keyword, flags=re.IGNORECASE) if len(token.strip()) >= 3}))
+            signature_tokens: set[str] = set()
+            for raw in re.findall(r"[0-9a-zа-яё]+", keyword, flags=re.IGNORECASE):
+                token = raw.strip().lower().replace("ё", "е")
+                if not token:
+                    continue
+                if token.isdigit() and len(token) <= 2:
+                    signature_tokens.add(f"n:{token}")
+                    continue
+                if len(token) >= 3:
+                    signature_tokens.add(_stem_token(token))
+            tokens = tuple(sorted(signature_tokens))
             if not tokens or tokens in seen:
                 continue
             seen.add(tokens)

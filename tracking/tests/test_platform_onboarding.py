@@ -1591,3 +1591,36 @@ def test_youtube_low_recall_rescue_requeries_and_merges_candidates(monkeypatch):
         (Platform.YOUTUBE, "teacher-a"),
         (Platform.YOUTUBE, "teacher-b"),
     ]
+
+
+def test_progressive_validation_batches_scan_beyond_first_budget():
+    candidates = [
+        platform_onboarding._DiscoveryCandidate(
+            platform=Platform.YOUTUBE,
+            external_id=f"yt-{idx}",
+            handle=f"teacher-{idx}",
+            url=f"https://www.youtube.com/@teacher-{idx}",
+            display_name=f"Teacher {idx}",
+            description="english lessons",
+            query_hits={f"query-{idx % 3}"},
+            metadata={"rank_hint": 1000 - idx},
+        )
+        for idx in range(12)
+    ]
+
+    original_budget = platform_onboarding._DISCOVERY_VALIDATION_BUDGET[Platform.YOUTUBE]
+    original_max_scan = platform_onboarding._DISCOVERY_VALIDATION_MAX_SCAN[Platform.YOUTUBE]
+    platform_onboarding._DISCOVERY_VALIDATION_BUDGET[Platform.YOUTUBE] = 4
+    platform_onboarding._DISCOVERY_VALIDATION_MAX_SCAN[Platform.YOUTUBE] = 10
+    try:
+        batches = platform_onboarding._progressive_validation_batches(
+            platform=Platform.YOUTUBE,
+            ranked_candidates=candidates,
+        )
+    finally:
+        platform_onboarding._DISCOVERY_VALIDATION_BUDGET[Platform.YOUTUBE] = original_budget
+        platform_onboarding._DISCOVERY_VALIDATION_MAX_SCAN[Platform.YOUTUBE] = original_max_scan
+
+    assert [len(batch) for batch in batches] == [4, 4, 2]
+    scanned_ids = [candidate.external_id for batch in batches for candidate in batch]
+    assert len(scanned_ids) == len(set(scanned_ids)) == 10

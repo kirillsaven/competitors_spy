@@ -335,6 +335,17 @@ def test_infer_niche_keywords_expands_dota_search_ready_phrases(monkeypatch):
     assert any("гайды dota 2" in keyword or "разборы dota 2" in keyword for keyword in keywords)
 
 
+def test_merge_keyword_lists_keeps_digit_qualified_topic_distinct():
+    merged = niche_service._merge_keyword_lists(
+        ["dota"],
+        ["dota 2"],
+        max_keywords=8,
+    )
+
+    assert "dota" in merged
+    assert "dota 2" in merged
+
+
 def test_infer_niche_keywords_dedupes_same_stem_phrase_reordering(monkeypatch):
     monkeypatch.setattr(
         niche_service,
