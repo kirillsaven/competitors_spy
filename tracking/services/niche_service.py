@@ -363,15 +363,31 @@ def _candidate_subject_terms(
         seen.add(key)
         out.append((value, expandable))
 
-    for source in keyword_sources:
-        for match in re.finditer(r"\b([0-9a-zа-яё-]{3,})\s*(2)\b", str(source.text or ""), flags=re.IGNORECASE):
-            subject = _normalize_subject_term(f"{match.group(1)} {match.group(2)}")
-            if not subject:
-                continue
-            stems = {_stem_token(token) for token in _ACCOUNT_TOKEN_RE.findall(subject) if len(token) >= 3}
-            specific_stems = stems - _GENERIC_SUBJECT_STEMS
-            if specific_stems:
-                add(subject, expandable=True)
+    for account in _ordered_accounts(seed=seed, linked_accounts=linked_accounts):
+        account_title = _normalize_token(account.title or "")
+        for source_text in (str(account.title or ""), str(account.description or "")):
+            for match in re.finditer(r"\b([0-9a-zа-яё-]{3,})\s*(\d{1,2})\b", source_text, flags=re.IGNORECASE):
+                token = _normalize_token(match.group(1))
+                number = match.group(2)
+                if (
+                    len(token) < 3
+                    or token in _STOPWORDS_EN
+                    or token in _STOPWORDS_RU
+                    or token in _STRUCTURAL_JUNK
+                    or token in _LOW_INFORMATION
+                ):
+                    continue
+                stem = _stem_token(token)
+                if stem in _UTILITY_JUNK_STEMS or stem in _GENERIC_SUBJECT_STEMS:
+                    continue
+                supported = (
+                    stem in _IDENTITY_SAFE_THEME_STEMS
+                    or stem_support.get(stem, 0) >= 2
+                    or token in account_title
+                )
+                if not supported:
+                    continue
+                add(f"{token} {number}", expandable=True)
 
     for keyword in keywords:
         value = " ".join(str(keyword or "").split()).strip()
