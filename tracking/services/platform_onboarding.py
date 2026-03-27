@@ -2271,16 +2271,19 @@ def _discover_youtube_search_candidates(
     max_search_calls: int,
     context: SetupRunContext | None = None,
 ) -> list[_DiscoveryCandidate]:
+    initial_budget = max(1, int(max_search_calls))
     queries = _discovery_queries(
         platform=Platform.YOUTUBE,
         keywords=keywords,
         competitors=competitors,
-        max_queries=max_search_calls,
+        max_queries=initial_budget + 3,
     )
     if not queries:
         raise PlatformOnboardingError("No YouTube search queries could be built from niche keywords")
     query_hits: dict[str, set[str]] = {}
     for index, query in enumerate(queries):
+        if index >= initial_budget and len(query_hits) >= _DISCOVERY_EARLY_STOP_CANDIDATES.get(Platform.YOUTUBE, 20):
+            break
         for channel_id in _cached_youtube_search_channel_ids(
             query=query,
             max_results=_DISCOVERY_RESULT_BUDGET[Platform.YOUTUBE],

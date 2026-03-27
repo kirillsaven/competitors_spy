@@ -269,6 +269,64 @@ def test_discover_youtube_search_candidates_respects_budget_without_nameerror(mo
     assert [candidate.external_id for candidate in candidates] == ["yt-1", "yt-2", "yt-3", "yt-4"]
 
 
+def test_discover_youtube_search_candidates_uses_extra_queries_when_recall_is_low(monkeypatch):
+    queries_seen: list[str] = []
+
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_discovery_queries",
+        lambda **kwargs: [
+            "english teachers",
+            "teacher groups",
+            "lesson plans",
+            "online english school",
+            "english tutor",
+        ],
+    )
+
+    def fake_cached_youtube_search_channel_ids(*, query, max_results, context=None):
+        queries_seen.append(query)
+        return {
+            "english teachers": ["yt-1"],
+            "teacher groups": ["yt-2"],
+            "lesson plans": ["yt-3"],
+            "online english school": ["yt-4"],
+            "english tutor": ["yt-5"],
+        }[query]
+
+    class FakeClient:
+        def channels_list(self, *, part, ids):
+            return [
+                {
+                    "id": channel_id,
+                    "snippet": {"title": f"Channel {channel_id}", "description": "English teaching shorts"},
+                    "statistics": {"subscriberCount": "1000"},
+                }
+                for channel_id in ids
+            ]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(platform_onboarding, "_cached_youtube_search_channel_ids", fake_cached_youtube_search_channel_ids)
+    monkeypatch.setattr(platform_onboarding, "get_youtube_client", lambda: FakeClient())
+
+    candidates = platform_onboarding._discover_youtube_search_candidates(
+        keywords=["english teachers", "teacher groups"],
+        competitors=[],
+        max_search_calls=2,
+    )
+
+    assert queries_seen == [
+        "english teachers",
+        "teacher groups",
+        "lesson plans",
+        "online english school",
+        "english tutor",
+    ]
+    assert [candidate.external_id for candidate in candidates] == ["yt-1", "yt-2", "yt-3", "yt-4", "yt-5"]
+
+
 def test_discover_competitors_for_onboarding_ranks_and_dedupes_candidates(monkeypatch):
     monkeypatch.setattr(
         platform_onboarding,
