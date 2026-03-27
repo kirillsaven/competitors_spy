@@ -101,7 +101,7 @@ def test_infer_niche_keywords_auto_uses_recent_content_not_structure(monkeypatch
         uploads_playlist_id=None,
     )
 
-    keywords, source = niche_service.infer_niche_keywords(seed=seed, competitors=[], prefer_llm=False)
+    keywords, source = niche_service.infer_niche_keywords(seed=seed, competitors=[])
 
     assert source == "auto"
     assert "platform" not in keywords
@@ -131,7 +131,7 @@ def test_infer_niche_keywords_auto_filters_ru_en_junk_words(monkeypatch):
         uploads_playlist_id=None,
     )
 
-    keywords, source = niche_service.infer_niche_keywords(seed=seed, competitors=[], prefer_llm=False)
+    keywords, source = niche_service.infer_niche_keywords(seed=seed, competitors=[])
 
     assert source == "auto"
     assert "street food" in keywords
@@ -161,7 +161,7 @@ def test_infer_niche_keywords_auto_prefers_phrase_like_teacher_topics(monkeypatc
         uploads_playlist_id=None,
     )
 
-    keywords, source = niche_service.infer_niche_keywords(seed=seed, competitors=[], prefer_llm=False)
+    keywords, source = niche_service.infer_niche_keywords(seed=seed, competitors=[])
 
     assert source == "auto"
     assert 1 <= len(keywords) <= 6
@@ -192,7 +192,7 @@ def test_infer_niche_keywords_keeps_topical_handle_words_when_supported_by_conte
         uploads_playlist_id=None,
     )
 
-    keywords, _ = niche_service.infer_niche_keywords(seed=seed, competitors=[], prefer_llm=False)
+    keywords, _ = niche_service.infer_niche_keywords(seed=seed, competitors=[])
 
     assert any("english" in keyword for keyword in keywords)
     assert any("teacher" in keyword or "lesson" in keyword for keyword in keywords)
@@ -218,7 +218,7 @@ def test_infer_niche_keywords_dedupes_same_stem_phrase_reordering(monkeypatch):
         uploads_playlist_id="UU1",
     )
 
-    keywords, _ = niche_service.infer_niche_keywords(seed=seed, competitors=[], prefer_llm=False)
+    keywords, _ = niche_service.infer_niche_keywords(seed=seed, competitors=[])
 
     two_word_variants = [keyword for keyword in keywords if set(keyword.split()) == {"space", "news"}]
     assert len(two_word_variants) == 1
@@ -268,7 +268,6 @@ def test_infer_niche_keywords_auto_weights_repeated_topics_across_linked_account
     keywords, _ = niche_service.infer_niche_keywords(
         seed=seed,
         competitors=[],
-        prefer_llm=False,
         linked_accounts=linked_accounts,
     )
 

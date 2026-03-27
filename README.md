@@ -6,7 +6,6 @@
 1) Create `.env` from `.env.example` (skip if you already have `.env`) and fill:
 - `TELEGRAM_BOT_TOKEN`
 - `YOUTUBE_API_KEY`
-- (optional) `GOOGLE_LLM_API_KEY` (Gemini, used only for internal niche inference during setup)
 - (optional) TikTok via Apify: `TIKTOK_PROVIDER=apify`, `TIKTOK_PROVIDER_ACCESS_TOKEN`, `TIKTOK_PROVIDER_BASE_URL`
 - (optional) Instagram via Apify: `INSTAGRAM_PROVIDER=apify`, `INSTAGRAM_PROVIDER_ACCESS_TOKEN`, `INSTAGRAM_PROVIDER_BASE_URL`
 

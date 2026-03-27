@@ -23,8 +23,7 @@ MVP scope:
 Onboarding in Telegram:
 1) user sends a profile link or handle/nickname (required). Both `@handle` and plain `handle` are accepted.
 2) system infers niche keywords:
-   - prefer LLM (Gemini) when configured + rate-limited
-   - fallback to heuristic (channel description + recent titles)
+   - use heuristic (channel description + recent titles)
    - if weak/empty: ask user to input keywords manually
 3) user can paste competitor list (optional). System still does its own discovery for YouTube.
    If user provided competitors, use them to improve niche inference and YouTube discovery.
@@ -48,10 +47,6 @@ Reporting:
 - Avoid expensive YouTube API calls:
   - Prefer channels.list + channelSections.list + playlistItems.list + videos.list
   - Use search.list only for discovery / fallback resolving, strictly limited and cached
-
-LLM (optional):
-- GOOGLE_LLM_API_KEY (Gemini) is used only for internal tasks (no user chat)
-- Rate-limit: GOOGLE_LLM_MAX_CALLS_PER_USER_PER_DAY (default 10)
 
 ## Engineering rules
 - Modular code: adapters + services + celery tasks.

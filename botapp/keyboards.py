@@ -19,18 +19,40 @@ TIME_PRESETS = [
     "22:00",
 ]
 
+TZ_OFFSET_PRESETS = [f"{h:+03d}:00" for h in range(-12, 15)]
+GLOBAL_BACK_CALLBACK = "global_back"
+
+
+def _add_back_button(builder: InlineKeyboardBuilder) -> None:
+    builder.row(InlineKeyboardButton(text="Назад", callback_data=GLOBAL_BACK_CALLBACK))
+
+
+def kb_back_only() -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    _add_back_button(b)
+    return b.as_markup()
+
+
 def kb_seed_candidates(*, candidates: list[dict]) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     for idx, c in enumerate((candidates or [])[:8]):
         title = (c.get("title") or "").strip()
         handle = (c.get("handle") or "").strip()
+        subs = c.get("subscriber_count")
         if not title:
             title = handle or (c.get("external_id") or "")
         txt = title
         if handle:
             txt = f"{title} (@{handle})"
+        try:
+            subs_i = int(subs) if subs is not None else 0
+        except Exception:
+            subs_i = 0
+        if subs_i > 0:
+            txt = f"{txt} - {subs_i:,}".replace(",", " ")
         b.row(InlineKeyboardButton(text=txt[:64], callback_data=f"seed_pick:{idx}"))
     b.row(InlineKeyboardButton(text="Это не то", callback_data="seed_retry"))
+    _add_back_button(b)
     return b.as_markup()
 
 
@@ -45,6 +67,7 @@ def kb_prune_keywords(*, keywords: list[str], excluded: set[str]) -> InlineKeybo
         InlineKeyboardButton(text="Готово", callback_data="kw_done"),
     )
     b.row(InlineKeyboardButton(text="Включить все", callback_data="kw_all"))
+    _add_back_button(b)
     return b.as_markup()
 
 
@@ -52,6 +75,7 @@ def kb_reports_per_day() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.add(InlineKeyboardButton(text="Раз в день", callback_data="rpd_1"))
     b.add(InlineKeyboardButton(text="Два раза в день", callback_data="rpd_2"))
+    _add_back_button(b)
     return b.as_markup()
 
 
@@ -60,11 +84,36 @@ def kb_timezone_method() -> InlineKeyboardMarkup:
     b.row(InlineKeyboardButton(text="Отправить геолокацию", callback_data="tz_location"))
     b.row(InlineKeyboardButton(text="Ввести таймзону вручную", callback_data="tz_manual"))
     b.row(InlineKeyboardButton(text="Оставить текущую", callback_data="tz_keep"))
+    _add_back_button(b)
     return b.as_markup()
+
+
+def kb_timezone_offsets(*, page: int, page_size: int = 9) -> InlineKeyboardMarkup:
+    total = len(TZ_OFFSET_PRESETS)
+    safe_page = max(0, page)
+    start = safe_page * page_size
+    end = min(total, start + page_size)
+
+    b = InlineKeyboardBuilder()
+    for offset in TZ_OFFSET_PRESETS[start:end]:
+        b.add(InlineKeyboardButton(text=f"UTC{offset}", callback_data=f"tzpick:{offset}"))
+    b.adjust(3, 3, 3)
+
+    nav: list[InlineKeyboardButton] = []
+    if safe_page > 0:
+        nav.append(InlineKeyboardButton(text="<", callback_data=f"tzpick_page:{safe_page-1}"))
+    nav.append(InlineKeyboardButton(text=f"{safe_page+1}/{(total + page_size - 1)//page_size}", callback_data="noop"))
+    if end < total:
+        nav.append(InlineKeyboardButton(text=">", callback_data=f"tzpick_page:{safe_page+1}"))
+    b.row(*nav)
+    _add_back_button(b)
+    return b.as_markup()
+
 
 def kb_competitors_next() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.add(InlineKeyboardButton(text="Дальше", callback_data="comp_done"))
+    _add_back_button(b)
     return b.as_markup()
 
 
@@ -89,6 +138,7 @@ def kb_competitors_next_or_ignore() -> InlineKeyboardMarkup:
     b.add(InlineKeyboardButton(text="Дальше", callback_data="comp_done"))
     b.add(InlineKeyboardButton(text="Не учитывать список", callback_data="comp_clear"))
     b.adjust(1)
+    _add_back_button(b)
     return b.as_markup()
 
 
@@ -101,6 +151,7 @@ def kb_time_presets_single() -> InlineKeyboardMarkup:
         b.add(InlineKeyboardButton(text=t, callback_data=f"time1:{t}"))
     b.add(InlineKeyboardButton(text="Другое время", callback_data="time1:custom"))
     b.adjust(3, 3, 3, 3, 1)
+    _add_back_button(b)
     return b.as_markup()
 
 
@@ -110,6 +161,7 @@ def kb_time_presets_first() -> InlineKeyboardMarkup:
         b.add(InlineKeyboardButton(text=t, callback_data=f"time1pick:{t}"))
     b.add(InlineKeyboardButton(text="Ввести вручную", callback_data="time1pick:manual"))
     b.adjust(3, 3, 3, 3, 1)
+    _add_back_button(b)
     return b.as_markup()
 
 
@@ -119,6 +171,7 @@ def kb_time_presets_second() -> InlineKeyboardMarkup:
         b.add(InlineKeyboardButton(text=t, callback_data=f"time2:{t}"))
     b.add(InlineKeyboardButton(text="Ввести вручную", callback_data="time2:manual"))
     b.adjust(3, 3, 3, 3, 1)
+    _add_back_button(b)
     return b.as_markup()
 
 
@@ -127,6 +180,7 @@ def kb_prune_competitors(*, competitor_rows: list[tuple[int, str]], excluded_ids
     if total == 0:
         b = InlineKeyboardBuilder()
         b.add(InlineKeyboardButton(text="Продолжить", callback_data="prune_done"))
+        _add_back_button(b)
         return b.as_markup()
 
     start = page * page_size
@@ -150,4 +204,5 @@ def kb_prune_competitors(*, competitor_rows: list[tuple[int, str]], excluded_ids
         InlineKeyboardButton(text="Включить всех", callback_data="prune_all"),
         InlineKeyboardButton(text="Готово", callback_data="prune_done"),
     )
+    _add_back_button(b)
     return b.as_markup()

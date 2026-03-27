@@ -13,6 +13,7 @@ from tracking.adapters.registry import (
 from tracking.adapters.instagram import ApifyInstagramClient, build_profile_url as build_instagram_profile_url, profile_to_video_details
 from tracking.adapters.tiktok import ApifyTikTokClient, build_profile_url, item_to_video_details
 from tracking.adapters.youtube import (
+    YouTubeApiError,
     YouTubeClient,
     playlist_items_to_video_ids,
     video_items_to_details,
@@ -99,22 +100,41 @@ def refresh_youtube_competitor(
     try:
         meta = competitor.meta or {}
         uploads_playlist_id = meta.get("uploads_playlist_id")
-        if not uploads_playlist_id:
+
+        def refresh_uploads_playlist_id() -> str | None:
             items = client.channels_list(part="contentDetails,snippet", ids=[competitor.external_id])
             if not items:
                 raise CollectorError(f"Channel not found: {competitor.external_id}")
             cd = items[0].get("contentDetails") or {}
-            uploads_playlist_id = (cd.get("relatedPlaylists") or {}).get("uploads")
-            if uploads_playlist_id:
-                meta["uploads_playlist_id"] = uploads_playlist_id
+            fresh_uploads_playlist_id = (cd.get("relatedPlaylists") or {}).get("uploads")
+            if fresh_uploads_playlist_id:
+                meta["uploads_playlist_id"] = fresh_uploads_playlist_id
                 competitor.meta = meta
                 competitor.display_name = (items[0].get("snippet") or {}).get("title") or competitor.display_name
                 competitor.save(update_fields=["meta", "display_name"])
+            return fresh_uploads_playlist_id
+
+        if not uploads_playlist_id:
+            uploads_playlist_id = refresh_uploads_playlist_id()
 
         if not uploads_playlist_id:
             raise CollectorError("uploads playlist id is missing")
 
-        playlist_items = client.playlist_items(playlist_id=str(uploads_playlist_id), max_results=max_results)
+        try:
+            playlist_items = client.playlist_items(playlist_id=str(uploads_playlist_id), max_results=max_results)
+        except YouTubeApiError as e:
+            # Playlist IDs can become stale/invalid for edge channels. Refresh channel data and retry once.
+            if "playlistNotFound" not in str(e):
+                raise
+            logger.warning(
+                "uploads playlist not found, refreshing channel metadata and retrying (competitor_id=%s, channel=%s)",
+                competitor.id,
+                competitor.external_id,
+            )
+            uploads_playlist_id = refresh_uploads_playlist_id()
+            if not uploads_playlist_id:
+                return []
+            playlist_items = client.playlist_items(playlist_id=str(uploads_playlist_id), max_results=max_results)
         video_ids = playlist_items_to_video_ids(playlist_items)
         if not video_ids:
             return []

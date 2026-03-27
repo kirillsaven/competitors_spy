@@ -80,11 +80,6 @@ def test_start_keywords_step_uses_instagram_seed_without_manual_prompt(monkeypat
 
     monkeypatch.setattr(setup, "db_call", _db_call)
     monkeypatch.setattr(setup, "db_run", _db_run)
-    monkeypatch.setattr(
-        setup,
-        "decide_and_consume_llm_call",
-        lambda **kwargs: SimpleNamespace(allow=False, reason="disabled", used_today=0, max_calls_per_day=0),
-    )
     monkeypatch.setattr(setup, "infer_niche_keywords", lambda **kwargs: (["space", "mars"], "auto"))
 
     async def fake_show_keywords_editor(message, state):
@@ -134,11 +129,6 @@ def test_start_keywords_step_uses_tiktok_seed_without_manual_prompt(monkeypatch)
 
     monkeypatch.setattr(setup, "db_call", _db_call)
     monkeypatch.setattr(setup, "db_run", _db_run)
-    monkeypatch.setattr(
-        setup,
-        "decide_and_consume_llm_call",
-        lambda **kwargs: SimpleNamespace(allow=False, reason="disabled", used_today=0, max_calls_per_day=0),
-    )
     monkeypatch.setattr(setup, "infer_niche_keywords", lambda **kwargs: (["basketball", "highlights"], "auto"))
 
     async def fake_show_keywords_editor(message, state):
@@ -307,12 +297,6 @@ def test_start_keywords_step_passes_confirmed_linked_accounts(monkeypatch):
 
     monkeypatch.setattr(setup, "db_call", _db_call)
     monkeypatch.setattr(setup, "db_run", _db_run)
-    monkeypatch.setattr(
-        setup,
-        "decide_and_consume_llm_call",
-        lambda **kwargs: SimpleNamespace(allow=False, reason="disabled", used_today=0, max_calls_per_day=0),
-    )
-
     def fake_infer_niche_keywords(**kwargs):
         captured["linked_accounts"] = kwargs.get("linked_accounts")
         return ["space", "science"], "auto"

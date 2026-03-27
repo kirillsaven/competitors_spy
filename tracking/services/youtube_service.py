@@ -93,7 +93,7 @@ def discover_youtube_competitors(
     keywords: list[str],
     seed: SeedResolution | None,
     max_search_calls: int,
-    max_candidates: int = 20,
+    max_candidates: int = 100,
     extra_featured_channel_ids: list[str] | None = None,
 ) -> list[CompetitorCandidate]:
     client = get_youtube_client()
@@ -127,23 +127,71 @@ def discover_youtube_competitors(
             except YouTubeApiError as e:
                 logger.warning("Failed to load channel sections (%s): %s", src_id, e)
 
-        # Keyword-based discovery (very limited due to quota).
-        q = " ".join((keywords or [])[:8]).strip()
-        if q and max_search_calls > 0:
-            try:
-                for cid in client.search_channels(q=q, max_results=10):
-                    add_id(cid, "search")
-            except YouTubeApiError as e:
-                logger.warning("Failed to search channels: %s", e)
+        # Keyword-based discovery (quota-limited).
+        search_calls = max(0, int(max_search_calls))
+        if search_calls > 0:
+            seen_queries: set[str] = set()
+            queries: list[str] = []
+
+            def add_query(raw: str) -> None:
+                normalized = " ".join(str(raw or "").split()).strip()
+                if len(normalized) < 2:
+                    return
+                key = normalized.lower()
+                if key in seen_queries:
+                    return
+                seen_queries.add(key)
+                queries.append(normalized)
+
+            add_query(" ".join((keywords or [])[:8]))
+            for kw in (keywords or [])[:8]:
+                add_query(str(kw or ""))
+
+            calls_left = search_calls
+            for q in queries:
+                if calls_left <= 0:
+                    break
+                calls_left -= 1
+                try:
+                    for cid in client.search_channels(q=q, max_results=10):
+                        add_id(cid, "search")
+                except YouTubeApiError as e:
+                    logger.warning("Failed to search channels (q=%r): %s", q, e)
+
+            # Seed title/handle is a fallback only when keyword queries found nothing.
+            if not candidate_ids and calls_left > 0 and seed:
+                seed_queries: list[str] = []
+                if seed.title:
+                    seed_queries.append(str(seed.title))
+                if seed.handle:
+                    seed_queries.append(str(seed.handle).lstrip("@"))
+                for q in seed_queries:
+                    if calls_left <= 0:
+                        break
+                    calls_left -= 1
+                    try:
+                        for cid in client.search_channels(q=q, max_results=10):
+                            add_id(cid, "search_seed")
+                    except YouTubeApiError as e:
+                        logger.warning("Failed to search seed channels (q=%r): %s", q, e)
 
         # Fetch channel metadata in batch.
-        out: list[CompetitorCandidate] = []
+        ranked_out: list[tuple[int, CompetitorCandidate]] = []
         for i in range(0, len(candidate_ids), 50):
             batch = candidate_ids[i : i + 50]
-            items = client.channels_list(part="snippet", ids=batch)
+            items = client.channels_list(part="snippet,statistics", ids=batch)
+            subs_by_id: dict[str, int] = {}
+            for item in items:
+                cid = str(item.get("id") or "")
+                try:
+                    subs_by_id[cid] = int(((item.get("statistics") or {}).get("subscriberCount")) or 0)
+                except Exception:
+                    subs_by_id[cid] = 0
             for cand in channel_items_to_candidates(items, reason=""):
                 reasons = sorted(reason_by_id.get(cand.external_id, set()))
-                out.append(
+                ranked_out.append(
+                    (
+                        subs_by_id.get(cand.external_id, 0),
                     CompetitorCandidate(
                         platform=cand.platform,
                         external_id=cand.external_id,
@@ -151,12 +199,14 @@ def discover_youtube_competitors(
                         url=cand.url,
                         display_name=cand.display_name,
                         reason=",".join(reasons) if reasons else "auto",
+                    ),
                     )
                 )
 
         # De-dup and cap.
+        ranked_out.sort(key=lambda x: (-x[0], str(x[1].display_name or "").lower()))
         uniq: dict[str, CompetitorCandidate] = {}
-        for c in out:
+        for _, c in ranked_out:
             if c.external_id not in uniq:
                 uniq[c.external_id] = c
         return list(uniq.values())[:max_candidates]
@@ -188,15 +238,20 @@ def search_youtube_seed_candidates(*, query: str, max_results: int = 8) -> list[
         if not uniq:
             return []
 
-        items = client.channels_list(part="snippet,contentDetails", ids=uniq[:50])
+        items = client.channels_list(part="snippet,contentDetails,statistics", ids=uniq[:50])
         out: list[SeedResolution] = []
         for it in items:
             cid = it.get("id")
             snippet = it.get("snippet") or {}
             cd = it.get("contentDetails") or {}
+            stats = it.get("statistics") or {}
             uploads = ((cd.get("relatedPlaylists") or {}).get("uploads")) if cd else None
             custom_url = snippet.get("customUrl") or ""
             handle = custom_url[1:] if isinstance(custom_url, str) and custom_url.startswith("@") else None
+            try:
+                subscriber_count = int(stats.get("subscriberCount")) if stats.get("subscriberCount") is not None else None
+            except Exception:
+                subscriber_count = None
             out.append(
                 SeedResolution(
                     platform="youtube",
@@ -206,8 +261,10 @@ def search_youtube_seed_candidates(*, query: str, max_results: int = 8) -> list[
                     title=snippet.get("title"),
                     description=snippet.get("description"),
                     uploads_playlist_id=uploads,
+                    subscriber_count=subscriber_count,
                 )
             )
+        out.sort(key=lambda x: (-(x.subscriber_count or 0), str(x.title or "").lower()))
         return out[: max_results]
     finally:
         client.close()

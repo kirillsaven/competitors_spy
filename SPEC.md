@@ -9,7 +9,6 @@ Key decisions:
 - Collection strategy: incremental (minimize YouTube quota)
 - Report period: since last run (last_run_at -> now)
 - Timezone: optional via location -> IANA timezone; fallback manual input; default Europe/Moscow
-- LLM (optional): Gemini used only for internal niche inference (no user chat), rate-limited per user/day
 
 ## Architecture
 Django project with apps:
@@ -86,11 +85,9 @@ Notes:
 Goal: infer 5-8 concise RU keywords/phrases for YouTube discovery.
 
 Strategy:
-- Prefer LLM (Gemini) when configured:
-  - prompt is fixed (no user chat), output is strict JSON
-  - rate-limited: GOOGLE_LLM_MAX_CALLS_PER_USER_PER_DAY
-- Fallback heuristic:
+- Heuristic:
   - source text: channel title + description + last ~10 video titles
+  - add phrase-level topic hints for strong categories like English learning and engineering/science
   - tokenize (RU+EN), remove stopwords, keep tokens len>=3
   - pick top N keywords by frequency
 - If weak/empty -> ask user to input/edit keywords manually.
@@ -178,5 +175,4 @@ Services:
 .env.example includes:
 TELEGRAM_BOT_TOKEN, YOUTUBE_API_KEY, DATABASE_URL, REDIS_URL,
 BASELINE_N, BASELINE_WINDOW_DAYS, YT_RECENT_N_FOR_METRICS,
-MAX_COMPETITORS_YOUTUBE, MIN_DELTA_VIEWS, MIN_VIEWS_END, DEFAULT_TIMEZONE,
-GOOGLE_LLM_API_KEY, GOOGLE_LLM_MODEL, GOOGLE_LLM_MAX_CALLS_PER_USER_PER_DAY
+MAX_COMPETITORS_YOUTUBE, MIN_DELTA_VIEWS, MIN_VIEWS_END, DEFAULT_TIMEZONE

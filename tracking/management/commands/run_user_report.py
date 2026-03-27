@@ -17,6 +17,5 @@ class Command(BaseCommand):
         user = TgUser.objects.filter(tg_user_id=tg_user_id).first()
         if not user:
             raise CommandError(f"TgUser not found: {tg_user_id}")
-        run_user_report.delay(user.id)
+        run_user_report.delay(user.id, "")
         self.stdout.write(self.style.SUCCESS(f"Enqueued run_user_report for tg_user_id={tg_user_id} (user_id={user.id})"))
-

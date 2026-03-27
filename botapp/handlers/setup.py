@@ -15,6 +15,7 @@ from django.conf import settings
 from django.utils import timezone
 
 from botapp.db import db_call, db_run
+from botapp.user_sync import upsert_tg_user
 from botapp.keyboards import (
     kb_competitors_next,
     kb_competitors_next_or_ignore,
@@ -53,8 +54,7 @@ from tracking.models import (
 )
 from tracking.services.account_linking import replace_user_linked_accounts, suggest_accounts_for_platforms
 from tracking.services.competitor_service import upsert_competitor
-from tracking.services.llm_usage import decide_and_consume_llm_call
-from tracking.services.niche_service import infer_niche_keywords
+from tracking.services.niche_service import infer_niche_keywords, is_niche_keywords_poor
 from tracking.services.platform_onboarding import PlatformOnboardingError, discover_competitors_for_onboarding
 from tracking.services.seed_resolver import (
     SeedResolveError,
@@ -63,7 +63,7 @@ from tracking.services.seed_resolver import (
     resolve_seed_for_platform,
 )
 from tracking.services.youtube_service import search_youtube_seed_candidates
-from tracking.tasks import run_user_report_now
+from tracking.tasks import bootstrap_user_data
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -92,6 +92,10 @@ def _seed_to_dict(seed: SeedResolution) -> dict:
 
 
 def _seed_from_dict(data: dict) -> SeedResolution:
+    try:
+        subscriber_count = int(data.get("subscriber_count")) if data.get("subscriber_count") is not None else None
+    except Exception:
+        subscriber_count = None
     return SeedResolution(
         platform=str(data.get("platform") or ""),
         external_id=str(data.get("external_id") or ""),
@@ -100,6 +104,7 @@ def _seed_from_dict(data: dict) -> SeedResolution:
         title=data.get("title"),
         description=data.get("description"),
         uploads_playlist_id=data.get("uploads_playlist_id"),
+        subscriber_count=subscriber_count,
     )
 
 
@@ -474,9 +479,13 @@ async def cmd_setup(message: Message, state: FSMContext) -> None:
         return
 
     user, _ = await db_call(
-        TgUser.objects.update_or_create,
-        tg_user_id=message.from_user.id,
-        defaults={"tg_chat_id": message.chat.id},
+        upsert_tg_user,
+        telegram_user_id=message.from_user.id,
+        chat_id=message.chat.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        language_code=message.from_user.language_code,
     )
 
     # Reset active competitors for a clean re-setup.
@@ -492,9 +501,13 @@ async def cmd_schedule(message: Message, state: FSMContext) -> None:
     if not message.from_user:
         return
     user, _ = await db_call(
-        TgUser.objects.update_or_create,
-        tg_user_id=message.from_user.id,
-        defaults={"tg_chat_id": message.chat.id},
+        upsert_tg_user,
+        telegram_user_id=message.from_user.id,
+        chat_id=message.chat.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        language_code=message.from_user.language_code,
     )
     await state.clear()
     await state.update_data(user_id=user.id)
@@ -831,18 +844,11 @@ async def _start_keywords_step(message: Message, state: FSMContext) -> None:
 
     await message.answer("Секунду, подбираю ключевые слова по нише…")
 
-    decision = await db_call(decide_and_consume_llm_call, user=user, now_utc=timezone.now())
-    if not decision.allow and decision.reason == "limit_reached":
-        await message.answer(
-            f"Лимит умного анализа на сегодня исчерпан ({decision.used_today}/{decision.max_calls_per_day}). Использую быстрый анализ."
-        )
-    prefer_llm = decision.allow
     try:
         kws, source = await asyncio.to_thread(
             infer_niche_keywords,
             seed=context_seed,
             competitors=comp_seeds,
-            prefer_llm=prefer_llm,
             linked_accounts=context_accounts,
         )
     except Exception as e:
@@ -1574,7 +1580,7 @@ async def _finalize_schedule(message: Message, state: FSMContext) -> None:
         f"Расписание: {', '.join(times)}\n"
         f"Время: {tz_label}\n"
         f"Следующий отчет: {format_dt_local(next_run_at, user.timezone_str)}\n\n"
-        "Сейчас соберу первый отчет, чтобы все проверить.",
+        "Сейчас соберу стартовые метрики, чтобы первый отчет пришел точно по расписанию.",
     )
 
-    run_user_report_now.delay(user.id)
+    bootstrap_user_data.delay(user.id)

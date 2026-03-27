@@ -24,7 +24,6 @@ class SeedStatus(models.TextChoices):
 
 class NicheSource(models.TextChoices):
     AUTO = "auto", "Auto"
-    LLM = "llm", "LLM"
     MANUAL = "manual", "Manual"
 
 
@@ -60,13 +59,21 @@ class TzSource(models.TextChoices):
 class TgUser(models.Model):
     tg_user_id = models.BigIntegerField(unique=True)
     tg_chat_id = models.BigIntegerField()
+    tg_username = models.CharField(max_length=255, blank=True, default="")
+    tg_first_name = models.CharField(max_length=255, blank=True, default="")
+    tg_last_name = models.CharField(max_length=255, blank=True, default="")
+    tg_language_code = models.CharField(max_length=32, blank=True, default="")
     timezone_str = models.CharField(max_length=64, default=_default_timezone_str)
     tz_source = models.CharField(max_length=16, choices=TzSource.choices, default=TzSource.DEFAULT)
-    limits_json = models.JSONField(default=dict, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self) -> str:
+        full_name = " ".join(part for part in [self.tg_first_name, self.tg_last_name] if part).strip()
+        if self.tg_username:
+            return f"tg:@{self.tg_username}" if not full_name else f"tg:@{self.tg_username} ({full_name})"
+        if full_name:
+            return f"tg:{self.tg_user_id} ({full_name})"
         return f"tg:{self.tg_user_id}"
 
 

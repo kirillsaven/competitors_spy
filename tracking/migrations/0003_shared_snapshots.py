@@ -148,7 +148,7 @@ class Migration(migrations.Migration):
             model_name="seedprofile",
             name="niche_source",
             field=models.CharField(
-                choices=[("auto", "Auto"), ("llm", "LLM"), ("manual", "Manual")], default="manual", max_length=16
+                choices=[("auto", "Auto"), ("manual", "Manual")], default="manual", max_length=16
             ),
         ),
         migrations.AddConstraint(
@@ -164,4 +164,3 @@ class Migration(migrations.Migration):
             constraint=models.UniqueConstraint(fields=("user", "competitor"), name="uniq_user_competitor"),
         ),
     ]
-

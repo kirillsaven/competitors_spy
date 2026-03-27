@@ -32,6 +32,15 @@ def _parse_rfc3339(value: str) -> datetime:
     return dt
 
 
+def _to_int(value: Any) -> int | None:
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
 def extract_handle(raw: str) -> str | None:
     s = (raw or "").strip()
     if not s:
@@ -202,17 +211,17 @@ def resolve_seed_input(client: YouTubeClient, raw_input: str) -> SeedResolution 
 
     channel_item: dict[str, Any] | None = None
     if handle:
-        items = client.channels_list(part="snippet,contentDetails", for_handle=handle)
+        items = client.channels_list(part="snippet,contentDetails,statistics", for_handle=handle)
         channel_item = items[0] if items else None
     elif channel_id:
-        items = client.channels_list(part="snippet,contentDetails", ids=[channel_id])
+        items = client.channels_list(part="snippet,contentDetails,statistics", ids=[channel_id])
         channel_item = items[0] if items else None
     elif video_id:
         vids = client.videos_list(ids=[video_id], part="snippet")
         if vids:
             cid = (vids[0].get("snippet") or {}).get("channelId")
             if cid:
-                items = client.channels_list(part="snippet,contentDetails", ids=[cid])
+                items = client.channels_list(part="snippet,contentDetails,statistics", ids=[cid])
                 channel_item = items[0] if items else None
     else:
         return None
@@ -223,6 +232,7 @@ def resolve_seed_input(client: YouTubeClient, raw_input: str) -> SeedResolution 
     cid = channel_item.get("id")
     snippet = channel_item.get("snippet") or {}
     content_details = channel_item.get("contentDetails") or {}
+    stats = channel_item.get("statistics") or {}
     uploads = ((content_details.get("relatedPlaylists") or {}).get("uploads")) if content_details else None
     title = snippet.get("title")
     desc = snippet.get("description")
@@ -235,6 +245,7 @@ def resolve_seed_input(client: YouTubeClient, raw_input: str) -> SeedResolution 
         title=title,
         description=desc,
         uploads_playlist_id=uploads,
+        subscriber_count=_to_int(stats.get("subscriberCount")),
     )
 
 

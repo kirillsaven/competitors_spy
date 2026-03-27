@@ -4,9 +4,10 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from botapp.db import db_run
+from botapp.db import db_call, db_run
+from botapp.user_sync import upsert_tg_user
 from common.time import format_dt_local, format_timezone_label
-from tracking.models import Platform, Schedule, TgUser, UserCompetitor
+from tracking.models import Platform, Schedule, UserCompetitor
 from tracking.tasks import run_user_report_now
 
 router = Router()
@@ -23,10 +24,15 @@ def _platform_counts(*, user: TgUser) -> dict[str, int]:
 async def cmd_status(message: Message) -> None:
     if not message.from_user:
         return
-    user = await db_run(lambda: TgUser.objects.filter(tg_user_id=message.from_user.id).first())
-    if not user:
-        await message.answer("Сначала запусти /setup.")
-        return
+    user, _ = await db_call(
+        upsert_tg_user,
+        telegram_user_id=message.from_user.id,
+        chat_id=message.chat.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        language_code=message.from_user.language_code,
+    )
 
     counts = await db_run(lambda: _platform_counts(user=user))
     schedule = await db_run(lambda: Schedule.objects.filter(user=user).first())
@@ -55,11 +61,19 @@ async def cmd_status(message: Message) -> None:
 async def cmd_report(message: Message) -> None:
     if not message.from_user:
         return
-    user = await db_run(lambda: TgUser.objects.filter(tg_user_id=message.from_user.id).first())
-    if not user:
+    user, _ = await db_call(
+        upsert_tg_user,
+        telegram_user_id=message.from_user.id,
+        chat_id=message.chat.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        language_code=message.from_user.language_code,
+    )
+    schedule = await db_run(lambda: Schedule.objects.filter(user=user).first())
+    if not schedule or not schedule.is_enabled:
         await message.answer("Сначала запусти /setup.")
         return
-    schedule = await db_run(lambda: Schedule.objects.filter(user=user).first())
     if schedule and schedule.is_running:
         await message.answer("Отчет уже собирается. Пришлю сообщением, когда будет готов.")
         return
@@ -71,10 +85,15 @@ async def cmd_report(message: Message) -> None:
 async def cmd_competitors(message: Message) -> None:
     if not message.from_user:
         return
-    user = await db_run(lambda: TgUser.objects.filter(tg_user_id=message.from_user.id).first())
-    if not user:
-        await message.answer("Сначала запусти /setup.")
-        return
+    user, _ = await db_call(
+        upsert_tg_user,
+        telegram_user_id=message.from_user.id,
+        chat_id=message.chat.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        language_code=message.from_user.language_code,
+    )
     links = await db_run(
         lambda: list(
             UserCompetitor.objects.select_related("competitor")

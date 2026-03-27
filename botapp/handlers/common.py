@@ -5,7 +5,7 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from botapp.db import db_call
-from tracking.models import TgUser
+from botapp.user_sync import upsert_tg_user
 
 router = Router()
 
@@ -15,9 +15,13 @@ async def cmd_start(message: Message) -> None:
     if not message.from_user:
         return
     await db_call(
-        TgUser.objects.update_or_create,
-        tg_user_id=message.from_user.id,
-        defaults={"tg_chat_id": message.chat.id},
+        upsert_tg_user,
+        telegram_user_id=message.from_user.id,
+        chat_id=message.chat.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        language_code=message.from_user.language_code,
     )
     await message.answer(
         "Привет! Я бот для отслеживания контента конкурентов.\n\n"

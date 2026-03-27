@@ -19,8 +19,19 @@ from .models import (
 
 @admin.register(TgUser)
 class TgUserAdmin(admin.ModelAdmin):
-    list_display = ("tg_user_id", "tg_chat_id", "timezone_str", "tz_source", "created_at", "updated_at")
-    search_fields = ("tg_user_id", "tg_chat_id", "timezone_str")
+    list_display = (
+        "tg_user_id",
+        "tg_username",
+        "tg_first_name",
+        "tg_last_name",
+        "tg_language_code",
+        "tg_chat_id",
+        "timezone_str",
+        "tz_source",
+        "created_at",
+        "updated_at",
+    )
+    search_fields = ("tg_user_id", "tg_username", "tg_first_name", "tg_last_name", "tg_chat_id", "timezone_str")
     list_filter = ("tz_source",)
 
 
