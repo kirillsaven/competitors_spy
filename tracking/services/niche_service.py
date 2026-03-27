@@ -26,10 +26,15 @@ _EXAM_SUBJECT_RE = re.compile(r"\b(егэ|огэ)\s+по\s+([0-9a-zа-яё-]{3,}
 _FOR_BEGINNERS_RE = re.compile(r"\b(для\s+начинающ[0-9a-zа-яё-]*|с\s+нуля|начальн[0-9a-zа-яё-]*\s+уров[0-9a-zа-яё-]*)", flags=re.IGNORECASE)
 _FOR_ADULTS_RE = re.compile(r"\b(для\s+взросл[0-9a-zа-яё-]*|преподавать\s+взросл[0-9a-zа-яё-]*)", flags=re.IGNORECASE)
 _CONVERSATIONAL_RE = re.compile(r"\b(разговорн[0-9a-zа-яё-]*|заговор[0-9a-zа-яё-]*)", flags=re.IGNORECASE)
+_LESSON_RE = re.compile(r"\b(урок[0-9a-zа-яё-]*|lesson[s]?|изучен[0-9a-zа-яё-]*)", flags=re.IGNORECASE)
+_SCHOOL_RE = re.compile(r"\b(школ[0-9a-zа-яё-]*|school|academy)", flags=re.IGNORECASE)
+_TEACHER_RE = re.compile(r"\b(репетитор[0-9a-zа-яё-]*|преподавател[0-9a-zа-яё-]*|teacher|tutor)", flags=re.IGNORECASE)
+_GUIDE_RE = re.compile(r"\b(гайд[0-9a-zа-яё-]*|guide[s]?|разбор[0-9a-zа-яё-]*|патч[0-9a-zа-яё-]*|meta|мет[ао][0-9a-zа-яё-]*)", flags=re.IGNORECASE)
 _ACCOUNT_TOKEN_RE = re.compile(r"[0-9a-zа-яё]+", flags=re.IGNORECASE)
 _UTILITY_JUNK_STEMS = {
     "найд",
     "ссылк",
+    "профил",
     "оставля",
     "заяв",
     "человек",
@@ -39,6 +44,7 @@ _UTILITY_JUNK_STEMS = {
     "представител",
     "мир",
     "пут",
+    "путь",
     "топ",
 }
 
@@ -357,6 +363,16 @@ def _candidate_subject_terms(
         seen.add(key)
         out.append((value, expandable))
 
+    for source in keyword_sources:
+        for match in re.finditer(r"\b([0-9a-zа-яё-]{3,})\s*(2)\b", str(source.text or ""), flags=re.IGNORECASE):
+            subject = _normalize_subject_term(f"{match.group(1)} {match.group(2)}")
+            if not subject:
+                continue
+            stems = {_stem_token(token) for token in _ACCOUNT_TOKEN_RE.findall(subject) if len(token) >= 3}
+            specific_stems = stems - _GENERIC_SUBJECT_STEMS
+            if specific_stems:
+                add(subject, expandable=True)
+
     for keyword in keywords:
         value = " ".join(str(keyword or "").split()).strip()
         if not value:
@@ -431,6 +447,25 @@ def _normalize_subject_term(term: str) -> str:
     return value
 
 
+def _subject_object_form(term: str) -> str:
+    value = _normalize_subject_term(term)
+    if not value or " " in value:
+        return value
+    if value.endswith("ий"):
+        return value[:-2] + "ого"
+    if value.endswith("ый") or value.endswith("ой"):
+        return value[:-2] + "ого"
+    if value.endswith("ая"):
+        return value[:-2] + "ой"
+    if value.endswith("ое"):
+        return value[:-2] + "ого"
+    if value.endswith("а"):
+        return value[:-1] + "ы"
+    if value.endswith("я"):
+        return value[:-1] + "и"
+    return value
+
+
 def _supplement_search_utility_keywords(
     *,
     seed: SeedResolution,
@@ -462,12 +497,27 @@ def _supplement_search_utility_keywords(
         add(subject)
         if not expandable:
             continue
+        object_subject = _subject_object_form(subject)
         if _FOR_BEGINNERS_RE.search(source_text):
             add(f"{subject} для начинающих")
         if _FOR_ADULTS_RE.search(source_text):
             add(f"{subject} для взрослых")
         if _CONVERSATIONAL_RE.search(source_text):
             add(f"разговорный {subject}")
+        if _LESSON_RE.search(source_text):
+            add(f"уроки {object_subject}")
+        if _SCHOOL_RE.search(source_text):
+            add(f"школа {object_subject}")
+            if "онлайн" in source_text.lower():
+                add(f"онлайн школа {object_subject}")
+        if _TEACHER_RE.search(source_text):
+            add(f"преподаватель {object_subject}")
+            add(f"репетитор {object_subject}")
+        if _GUIDE_RE.search(source_text):
+            add(f"гайды {subject}")
+            add(f"разборы {subject}")
+            if any(char.isdigit() for char in subject):
+                add(f"патч {subject}")
 
     return out
 

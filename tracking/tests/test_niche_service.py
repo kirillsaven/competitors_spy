@@ -302,7 +302,37 @@ def test_infer_niche_keywords_keeps_game_subject_from_title_and_description(monk
     keywords, _ = niche_service.infer_niche_keywords(seed=seed, competitors=[], prefer_llm=False)
 
     assert any(keyword in {"dota", "dota 2"} for keyword in keywords)
+    assert any("dota 2" in keyword or "dota" == keyword for keyword in keywords)
     assert all("pinkman" not in keyword for keyword in keywords)
+    assert all("путь" not in keyword for keyword in keywords)
+    assert all("мир" not in keyword for keyword in keywords)
+
+
+def test_infer_niche_keywords_expands_dota_search_ready_phrases(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: [
+            "Dota 2 guide for offlane players",
+            "Разбор патча Dota 2 и метовых героев",
+            "Гайд по mmr апу в dota 2",
+            "Лучшие фишки для саппортов в дота 2",
+        ],
+    )
+    seed = SeedResolution(
+        platform=Platform.YOUTUBE,
+        external_id="yt-dota",
+        handle="pinkmandota",
+        url="https://www.youtube.com/@pinkmandota",
+        title="Pinkman Dota 2",
+        description="Гайды, разборы матчапов и обучение по Dota 2.",
+        uploads_playlist_id="UU1",
+    )
+
+    keywords, _ = niche_service.infer_niche_keywords(seed=seed, competitors=[], prefer_llm=False)
+
+    assert any(keyword == "dota 2" for keyword in keywords)
+    assert any("гайды dota 2" in keyword or "разборы dota 2" in keyword for keyword in keywords)
 
 
 def test_infer_niche_keywords_dedupes_same_stem_phrase_reordering(monkeypatch):
