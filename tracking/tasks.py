@@ -22,6 +22,10 @@ logger = logging.getLogger(__name__)
 FIRST_REPORT_STATUS_DELAY_SECONDS = 90
 
 
+class StaleScheduleConfigError(RuntimeError):
+    pass
+
+
 def _get_active_competitors(*, user: TgUser) -> list[Competitor]:
     return get_active_competitors(user=user)
 
@@ -55,14 +59,51 @@ def _compute_bootstrap_last_run_at(*, schedule: Schedule, captured_at: datetime)
     return min(captured_at, schedule.next_run_at - timedelta(seconds=1))
 
 
-def _generate_and_send_report(*, user: TgUser, period_start, period_end, trigger: str = "manual") -> Report:
-    if trigger == "setup":
-        return create_and_send_setup_verification_report(
+def _assert_current_schedule_config(*, user: TgUser, schedule_config_version: int | None) -> None:
+    if schedule_config_version is None:
+        return
+    current_version = Schedule.objects.filter(user=user).values_list("config_version", flat=True).first()
+    if current_version is None:
+        raise StaleScheduleConfigError("schedule disappeared")
+    if int(current_version) != int(schedule_config_version):
+        raise StaleScheduleConfigError(
+            f"stale schedule config: expected={schedule_config_version} actual={current_version}"
+        )
+
+
+def _generate_and_send_report(
+    *,
+    user: TgUser,
+    period_start,
+    period_end,
+    trigger: str = "manual",
+    schedule_config_version: int | None = None,
+) -> Report:
+    before_send = None
+    if schedule_config_version is not None:
+        before_send = lambda: _assert_current_schedule_config(
             user=user,
-            period_start=period_start,
-            period_end=period_end,
+            schedule_config_version=schedule_config_version,
+        )
+    if trigger == "setup":
+        kwargs = {
+            "user": user,
+            "period_start": period_start,
+            "period_end": period_end,
+        }
+        if before_send is not None:
+            kwargs["before_send"] = before_send
+        return create_and_send_setup_verification_report(
+            **kwargs,
         ).report
-    return create_and_send_report(user=user, period_start=period_start, period_end=period_end).report
+    kwargs = {
+        "user": user,
+        "period_start": period_start,
+        "period_end": period_end,
+    }
+    if before_send is not None:
+        kwargs["before_send"] = before_send
+    return create_and_send_report(**kwargs).report
 
 
 def _setup_schedule_grace() -> timedelta:
@@ -130,6 +171,20 @@ def _has_stale_schedule_config(*, schedule: Schedule, schedule_config_version: i
     except Exception:
         return False
     return int(schedule.config_version) != expected_version
+
+
+def _mark_stale_job_skipped(*, job: JobRun, schedule_config_version: int | None) -> None:
+    job.status = JobStatus.SUCCESS
+    job.finished_at = timezone.now()
+    payload = dict(job.payload or {})
+    payload.update(
+        {
+            "stale_skipped": True,
+            "schedule_config_version": schedule_config_version,
+        }
+    )
+    job.payload = payload
+    job.save(update_fields=["status", "finished_at", "payload"])
 
 
 @shared_task
@@ -279,7 +334,14 @@ def run_user_report(self, user_id: int, due_at_iso: str = "", schedule_config_ve
 
     report: Report | None = None
     try:
-        report = _generate_and_send_report(user=user, period_start=period_start, period_end=period_end)
+        report_kwargs = {
+            "user": user,
+            "period_start": period_start,
+            "period_end": period_end,
+        }
+        if schedule_config_version is not None:
+            report_kwargs["schedule_config_version"] = schedule_config_version
+        report = _generate_and_send_report(**report_kwargs)
 
         with transaction.atomic():
             schedule = Schedule.objects.select_for_update().get(user=user)
@@ -306,6 +368,14 @@ def run_user_report(self, user_id: int, due_at_iso: str = "", schedule_config_ve
             _dt_iso(due_at),
             retry_no,
         )
+    except StaleScheduleConfigError:
+        logger.info(
+            "Skipping scheduled report after setup reconfiguration during execution (user_id=%s expected_version=%s)",
+            user_id,
+            schedule_config_version,
+        )
+        _mark_stale_job_skipped(job=job, schedule_config_version=schedule_config_version)
+        return
     except Exception as e:
         logger.exception("run_user_report failed (user_id=%s)", user_id)
 
@@ -466,7 +536,15 @@ def run_user_report_now(
 
     report: Report | None = None
     try:
-        report = _generate_and_send_report(user=user, period_start=period_start, period_end=period_end, trigger=trigger)
+        report_kwargs = {
+            "user": user,
+            "period_start": period_start,
+            "period_end": period_end,
+            "trigger": trigger,
+        }
+        if schedule_config_version is not None:
+            report_kwargs["schedule_config_version"] = schedule_config_version
+        report = _generate_and_send_report(**report_kwargs)
 
         with transaction.atomic():
             schedule = Schedule.objects.select_for_update().get(user=user)
@@ -497,6 +575,15 @@ def run_user_report_now(
             retry_no,
             trigger,
         )
+    except StaleScheduleConfigError:
+        logger.info(
+            "Skipping immediate report after setup reconfiguration during execution (user_id=%s trigger=%s expected_version=%s)",
+            user_id,
+            trigger,
+            schedule_config_version,
+        )
+        _mark_stale_job_skipped(job=job, schedule_config_version=schedule_config_version)
+        return
     except Exception as e:
         logger.exception("run_user_report_now failed (user_id=%s)", user_id)
 

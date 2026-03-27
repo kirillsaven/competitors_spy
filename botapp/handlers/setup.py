@@ -1733,6 +1733,8 @@ async def _finalize_schedule(message: Message, state: FSMContext) -> None:
                 times=times,
                 config_version=sched.config_version,
                 next_run_at=next_run_at,
+                is_running=False,
+                running_started_at=None,
                 updated_at=now_utc,
             )
         return int(sched.config_version)

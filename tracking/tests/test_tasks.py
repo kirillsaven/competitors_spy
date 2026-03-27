@@ -140,6 +140,9 @@ def test_setup_finalize_schedule_triggers_setup_report_with_follow_up(monkeypatc
             return SimpleNamespace(chat=self.chat, message_id=len(self.answers), bot=self.bot)
 
     user, _schedule = _make_user_with_schedule(tg_user_id=9004)
+    _schedule.is_running = True
+    _schedule.running_started_at = timezone.now()
+    _schedule.save(update_fields=["is_running", "running_started_at", "updated_at"])
     state = DummyState({"user_id": user.id, "times": ["09:00"], "setup_runtime_id": "runtime-1"})
     message = DummyMessage()
     delayed: list[tuple[tuple, dict]] = []
@@ -166,7 +169,10 @@ def test_setup_finalize_schedule_triggers_setup_report_with_follow_up(monkeypatc
 
     async_to_sync(setup_handler._finalize_schedule)(message, state)
 
+    _schedule.refresh_from_db()
     assert delayed == [((user.id,), {"trigger": "setup", "schedule_config_version": 2})]
+    assert _schedule.config_version == 2
+    assert _schedule.is_running is False
     assert "Сейчас соберу первый отчет, чтобы все проверить." in message.answers[-1]
 
 
@@ -189,3 +195,35 @@ def test_run_user_report_now_skips_stale_setup_job_after_reconfigure(monkeypatch
     assert called == []
     assert schedule.is_running is False
     assert JobRun.objects.filter(user=user, job_type="run_user_report_now").count() == 0
+
+
+@pytest.mark.django_db
+def test_run_user_report_now_skips_stale_setup_job_during_execution_without_clobbering_newer_run(monkeypatch):
+    user, schedule = _make_user_with_schedule(tg_user_id=9006)
+    sent: list[str] = []
+
+    def fake_generate_and_send_report(**kwargs):
+        Schedule.objects.filter(user=user).update(
+            config_version=2,
+            is_running=True,
+            running_started_at=timezone.now(),
+        )
+        raise tasks.StaleScheduleConfigError("stale schedule config")
+
+    monkeypatch.setattr(tasks, "_generate_and_send_report", fake_generate_and_send_report)
+    monkeypatch.setattr(tasks, "send_message", lambda *, chat_id, text: sent.append(text) or {"message_id": 4})
+    monkeypatch.setattr(
+        tasks.notify_report_still_running,
+        "apply_async",
+        lambda *args, **kwargs: None,
+    )
+
+    tasks.run_user_report_now.run(user.id, trigger="setup", schedule_config_version=1)
+
+    schedule.refresh_from_db()
+    job = JobRun.objects.get(user=user, job_type="run_user_report_now")
+    assert schedule.config_version == 2
+    assert schedule.is_running is True
+    assert job.status == JobStatus.SUCCESS
+    assert job.payload["stale_skipped"] is True
+    assert sent == []

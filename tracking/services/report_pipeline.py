@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
 from statistics import mean
@@ -291,6 +292,7 @@ def create_and_send_report(
     period_end,
     required_platforms: set[str] | None = None,
     provider_fetch_cache: ProviderFetchCache | None = None,
+    before_send: Callable[[], None] | None = None,
 ) -> SentReportResult:
     preview = build_report_preview(
         user=user,
@@ -300,6 +302,8 @@ def create_and_send_report(
     )
     if required_platforms:
         assert_required_platform_sections(preview=preview, required_platforms=required_platforms)
+    if before_send is not None:
+        before_send()
 
     report = Report.objects.create(
         user=user,
@@ -322,12 +326,15 @@ def create_and_send_setup_verification_report(
     period_start,
     period_end,
     provider_fetch_cache: ProviderFetchCache | None = None,
+    before_send: Callable[[], None] | None = None,
 ) -> SentReportResult:
     preview = build_setup_verification_preview(
         user=user,
         period_end=period_end,
         provider_fetch_cache=provider_fetch_cache,
     )
+    if before_send is not None:
+        before_send()
     report = Report.objects.create(
         user=user,
         period_start=period_start,
