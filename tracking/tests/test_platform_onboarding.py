@@ -1514,3 +1514,80 @@ def test_tiktok_search_refetches_when_cached_pool_is_too_small_for_higher_limit(
     assert [item["id"] for item in first] == ["tt-1", "tt-2"]
     assert [item["id"] for item in second] == ["tt-1", "tt-2", "tt-3", "tt-4"]
     assert calls == [2, 4]
+
+
+def test_youtube_low_recall_rescue_requeries_and_merges_candidates(monkeypatch):
+    seed = _seed(
+        platform=Platform.YOUTUBE,
+        external_id="yt-seed",
+        handle="creator",
+        title="Creator",
+        description="English teacher",
+        url="https://www.youtube.com/@creator",
+    )
+
+    initial_candidate = platform_onboarding._DiscoveryCandidate(
+        platform=Platform.YOUTUBE,
+        external_id="yt-1",
+        handle="teacher-a",
+        url="https://www.youtube.com/@teacher-a",
+        display_name="Teacher A",
+        description="english lessons",
+        query_hits={"уроки английского"},
+        metadata={"rank_hint": 1000},
+    )
+    rescue_candidate = platform_onboarding._DiscoveryCandidate(
+        platform=Platform.YOUTUBE,
+        external_id="yt-2",
+        handle="teacher-b",
+        url="https://www.youtube.com/@teacher-b",
+        display_name="Teacher B",
+        description="english teacher",
+        query_hits={"english teacher"},
+        metadata={"rank_hint": 900},
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_discover_youtube_search_candidates(*, keywords, competitors, max_search_calls, context=None):
+        calls.append(list(keywords))
+        if "english teacher" in keywords:
+            return [initial_candidate, rescue_candidate]
+        return [initial_candidate]
+
+    def fake_collector_aware_candidates(*, platform, candidates, keywords, max_candidates, context=None):
+        ids = sorted(candidate.external_id for candidate in candidates)
+        if ids == ["yt-1"]:
+            return [initial_candidate], ""
+        return [initial_candidate, rescue_candidate], ""
+
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_discover_youtube_search_candidates",
+        fake_discover_youtube_search_candidates,
+    )
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_collector_aware_candidates",
+        fake_collector_aware_candidates,
+    )
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_youtube_fallback_queries",
+        lambda keywords: ["english teacher"],
+    )
+
+    outcome = platform_onboarding.discover_competitors_for_onboarding(
+        keywords=["уроки английского"],
+        seed=seed,
+        competitors=[],
+        linked_accounts=[],
+        max_youtube_search_calls=5,
+        max_candidates_per_platform=20,
+    )
+
+    assert calls == [["уроки английского"], ["уроки английского", "english teacher"]]
+    assert sorted((candidate.platform, candidate.handle) for candidate in outcome.candidates) == [
+        (Platform.YOUTUBE, "teacher-a"),
+        (Platform.YOUTUBE, "teacher-b"),
+    ]

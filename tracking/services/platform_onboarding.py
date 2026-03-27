@@ -163,6 +163,7 @@ _DISCOVERY_VALIDATION_ITEMS = 5
 _DISCOVERY_MIN_RECENT_SHORTS = 2
 _DISCOVERY_RECENT_WINDOW_DAYS = 60
 _DISCOVERY_YOUTUBE_UPLOAD_SCAN_LIMIT = 30
+_YOUTUBE_LOW_RECALL_RESCUE_THRESHOLD = 12
 _GENERIC_DISCOVERY_STEMS = {
     "coach",
     "course",
@@ -294,6 +295,29 @@ class _DiscoveryCandidate:
             str(self.display_name or "").lower(),
             self.external_id,
         )
+
+
+def _merge_discovery_candidates(*candidate_sets: list[_DiscoveryCandidate]) -> list[_DiscoveryCandidate]:
+    merged: dict[tuple[str, str], _DiscoveryCandidate] = {}
+    for candidates in candidate_sets:
+        for candidate in candidates:
+            key = (candidate.platform, candidate.external_id)
+            existing = merged.get(key)
+            if existing is None:
+                merged[key] = candidate
+                continue
+            existing.query_hits.update(candidate.query_hits)
+            existing.cross_platform_keys.update(candidate.cross_platform_keys)
+            existing.metadata.update(candidate.metadata)
+            if not existing.display_name and candidate.display_name:
+                existing.display_name = candidate.display_name
+            if not existing.description and candidate.description:
+                existing.description = candidate.description
+            if not existing.handle and candidate.handle:
+                existing.handle = candidate.handle
+            if not existing.url and candidate.url:
+                existing.url = candidate.url
+    return list(merged.values())
 
 
 def _platform_label(platform: str) -> str:
@@ -2774,6 +2798,34 @@ def discover_competitors_for_onboarding(
             candidates_by_platform[platform] = validated_candidates
             if empty_reason:
                 empty_reason_by_platform[platform] = empty_reason
+            if (
+                platform == Platform.YOUTUBE
+                and len(validated_candidates) < _YOUTUBE_LOW_RECALL_RESCUE_THRESHOLD
+            ):
+                rescue_queries = [
+                    query
+                    for query in _youtube_fallback_queries(keywords)
+                    if query.lower() not in {item.lower() for item in keywords}
+                ]
+                if rescue_queries:
+                    rescue_raw = _discover_youtube_search_candidates(
+                        keywords=keywords + rescue_queries,
+                        competitors=competitors,
+                        max_search_calls=max(len(keywords) + len(rescue_queries), _DISCOVERY_QUERY_BUDGET[Platform.YOUTUBE]),
+                        context=context,
+                    )
+                    rescue_validated, rescue_reason = _collector_aware_candidates(
+                        platform=platform,
+                        candidates=_merge_discovery_candidates(candidates_by_platform[platform], rescue_raw),
+                        keywords=keywords + rescue_queries,
+                        max_candidates=max_candidates_per_platform,
+                        context=context,
+                    )
+                    if rescue_validated:
+                        candidates_by_platform[platform] = rescue_validated
+                        empty_reason_by_platform.pop(platform, None)
+                    elif rescue_reason:
+                        empty_reason_by_platform[platform] = rescue_reason
         ranked = _filter_and_rank_candidates(
             candidates=candidates_by_platform[platform],
             seed=seed,
