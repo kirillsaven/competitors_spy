@@ -2332,8 +2332,12 @@ def _discover_youtube_search_candidates(
     )
     if not queries:
         raise PlatformOnboardingError("No YouTube search queries could be built from niche keywords")
+    base_queries = list(queries)
     query_hits: dict[str, set[str]] = {}
-    for index, query in enumerate(queries):
+    expanded_fallback = False
+    index = 0
+    while index < len(queries):
+        query = queries[index]
         if index >= initial_budget and len(query_hits) >= _DISCOVERY_EARLY_STOP_CANDIDATES.get(Platform.YOUTUBE, 20):
             break
         for channel_id in _cached_youtube_search_channel_ids(
@@ -2349,6 +2353,16 @@ def _discover_youtube_search_candidates(
             max_candidates=_DISCOVERY_EARLY_STOP_CANDIDATES.get(Platform.YOUTUBE, 3),
         ):
             break
+        if (
+            not expanded_fallback
+            and index + 1 >= len(base_queries)
+            and len(query_hits) < 12
+        ):
+            for extra_query in _youtube_fallback_queries(base_queries):
+                if extra_query.lower() not in {item.lower() for item in queries}:
+                    queries.append(extra_query)
+            expanded_fallback = True
+        index += 1
     if not query_hits:
         return []
 
@@ -2366,6 +2380,44 @@ def _discover_youtube_search_candidates(
         return out
     finally:
         client.close()
+
+
+def _youtube_fallback_queries(base_queries: list[str]) -> list[str]:
+    lowered = [str(query or "").strip().lower() for query in base_queries if str(query or "").strip()]
+    if not lowered:
+        return []
+    out: list[str] = []
+
+    def add(query: str) -> None:
+        normalized = " ".join(str(query or "").split()).strip()
+        if not normalized:
+            return
+        key = normalized.lower()
+        if key in lowered or key in {item.lower() for item in out}:
+            return
+        out.append(normalized)
+
+    if any("англий" in query for query in lowered):
+        if any("начинающ" in query for query in lowered):
+            add("english for beginners")
+        if any("урок" in query for query in lowered):
+            add("english lessons")
+        if any("репетитор" in query or "преподав" in query for query in lowered):
+            add("english teacher")
+        if any("школ" in query for query in lowered):
+            add("online english school")
+        if any("взросл" in query for query in lowered):
+            add("english for adults")
+        if any("разговорн" in query for query in lowered):
+            add("spoken english")
+
+    if any("dota" in query or "дота" in query for query in lowered):
+        add("dota 2 guide")
+        add("dota 2 tips")
+        if any("патч" in query for query in lowered):
+            add("dota 2 patch")
+
+    return out[:4]
 
 
 def _build_instagram_candidate(raw: dict[str, Any], *, queries: set[str]) -> _DiscoveryCandidate | None:

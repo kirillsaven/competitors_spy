@@ -766,6 +766,36 @@ def test_search_queries_do_not_generate_broken_variants_from_ready_multiword_phr
     assert "репетитор английский для" not in queries
 
 
+def test_youtube_fallback_queries_add_cross_language_english_intents():
+    queries = platform_onboarding._youtube_fallback_queries(
+        [
+            "английский для начинающих",
+            "уроки английского",
+            "онлайн школа английского",
+            "репетитор английского",
+        ]
+    )
+
+    assert "english for beginners" in queries
+    assert "english lessons" in queries
+    assert "english teacher" in queries
+    assert "online english school" in queries
+
+
+def test_youtube_fallback_queries_add_dota_guide_intents():
+    queries = platform_onboarding._youtube_fallback_queries(
+        [
+            "dota 2",
+            "гайды dota 2",
+            "патч dota 2",
+        ]
+    )
+
+    assert "dota 2 guide" in queries
+    assert "dota 2 tips" in queries
+    assert "dota 2 patch" in queries
+
+
 def test_candidate_survives_only_if_recent_short_form_content_matches_niche(monkeypatch):
     candidate = platform_onboarding._DiscoveryCandidate(
         platform=Platform.YOUTUBE,
