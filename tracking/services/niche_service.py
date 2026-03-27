@@ -27,6 +27,20 @@ _FOR_BEGINNERS_RE = re.compile(r"\b(для\s+начинающ[0-9a-zа-яё-]*|�
 _FOR_ADULTS_RE = re.compile(r"\b(для\s+взросл[0-9a-zа-яё-]*|преподавать\s+взросл[0-9a-zа-яё-]*)", flags=re.IGNORECASE)
 _CONVERSATIONAL_RE = re.compile(r"\b(разговорн[0-9a-zа-яё-]*|заговор[0-9a-zа-яё-]*)", flags=re.IGNORECASE)
 _ACCOUNT_TOKEN_RE = re.compile(r"[0-9a-zа-яё]+", flags=re.IGNORECASE)
+_UTILITY_JUNK_STEMS = {
+    "найд",
+    "ссылк",
+    "оставля",
+    "заяв",
+    "человек",
+    "провод",
+    "врем",
+    "лучш",
+    "представител",
+    "мир",
+    "пут",
+    "топ",
+}
 
 
 def _account_key(seed: SeedResolution) -> str:
@@ -470,6 +484,22 @@ def _merge_keyword_lists(*lists: list[str], max_keywords: int = 8) -> list[str]:
     return merged
 
 
+def _filter_search_noise_keywords(keywords: list[str]) -> list[str]:
+    filtered: list[str] = []
+    for keyword in keywords:
+        tokens = [_normalize_token(token) for token in re.findall(r"[0-9a-zа-яё]+", keyword, flags=re.IGNORECASE)]
+        stems = {_stem_token(token) for token in tokens if len(token) >= 3}
+        if not stems:
+            continue
+        useful = stems & _IDENTITY_SAFE_THEME_STEMS
+        if stems & _UTILITY_JUNK_STEMS and not useful and not any(token.isdigit() for token in tokens):
+            continue
+        if len(tokens) == 1 and not useful and (stems & (_UTILITY_JUNK_STEMS | _GENERIC_SUBJECT_STEMS)):
+            continue
+        filtered.append(keyword)
+    return filtered
+
+
 def infer_niche_keywords(
     *,
     seed: SeedResolution,
@@ -504,6 +534,7 @@ def infer_niche_keywords(
         blocked_terms=blocked_terms,
     )
     auto_keywords = _supplement_exam_subject_keywords(keywords=auto_keywords, keyword_sources=keyword_sources)[:8]
+    auto_keywords = _filter_search_noise_keywords(auto_keywords)
     auto_keywords = _merge_keyword_lists(
         _supplement_search_utility_keywords(
             seed=seed,

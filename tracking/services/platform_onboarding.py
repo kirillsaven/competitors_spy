@@ -1360,6 +1360,8 @@ def _subject_query_variants(*, subject: str, generic_stems: set[str]) -> list[st
     normalized_subject = " ".join(str(subject or "").split()).strip()
     if not normalized_subject:
         return []
+    if " " in normalized_subject:
+        return []
     if re.fullmatch(r"[A-Za-z][A-Za-z\\s-]*", normalized_subject):
         base = normalized_subject
         variants: list[str] = []

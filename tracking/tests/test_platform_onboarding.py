@@ -747,6 +747,25 @@ def test_search_queries_keep_lesson_intent_in_top_youtube_budget():
     assert any("преподав" in query or "репетитор" in query for query in queries)
 
 
+def test_search_queries_do_not_generate_broken_variants_from_ready_multiword_phrases():
+    queries = platform_onboarding.build_search_ready_keywords(
+        keywords=[
+            "английский",
+            "английский для начинающих",
+            "английский для взрослых",
+            "разговорный английский",
+            "онлайн репетитор по английскому",
+        ],
+        max_keywords=8,
+    )
+
+    assert "английский для начинающих" in queries
+    assert "английский для взрослых" in queries
+    assert "разговорный английский" in queries
+    assert "преподаватель английский для" not in queries
+    assert "репетитор английский для" not in queries
+
+
 def test_candidate_survives_only_if_recent_short_form_content_matches_niche(monkeypatch):
     candidate = platform_onboarding._DiscoveryCandidate(
         platform=Platform.YOUTUBE,

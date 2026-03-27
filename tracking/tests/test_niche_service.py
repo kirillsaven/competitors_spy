@@ -221,6 +221,7 @@ def test_infer_niche_keywords_expands_teacher_search_phrases_from_recent_content
     assert "английский для взрослых" in keywords
     assert "английский для начинающих" in keywords
     assert "разговорный английский" in keywords
+    assert all("найди" not in keyword and "ссыл" not in keyword for keyword in keywords)
 
 
 def test_infer_niche_keywords_blocks_seed_identity_tokens_even_if_they_repeat_in_description(monkeypatch):
