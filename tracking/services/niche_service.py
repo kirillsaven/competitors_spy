@@ -348,6 +348,9 @@ def _candidate_subject_terms(
         value = _normalize_subject_term(term)
         if len(value) < 3:
             return
+        stems = {_stem_token(token) for token in _ACCOUNT_TOKEN_RE.findall(value) if len(token) >= 3}
+        if stems & _UTILITY_JUNK_STEMS and not stems & _IDENTITY_SAFE_THEME_STEMS:
+            return
         key = (value, expandable)
         if key in seen:
             return
