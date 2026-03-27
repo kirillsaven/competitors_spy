@@ -70,6 +70,11 @@ def test_run_user_report_now_uses_setup_verification_path_for_setup_trigger(db, 
             SimpleNamespace(report=None),
         )[1],
     )
+    monkeypatch.setattr(
+        tasks.notify_report_still_running,
+        "apply_async",
+        lambda *args, **kwargs: None,
+    )
 
     tasks.run_user_report_now.run(user.id, "setup")
 

@@ -1754,4 +1754,4 @@ async def _finalize_schedule(message: Message, state: FSMContext) -> None:
         "Сейчас соберу первый отчет, чтобы все проверить.",
     )
 
-    run_user_report_now.delay(user.id, "setup")
+    run_user_report_now.delay(user.id, trigger="setup")

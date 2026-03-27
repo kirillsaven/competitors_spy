@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -39,6 +39,13 @@ def test_compute_next_run_at_honors_iana_timezone_offset() -> None:
 
     assert nxt == datetime(2026, 6, 1, 17, 45, tzinfo=UTC)
     assert nxt.astimezone(ZoneInfo("Europe/Berlin")).strftime("%H:%M") == "19:45"
+
+
+def test_compute_next_run_at_respects_min_delay_before_same_slot() -> None:
+    now = datetime(2026, 3, 26, 12, 40, tzinfo=UTC)  # 19:40 in Asia/Bangkok
+    nxt = compute_next_run_at("Asia/Bangkok", ["19:45"], now, min_delay=timedelta(minutes=15))
+
+    assert nxt == datetime(2026, 3, 27, 12, 45, tzinfo=UTC)
 
 
 def test_parse_iso8601_duration_seconds() -> None:
