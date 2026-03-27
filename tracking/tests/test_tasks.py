@@ -166,5 +166,26 @@ def test_setup_finalize_schedule_triggers_setup_report_with_follow_up(monkeypatc
 
     async_to_sync(setup_handler._finalize_schedule)(message, state)
 
-    assert delayed == [((user.id,), {"trigger": "setup"})]
+    assert delayed == [((user.id,), {"trigger": "setup", "schedule_config_version": 2})]
     assert "Сейчас соберу первый отчет, чтобы все проверить." in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_run_user_report_now_skips_stale_setup_job_after_reconfigure(monkeypatch):
+    user, schedule = _make_user_with_schedule(tg_user_id=9005)
+    schedule.config_version = 2
+    schedule.save(update_fields=["config_version", "updated_at"])
+
+    called: list[tuple[datetime, datetime]] = []
+    monkeypatch.setattr(
+        tasks,
+        "_generate_and_send_report",
+        lambda **kwargs: called.append((kwargs["period_start"], kwargs["period_end"])),
+    )
+
+    tasks.run_user_report_now.run(user.id, trigger="setup", schedule_config_version=1)
+
+    schedule.refresh_from_db()
+    assert called == []
+    assert schedule.is_running is False
+    assert JobRun.objects.filter(user=user, job_type="run_user_report_now").count() == 0

@@ -211,6 +211,7 @@ class Schedule(models.Model):
     user = models.OneToOneField(TgUser, on_delete=models.CASCADE, related_name="schedule")
     is_enabled = models.BooleanField(default=True)
     times = models.JSONField(default=list, blank=True)  # ["09:00", "21:00"] in user's timezone
+    config_version = models.PositiveIntegerField(default=1)
     next_run_at = models.DateTimeField(null=True, blank=True)
     last_run_at = models.DateTimeField(null=True, blank=True)
     # Used to avoid overlapping report jobs for the same user (which can lead to identical periods / missing deltas).

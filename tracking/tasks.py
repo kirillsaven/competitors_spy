@@ -122,6 +122,16 @@ def _still_running_text(*, trigger: str) -> str:
     )
 
 
+def _has_stale_schedule_config(*, schedule: Schedule, schedule_config_version: int | None) -> bool:
+    if schedule_config_version is None:
+        return False
+    try:
+        expected_version = int(schedule_config_version)
+    except Exception:
+        return False
+    return int(schedule.config_version) != expected_version
+
+
 @shared_task
 def tick_due_schedules() -> int:
     """
@@ -159,7 +169,6 @@ def tick_due_schedules() -> int:
             logger.exception("Failed to advance schedule next_run_at (schedule_id=%s)", sched.id)
             continue
         due_at_iso = _dt_iso(due_at)
-        run_user_report.delay(sched.user_id, due_at_iso)
         logger.info(
             "schedule_enqueued user_id=%s schedule_id=%s due_at=%s due_at_local=%s next_run_at=%s next_run_local=%s timezone=%s times=%s",
             sched.user_id,
@@ -171,12 +180,13 @@ def tick_due_schedules() -> int:
             sched.user.timezone_str,
             list(sched.times or []),
         )
+        run_user_report.delay(sched.user_id, due_at_iso, sched.config_version)
         enqueued += 1
     return enqueued
 
 
 @shared_task(bind=True)
-def run_user_report(self, user_id: int, due_at_iso: str = "") -> None:
+def run_user_report(self, user_id: int, due_at_iso: str = "", schedule_config_version: int | None = None) -> None:
     now = timezone.now()
     user = TgUser.objects.get(id=user_id)
     due_at = _parse_due_at(due_at_iso)
@@ -198,6 +208,15 @@ def run_user_report(self, user_id: int, due_at_iso: str = "") -> None:
 
     with transaction.atomic():
         schedule = Schedule.objects.select_for_update().get(user=user)
+        if _has_stale_schedule_config(schedule=schedule, schedule_config_version=schedule_config_version):
+            logger.info(
+                "Skipping stale scheduled report after setup reconfiguration (user_id=%s expected_version=%s actual_version=%s due_at=%s)",
+                user_id,
+                schedule_config_version,
+                schedule.config_version,
+                _dt_iso(due_at),
+            )
+            return
         if schedule.is_running:
             logger.info("Skipping scheduled report: already running (user_id=%s)", user_id)
             return
@@ -371,7 +390,12 @@ def notify_report_still_running(user_id: int, job_id: int, trigger: str = "manua
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
-def run_user_report_now(self, user_id: int, trigger: str = "manual") -> None:
+def run_user_report_now(
+    self,
+    user_id: int,
+    trigger: str = "manual",
+    schedule_config_version: int | None = None,
+) -> None:
     """
     Manual report trigger ("Отчет сейчас").
 
@@ -386,6 +410,15 @@ def run_user_report_now(self, user_id: int, trigger: str = "manual") -> None:
 
     with transaction.atomic():
         schedule = Schedule.objects.select_for_update().get(user=user)
+        if _has_stale_schedule_config(schedule=schedule, schedule_config_version=schedule_config_version):
+            logger.info(
+                "Skipping stale immediate report after setup reconfiguration (user_id=%s trigger=%s expected_version=%s actual_version=%s)",
+                user_id,
+                trigger,
+                schedule_config_version,
+                schedule.config_version,
+            )
+            return
         if schedule.is_running:
             logger.info("Skipping manual report: already running (user_id=%s)", user_id)
             _safe_send_user_message(user=user, text=_already_running_text(trigger=trigger))

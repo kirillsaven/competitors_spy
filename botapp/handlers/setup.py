@@ -1716,24 +1716,28 @@ async def _finalize_schedule(message: Message, state: FSMContext) -> None:
     # Preserve last_run_at when user reconfigures schedule, so deltas keep working.
     now_utc = timezone.now()
 
-    def _upsert_schedule() -> None:
+    def _upsert_schedule() -> int:
         sched, created = Schedule.objects.get_or_create(
             user=user,
             defaults={
                 "is_enabled": True,
                 "times": times,
+                "config_version": 1,
                 "next_run_at": next_run_at,
             },
         )
         if not created:
+            sched.config_version += 1
             Schedule.objects.filter(id=sched.id).update(
                 is_enabled=True,
                 times=times,
+                config_version=sched.config_version,
                 next_run_at=next_run_at,
                 updated_at=now_utc,
             )
+        return int(sched.config_version)
 
-    await db_run(_upsert_schedule)
+    schedule_config_version = await db_run(_upsert_schedule)
 
     counts = await db_run(
         lambda: {
@@ -1754,4 +1758,4 @@ async def _finalize_schedule(message: Message, state: FSMContext) -> None:
         "Сейчас соберу первый отчет, чтобы все проверить.",
     )
 
-    run_user_report_now.delay(user.id, trigger="setup")
+    run_user_report_now.delay(user.id, trigger="setup", schedule_config_version=schedule_config_version)
