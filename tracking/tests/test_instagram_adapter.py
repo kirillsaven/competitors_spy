@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import httpx
+import pytest
 from types import SimpleNamespace
 
 from tracking.adapters.instagram import build_profile_url, extract_handle, profile_to_video_details, resolve_seed_input
@@ -44,12 +46,13 @@ def test_resolve_seed_input_returns_none_when_provider_cannot_verify_profile():
     assert resolve_seed_input(FakeClient(), "https://www.instagram.com/apifytech/") is None
 
 
-def test_profile_to_video_details_keeps_only_items_with_views():
+def test_profile_to_video_details_keeps_only_reels_with_views():
     details = profile_to_video_details(
         {
             "latestPosts": [
                 {
                     "id": "3555555555555555555",
+                    "productType": "clips",
                     "shortCode": "C9abc123xyz",
                     "url": "https://www.instagram.com/reel/C9abc123xyz/",
                     "caption": "Instagram reel caption",
@@ -61,12 +64,15 @@ def test_profile_to_video_details_keeps_only_items_with_views():
                 },
                 {
                     "id": "3666666666666666666",
-                    "shortCode": "Dnophoto123",
-                    "url": "https://www.instagram.com/p/Dnophoto123/",
-                    "caption": "Image post",
+                    "productType": "feed",
+                    "shortCode": "Dnolong123",
+                    "url": "https://www.instagram.com/p/Dnolong123/",
+                    "caption": "Feed video post",
                     "timestamp": "2024-07-03T10:40:00.000Z",
-                    "likesCount": 120,
-                    "commentsCount": 4,
+                    "videoDuration": 140,
+                    "videoViewCount": 44000,
+                    "likesCount": 1200,
+                    "commentsCount": 40,
                 },
             ]
         }
@@ -126,3 +132,64 @@ def test_fetch_profiles_includes_usernames_for_profile_urls():
         "directUrls": ["https://www.instagram.com/apifytech/"],
         "usernames": ["apifytech"],
     }
+
+
+def test_search_profiles_uses_configured_search_actor():
+    from tracking.adapters.instagram import ApifyInstagramClient
+
+    seen: dict[str, object] = {}
+
+    class FakeHttpClient:
+        def post(self, url, headers, json):
+            seen["url"] = url
+            seen["headers"] = headers
+            seen["json"] = json
+            return SimpleNamespace(status_code=200, json=lambda: [])
+
+        def close(self):
+            return None
+
+    client = ApifyInstagramClient(access_token="token", actor_id="profile-actor", search_actor_id="search-actor")
+    client._client = FakeHttpClient()
+
+    try:
+        client.search_profiles(query="english teachers")
+    finally:
+        client.close()
+
+    assert seen["url"].endswith("/acts/search-actor/run-sync-get-dataset-items")
+    assert seen["json"] == {"query": "english teachers"}
+
+
+def test_fetch_profiles_wraps_transport_errors():
+    from tracking.adapters.instagram import ApifyInstagramClient, InstagramApiError
+
+    class FakeHttpClient:
+        def post(self, url, headers, json):
+            raise httpx.ReadTimeout("The read operation timed out")
+
+        def close(self):
+            return None
+
+    client = ApifyInstagramClient(access_token="token", actor_id="profile-actor", search_actor_id="search-actor")
+    client._client = FakeHttpClient()
+
+    with pytest.raises(InstagramApiError, match="transport error"):
+        client.fetch_profiles(inputs=["https://www.instagram.com/apifytech/"])
+
+
+def test_search_profiles_wraps_transport_errors():
+    from tracking.adapters.instagram import ApifyInstagramClient, InstagramApiError
+
+    class FakeHttpClient:
+        def post(self, url, headers, json):
+            raise httpx.ReadTimeout("The read operation timed out")
+
+        def close(self):
+            return None
+
+    client = ApifyInstagramClient(access_token="token", actor_id="profile-actor", search_actor_id="search-actor")
+    client._client = FakeHttpClient()
+
+    with pytest.raises(InstagramApiError, match="transport error"):
+        client.search_profiles(query="english teachers")

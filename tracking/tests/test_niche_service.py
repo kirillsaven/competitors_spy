@@ -111,6 +111,29 @@ def test_infer_niche_keywords_auto_uses_recent_content_not_structure(monkeypatch
     assert any("fashion" in keyword or "sneaker" in keyword for keyword in keywords)
 
 
+def test_infer_niche_keywords_uses_account_title_for_search_ready_subject_hints(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: ["Unit 1 practice", "Unit 2 listening"],
+    )
+    seed = SeedResolution(
+        platform=Platform.YOUTUBE,
+        external_id="yt-1",
+        handle="okenglish",
+        url="https://www.youtube.com/channel/UCQQpescDpZ6d3lu9j0fPA7g",
+        title="OK English - уроки английского языка",
+        description="Практика английского языка для начинающих и продолжающих.",
+        uploads_playlist_id="UU1",
+    )
+
+    keywords, source = niche_service.infer_niche_keywords(seed=seed, competitors=[])
+
+    assert source == "auto"
+    assert any("англий" in keyword for keyword in keywords)
+    assert any("урок" in keyword or "english" in keyword for keyword in keywords)
+
+
 def test_infer_niche_keywords_auto_filters_ru_en_junk_words(monkeypatch):
     monkeypatch.setattr(
         niche_service,
@@ -164,11 +187,69 @@ def test_infer_niche_keywords_auto_prefers_phrase_like_teacher_topics(monkeypatc
     keywords, source = niche_service.infer_niche_keywords(seed=seed, competitors=[])
 
     assert source == "auto"
-    assert 1 <= len(keywords) <= 6
-    assert all(len(keyword.split()) >= 2 for keyword in keywords)
+    assert 1 <= len(keywords) <= 8
     assert any("английск" in keyword for keyword in keywords)
     assert any("преподав" in keyword or "репетитор" in keyword for keyword in keywords)
+    assert any(len(keyword.split()) >= 2 for keyword in keywords)
     for banned in {"дарья", "панчо", "объяснять", "бояться", "новый", "сложных", "уровень", "рост"}:
+        assert all(banned not in keyword for keyword in keywords)
+
+
+def test_infer_niche_keywords_expands_teacher_search_phrases_from_recent_content(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: [
+            "Как начать преподавать взрослым? Оставляй заявку на занятия в группе преподавателей",
+            "Что посмотреть в оригинале, если у тебя начальный уровень языка?",
+            "Помогаю ученикам заговорить на английском без зубрежки",
+        ],
+    )
+    seed = SeedResolution(
+        platform=Platform.YOUTUBE,
+        external_id="yt-1",
+        handle="dariapancho",
+        url="https://www.youtube.com/@dariapancho",
+        title="Daria Pancho",
+        description="Онлайн-репетитор по английскому и группы для преподавателей английского.",
+        uploads_playlist_id="UU1",
+    )
+
+    keywords, source = niche_service.infer_niche_keywords(seed=seed, competitors=[])
+
+    assert source == "auto"
+    assert "английский для взрослых" in keywords
+    assert "английский для начинающих" in keywords
+    assert "разговорный английский" in keywords
+    assert all("найди" not in keyword and "ссыл" not in keyword for keyword in keywords)
+
+
+def test_infer_niche_keywords_blocks_seed_identity_tokens_even_if_they_repeat_in_description(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: [
+            "ЕГЭ по английскому: аудирование и письмо",
+            "Как готовиться к ЕГЭ по английскому онлайн",
+            "Разбор заданий ЕГЭ по английскому",
+        ],
+    )
+    seed = SeedResolution(
+        platform=Platform.YOUTUBE,
+        external_id="yt-1",
+        handle="tanya_shibitova",
+        url="https://www.youtube.com/channel/UC91u057zoN-kYmo2z7G5RZg",
+        title="Таня Шибитова | Английский ЕГЭ | 100балльный",
+        description="Татьяна Шибитова — преподаватель по английскому языку. Готовлю к ЕГЭ онлайн.",
+        uploads_playlist_id="UU1",
+    )
+
+    keywords, source = niche_service.infer_niche_keywords(seed=seed, competitors=[])
+
+    assert source == "auto"
+    assert any("егэ" in keyword for keyword in keywords)
+    assert any("англий" in keyword for keyword in keywords)
+    for banned in {"таня", "татьяна", "шибитова", "100балльный"}:
         assert all(banned not in keyword for keyword in keywords)
 
 
@@ -196,6 +277,73 @@ def test_infer_niche_keywords_keeps_topical_handle_words_when_supported_by_conte
 
     assert any("english" in keyword for keyword in keywords)
     assert any("teacher" in keyword or "lesson" in keyword for keyword in keywords)
+
+
+def test_infer_niche_keywords_keeps_game_subject_from_title_and_description(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: [
+            "ПУТЬ В ТОП 100 — ТОКСИЧНЫЕ РУИНЕРЫ",
+            "С НУЛЯ ДО ТИТАНА — РАНГ ПСИХОВ",
+            "ЗАСНАЙПИЛ ГОЛОВАЧА И ДОВЕЛ ЕГО ДО ИСТЕРИКИ",
+        ],
+    )
+    seed = SeedResolution(
+        platform=Platform.YOUTUBE,
+        external_id="yt-dota",
+        handle="pinkmandota",
+        url="https://www.youtube.com/@pinkmandota",
+        title="PiNKMAN DOTA",
+        description="Человек, который любит проводить время с лучшими представителями мира Доты 2.",
+        uploads_playlist_id="UU1",
+    )
+
+    keywords, _ = niche_service.infer_niche_keywords(seed=seed, competitors=[])
+
+    assert any(keyword in {"dota", "dota 2"} for keyword in keywords)
+    assert any("dota 2" in keyword or "dota" == keyword for keyword in keywords)
+    assert all("pinkman" not in keyword for keyword in keywords)
+    assert all("путь" not in keyword for keyword in keywords)
+    assert all("мир" not in keyword for keyword in keywords)
+
+
+def test_infer_niche_keywords_expands_dota_search_ready_phrases(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: [
+            "Dota 2 guide for offlane players",
+            "Разбор патча Dota 2 и метовых героев",
+            "Гайд по mmr апу в dota 2",
+            "Лучшие фишки для саппортов в дота 2",
+        ],
+    )
+    seed = SeedResolution(
+        platform=Platform.YOUTUBE,
+        external_id="yt-dota",
+        handle="pinkmandota",
+        url="https://www.youtube.com/@pinkmandota",
+        title="Pinkman Dota 2",
+        description="Гайды, разборы матчапов и обучение по Dota 2.",
+        uploads_playlist_id="UU1",
+    )
+
+    keywords, _ = niche_service.infer_niche_keywords(seed=seed, competitors=[])
+
+    assert any(keyword == "dota 2" for keyword in keywords)
+    assert any("гайды dota 2" in keyword or "разборы dota 2" in keyword for keyword in keywords)
+
+
+def test_merge_keyword_lists_keeps_digit_qualified_topic_distinct():
+    merged = niche_service._merge_keyword_lists(
+        ["dota"],
+        ["dota 2"],
+        max_keywords=8,
+    )
+
+    assert "dota" in merged
+    assert "dota 2" in merged
 
 
 def test_infer_niche_keywords_dedupes_same_stem_phrase_reordering(monkeypatch):

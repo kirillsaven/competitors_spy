@@ -92,7 +92,7 @@ def test_start_keywords_step_uses_instagram_seed_without_manual_prompt(monkeypat
 
     assert shown == {"called": True}
     assert state.state == SetupStates.EDIT_NICHE
-    assert state.data["niche_keywords"] == ["space", "mars"]
+    assert set(state.data["niche_keywords"]) == {"space", "mars"}
     assert all("Пришли ключевые слова" not in text for text in message.answers)
 
 
@@ -141,7 +141,7 @@ def test_start_keywords_step_uses_tiktok_seed_without_manual_prompt(monkeypatch)
 
     assert shown == {"called": True}
     assert state.state == SetupStates.EDIT_NICHE
-    assert state.data["niche_keywords"] == ["basketball", "highlights"]
+    assert set(state.data["niche_keywords"]) == {"basketball", "highlights"}
     assert all("Пришли ключевые слова" not in text for text in message.answers)
 
 
@@ -242,6 +242,30 @@ def test_manual_link_input_updates_linked_accounts(monkeypatch):
     assert state.data["link_platform_queue"] == []
     assert state.data["linked_accounts"]["instagram"]["external_id"] == "ig-1"
     assert state.data["linked_accounts"]["instagram"]["signals"] == ["manual_input"]
+
+
+def test_prune_text_and_quota_are_independent_per_platform():
+    candidates = (
+        [{"platform": "youtube"} for _ in range(20)]
+        + [{"platform": "tiktok"} for _ in range(20)]
+        + [{"platform": "instagram"} for _ in range(20)]
+    )
+    excluded: set[int] = set()
+
+    counts = setup._selected_counts_by_platform(candidates=candidates, excluded=excluded)
+    text = setup._build_prune_text(
+        selected_total=60,
+        selected_by_platform=counts,
+        limit=20,
+        discovery_notes=[],
+    )
+
+    assert counts == {"youtube": 20, "tiktok": 20, "instagram": 20}
+    assert "Выбрано всего: 60/60." in text
+    assert "YouTube: 20/20." in text
+    assert "TikTok: 20/20." in text
+    assert "Instagram: 20/20." in text
+    assert setup._quota_error_text(selected_by_platform=counts, limit=20) is None
 
 
 @pytest.mark.django_db

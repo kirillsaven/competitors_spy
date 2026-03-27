@@ -34,24 +34,20 @@ def test_suggest_accounts_for_platform_uses_exact_and_normalized_handle_for_inst
         description="Find us at https://creator.example",
     )
 
-    class FakeClient:
-        def fetch_profiles(self, *, inputs):
-            assert inputs == ["creator.official", "creatorofficial"]
-            return [
-                {
-                    "id": "ig-1",
-                    "username": "creator_official",
-                    "fullName": "Creator Official",
-                    "biography": "Official account https://creator.example",
-                    "url": "https://www.instagram.com/creator_official/",
-                    "externalUrl": "https://creator.example",
-                }
-            ]
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr(account_linking, "_get_instagram_client", lambda: FakeClient())
+    monkeypatch.setattr(
+        account_linking,
+        "fetch_instagram_profiles_cached",
+        lambda **kwargs: [
+            {
+                "id": "ig-1",
+                "username": "creator_official",
+                "fullName": "Creator Official",
+                "biography": "Official account https://creator.example",
+                "url": "https://www.instagram.com/creator_official/",
+                "externalUrl": "https://creator.example",
+            }
+        ],
+    )
 
     suggestion = account_linking.suggest_accounts_for_platform(seed=seed, target_platform=Platform.INSTAGRAM)
 
@@ -114,31 +110,36 @@ def test_suggest_accounts_for_platform_uses_provider_hint_and_small_tiktok_input
         description="TikTok: https://www.tiktok.com/@creator_live",
     )
 
-    class FakeClient:
-        def fetch_profile_feeds(self, *, handles, results_per_profile):
-            assert handles == ["creator", "creator_live"]
-            assert results_per_profile == 1
-            return [
-                {
-                    "authorMeta": {
-                        "id": "tt-1",
-                        "name": "creator_live",
-                        "nickName": "Creator",
-                        "signature": "Official account. IG https://www.instagram.com/creator/",
+    calls: list[tuple[tuple[str, ...], int]] = []
+    monkeypatch.setattr(
+        account_linking,
+        "fetch_tiktok_profile_feeds_cached",
+        lambda *, handles, results_per_page, context=None, purpose=None, context_id=None: (
+            calls.append((tuple(handles), results_per_page)),
+            {
+                handle: [
+                    {
+                        "authorMeta": {
+                            "id": "tt-1",
+                            "name": "creator_live",
+                            "nickName": "Creator",
+                            "signature": "Official account. IG https://www.instagram.com/creator/",
+                        }
                     }
-                }
-            ]
-
-        def close(self):
-            return None
-
-    monkeypatch.setattr(account_linking, "_get_tiktok_client", lambda: FakeClient())
+                ]
+                if handle == "creator_live"
+                else []
+                for handle in handles
+            }
+        )[1],
+    )
 
     suggestion = account_linking.suggest_accounts_for_platform(seed=seed, target_platform=Platform.TIKTOK)
 
     assert suggestion.note is None
     assert [candidate.seed.external_id for candidate in suggestion.candidates] == ["tt-1"]
     assert "provider_hint" in suggestion.candidates[0].signals
+    assert calls == [(("creator", "creator_live"), 1)]
 
 
 def test_suggest_accounts_for_platforms_reuses_matcher_for_multiple_targets(monkeypatch):
@@ -146,7 +147,7 @@ def test_suggest_accounts_for_platforms_reuses_matcher_for_multiple_targets(monk
     calls = {"instagram": 0, "tiktok": 0}
 
     class FakeMatcher:
-        def __init__(self, *, seed, max_candidates):
+        def __init__(self, *, seed, max_candidates, context=None):
             self.seed = seed
             self.max_candidates = max_candidates
 

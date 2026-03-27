@@ -8,40 +8,20 @@ from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
-from botapp.telegram_api import send_message
 from common.time import compute_next_run_at, format_dt_local
-from tracking.models import (
-    Competitor,
-    UserCompetitor,
-    JobRun,
-    JobStatus,
-    Platform,
-    Report,
-    ReportStatus,
-    Schedule,
-    TgUser,
+from tracking.models import Competitor, JobRun, JobStatus, Report, ReportStatus, Schedule, TgUser
+from tracking.services.collector import refresh_competitor
+from tracking.services.report_pipeline import (
+    create_and_send_report,
+    create_and_send_setup_verification_report,
+    get_active_competitors,
 )
-from tracking.services.collector import refresh_youtube_competitor
-from tracking.services.reporting import build_report_payload, render_report_text
-from tracking.services.scoring import compute_competitor_baseline, score_items_for_period
 
 logger = logging.getLogger(__name__)
 
 
 def _get_active_competitors(*, user: TgUser) -> list[Competitor]:
-    max_competitors = int(
-        getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", getattr(settings, "MAX_COMPETITORS_YOUTUBE", 20))
-    )
-    competitors: list[Competitor] = []
-    for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM):
-        links = (
-            UserCompetitor.objects.select_related("competitor")
-            .filter(user=user, is_active=True, competitor__platform=platform)
-            .order_by("id")
-            .all()[:max_competitors]
-        )
-        competitors.extend(link.competitor for link in links)
-    return competitors
+    return get_active_competitors(user=user)
 
 
 def _dt_iso(value: datetime | None) -> str:
@@ -73,80 +53,14 @@ def _compute_bootstrap_last_run_at(*, schedule: Schedule, captured_at: datetime)
     return min(captured_at, schedule.next_run_at - timedelta(seconds=1))
 
 
-def _generate_and_send_report(*, user: TgUser, period_start, period_end) -> Report:
-    max_competitors = int(getattr(settings, "MAX_COMPETITORS_YOUTUBE", 100))
-    links = (
-        UserCompetitor.objects.select_related("competitor")
-        .filter(user=user, is_active=True, competitor__platform=Platform.YOUTUBE)
-        .order_by("id")
-        .all()[:max_competitors]
-    )
-    competitors = [lnk.competitor for lnk in links]
-    logger.info(
-        "report_collect_start user_id=%s tg_user_id=%s competitors=%s period_start=%s period_end=%s",
-        user.id,
-        user.tg_user_id,
-        len(competitors),
-        _dt_iso(period_start),
-        _dt_iso(period_end),
-    )
-
-    updated_items = []
-    for comp in competitors:
-        try:
-            updated_items.extend(
-                refresh_youtube_competitor(
-                    competitor=comp,
-                    mode="incremental",
-                    captured_at=period_end,
-                )
-            )
-        except Exception as e:
-            logger.warning(
-                "Skipping competitor during report due to refresh error (user_id=%s competitor_id=%s channel=%s): %s",
-                user.id,
-                comp.id,
-                comp.external_id,
-                e,
-            )
-            continue
-
-    competitor_by_item_id = {it.id: it.competitor for it in updated_items}
-    baseline_by_competitor_id = {}
-    for comp in competitors:
-        baseline_by_competitor_id[comp.id] = compute_competitor_baseline(competitor=comp, now=period_end)
-
-    scored = score_items_for_period(
-        items=updated_items,
-        competitor_by_item_id=competitor_by_item_id,
-        baseline_by_competitor_id=baseline_by_competitor_id,
-        period_start=period_start,
-        period_end=period_end,
-    )
-
-    payload = build_report_payload(scored=scored, period_start=period_start, period_end=period_end)
-    report = Report.objects.create(
-        user=user,
-        period_start=period_start,
-        period_end=period_end,
-        status=ReportStatus.CREATED,
-        payload=payload,
-    )
-
-    text = render_report_text(payload=payload, timezone_str=user.timezone_str)
-    send_message(chat_id=int(user.tg_chat_id), text=text)
-
-    report.status = ReportStatus.SENT
-    report.sent_at = timezone.now()
-    report.save(update_fields=["status", "sent_at"])
-    logger.info(
-        "report_sent user_id=%s tg_user_id=%s report_id=%s sent_at=%s",
-        user.id,
-        user.tg_user_id,
-        report.id,
-        _dt_iso(report.sent_at),
-    )
-    return report
+def _generate_and_send_report(*, user: TgUser, period_start, period_end, trigger: str = "manual") -> Report:
+    if trigger == "setup":
+        return create_and_send_setup_verification_report(
+            user=user,
+            period_start=period_start,
+            period_end=period_end,
+        ).report
+    return create_and_send_report(user=user, period_start=period_start, period_end=period_end).report
 
 
 @shared_task
@@ -157,7 +71,6 @@ def tick_due_schedules() -> int:
     To avoid duplicate enqueues, we advance next_run_at before sending the job.
     """
     now = timezone.now()
-    # Safety: if a worker crashed mid-job, we can get "stuck" schedules. Clear stale locks.
     stale_minutes = int(getattr(settings, "SCHEDULE_RUNNING_STALE_MINUTES", 60))
     if stale_minutes > 0:
         cutoff = now - timedelta(minutes=stale_minutes)
@@ -167,11 +80,7 @@ def tick_due_schedules() -> int:
             updated_at=now,
         )
         if unlocked:
-            logger.warning(
-                "schedule_stale_unlock count=%s cutoff=%s",
-                unlocked,
-                _dt_iso(cutoff),
-            )
+            logger.warning("schedule_stale_unlock count=%s cutoff=%s", unlocked, _dt_iso(cutoff))
 
     due = (
         Schedule.objects.select_related("user")
@@ -183,7 +92,6 @@ def tick_due_schedules() -> int:
     if due_count:
         logger.info("schedule_tick_due now=%s due_count=%s", _dt_iso(now), due_count)
     for sched in due:
-        # Move next_run_at forward to prevent enqueuing again on the next tick.
         try:
             due_at = sched.next_run_at
             sched.next_run_at = compute_next_run_at(sched.user.timezone_str, list(sched.times or []), now)
@@ -191,7 +99,7 @@ def tick_due_schedules() -> int:
         except Exception:
             logger.exception("Failed to advance schedule next_run_at (schedule_id=%s)", sched.id)
             continue
-        due_at_iso = due_at.isoformat() if due_at is not None else ""
+        due_at_iso = _dt_iso(due_at)
         run_user_report.delay(sched.user_id, due_at_iso)
         logger.info(
             "schedule_enqueued user_id=%s schedule_id=%s due_at=%s due_at_local=%s next_run_at=%s next_run_local=%s timezone=%s times=%s",
@@ -229,7 +137,6 @@ def run_user_report(self, user_id: int, due_at_iso: str = "") -> None:
         retry_no,
     )
 
-    # Use a transaction for schedule updates to keep period boundaries consistent.
     with transaction.atomic():
         schedule = Schedule.objects.select_for_update().get(user=user)
         if schedule.is_running:
@@ -288,7 +195,6 @@ def run_user_report(self, user_id: int, due_at_iso: str = "") -> None:
 
         with transaction.atomic():
             schedule = Schedule.objects.select_for_update().get(user=user)
-            # Never move last_run_at backwards (can happen if two jobs finish out of order).
             if schedule.last_run_at is None or period_end > schedule.last_run_at:
                 schedule.last_run_at = period_end
             schedule.next_run_at = compute_next_run_at(user.timezone_str, list(schedule.times or []), period_end)
@@ -326,21 +232,11 @@ def run_user_report(self, user_id: int, due_at_iso: str = "") -> None:
                 schedule.running_started_at = None
                 now_fail = timezone.now()
                 retry_window = timedelta(minutes=max(1, retry_window_min))
-                can_retry = (
-                    due_at is not None
-                    and retry_no < max_retries
-                    and (now_fail - due_at) <= retry_window
-                )
+                can_retry = due_at is not None and retry_no < max_retries and (now_fail - due_at) <= retry_window
                 if can_retry:
-                    # Keep next_run_at intact (already moved by scheduler); retry same due slot shortly.
                     schedule.save(update_fields=["is_running", "running_started_at", "updated_at"])
                 else:
-                    # Keep schedule aligned to user slots even after final failure.
-                    schedule.next_run_at = compute_next_run_at(
-                        user.timezone_str,
-                        list(schedule.times or []),
-                        now_fail,
-                    )
+                    schedule.next_run_at = compute_next_run_at(user.timezone_str, list(schedule.times or []), now_fail)
                     schedule.save(update_fields=["is_running", "running_started_at", "next_run_at", "updated_at"])
         except Exception:
             logger.exception("Failed to reschedule after error (user_id=%s)", user_id)
@@ -392,7 +288,7 @@ def run_user_report(self, user_id: int, due_at_iso: str = "") -> None:
 
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
-def run_user_report_now(self, user_id: int) -> None:
+def run_user_report_now(self, user_id: int, trigger: str = "manual") -> None:
     """
     Manual report trigger ("Отчет сейчас").
 
@@ -403,12 +299,7 @@ def run_user_report_now(self, user_id: int) -> None:
     now = timezone.now()
     user = TgUser.objects.get(id=user_id)
     retry_no = int(getattr(self.request, "retries", 0))
-    logger.info(
-        "manual_report_start user_id=%s tg_user_id=%s retry_no=%s",
-        user.id,
-        user.tg_user_id,
-        retry_no,
-    )
+    logger.info("manual_report_start user_id=%s tg_user_id=%s retry_no=%s trigger=%s", user.id, user.tg_user_id, retry_no, trigger)
 
     with transaction.atomic():
         schedule = Schedule.objects.select_for_update().get(user=user)
@@ -425,7 +316,6 @@ def run_user_report_now(self, user_id: int) -> None:
             period_start = now - timedelta(hours=24)
         period_end = now
 
-        # Prevent beat from enqueuing an immediate duplicate run.
         schedule.next_run_at = compute_next_run_at(user.timezone_str, list(schedule.times or []), now)
         schedule.save(update_fields=["is_running", "running_started_at", "next_run_at", "updated_at"])
 
@@ -436,7 +326,7 @@ def run_user_report_now(self, user_id: int) -> None:
             started_at=now,
             attempts=retry_no + 1,
             payload={
-                "trigger": "manual",
+                "trigger": trigger,
                 "retry_no": retry_no,
                 "period_start": period_start.isoformat(),
                 "period_end": period_end.isoformat(),
@@ -447,7 +337,7 @@ def run_user_report_now(self, user_id: int) -> None:
 
     report: Report | None = None
     try:
-        report = _generate_and_send_report(user=user, period_start=period_start, period_end=period_end)
+        report = _generate_and_send_report(user=user, period_start=period_start, period_end=period_end, trigger=trigger)
 
         with transaction.atomic():
             schedule = Schedule.objects.select_for_update().get(user=user)
@@ -463,14 +353,15 @@ def run_user_report_now(self, user_id: int) -> None:
         job.status = JobStatus.SUCCESS
         job.finished_at = timezone.now()
         payload = dict(job.payload or {})
-        payload.update({"retry_no": retry_no})
+        payload.update({"report_id": report.id if report is not None else None, "retry_no": retry_no})
         job.payload = payload
         job.save(update_fields=["status", "finished_at", "payload"])
         logger.info(
-            "manual_report_success user_id=%s tg_user_id=%s retry_no=%s",
+            "manual_report_success user_id=%s tg_user_id=%s retry_no=%s trigger=%s",
             user.id,
             user.tg_user_id,
             retry_no,
+            trigger,
         )
     except Exception as e:
         logger.exception("run_user_report_now failed (user_id=%s)", user_id)
@@ -484,7 +375,6 @@ def run_user_report_now(self, user_id: int) -> None:
                 schedule = Schedule.objects.select_for_update().get(user=user)
                 schedule.is_running = False
                 schedule.running_started_at = None
-                # Manual failures should not shift automatic schedule to arbitrary timestamps.
                 schedule.next_run_at = compute_next_run_at(
                     user.timezone_str,
                     list(schedule.times or []),
@@ -498,16 +388,16 @@ def run_user_report_now(self, user_id: int) -> None:
         job.error = str(e)
         job.finished_at = timezone.now()
         payload = dict(job.payload or {})
-        payload.update({"retry_no": retry_no})
+        payload.update({"retry_no": retry_no, "trigger": trigger})
         job.payload = payload
         job.save(update_fields=["status", "error", "finished_at", "payload"])
         logger.error(
-            "manual_report_failure user_id=%s tg_user_id=%s retry_no=%s",
+            "manual_report_failure user_id=%s tg_user_id=%s retry_no=%s trigger=%s",
             user.id,
             user.tg_user_id,
             retry_no,
+            trigger,
         )
-
         raise
 
 
@@ -529,28 +419,21 @@ def bootstrap_user_data(user_id: int) -> None:
         payload={},
     )
     try:
-        max_competitors = int(getattr(settings, "MAX_COMPETITORS_YOUTUBE", 100))
-        links = (
-            UserCompetitor.objects.select_related("competitor")
-            .filter(user=user, is_active=True, competitor__platform=Platform.YOUTUBE)
-            .order_by("id")
-            .all()[:max_competitors]
-        )
-        competitors = [lnk.competitor for lnk in links]
+        competitors = _get_active_competitors(user=user)
         for comp in competitors:
             try:
-                refresh_youtube_competitor(competitor=comp, mode="incremental", captured_at=now)
+                refresh_competitor(competitor=comp, mode="incremental", captured_at=now)
             except Exception as e:
                 logger.warning(
-                    "Skipping competitor during bootstrap due to refresh error (user_id=%s competitor_id=%s channel=%s): %s",
+                    "Skipping competitor during bootstrap due to refresh error (user_id=%s competitor_id=%s platform=%s external_id=%s): %s",
                     user.id,
                     comp.id,
+                    comp.platform,
                     comp.external_id,
                     e,
                 )
                 continue
 
-        # Mark the baseline point for the first delta window.
         with transaction.atomic():
             schedule = Schedule.objects.select_for_update().get(user=user)
             anchor_last_run_at = _compute_bootstrap_last_run_at(schedule=schedule, captured_at=now)

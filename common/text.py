@@ -479,6 +479,11 @@ def _is_connector(token: str) -> bool:
     return _normalize_token(token) in _PHRASE_CONNECTORS
 
 
+def _is_numeric_modifier(token: str) -> bool:
+    norm = _normalize_token(token)
+    return norm.isdigit() and 1 <= len(norm) <= 3
+
+
 def _is_content_token(token: str, *, blocked_tokens: set[str], blocked_stems: set[str]) -> bool:
     norm = _normalize_token(token)
     if len(norm) < 3 or norm.isdigit():
@@ -571,6 +576,10 @@ def _iter_candidates(
             if _is_connector(token) and content_tokens and not connector_open:
                 phrase_tokens.append(token)
                 connector_open = True
+                continue
+            if _is_numeric_modifier(token) and content_tokens:
+                phrase_tokens.append(token)
+                connector_open = False
                 continue
             break
     return candidates

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+import math
 
 from django.conf import settings
 
@@ -20,6 +21,8 @@ class BaselineMetrics:
     er_median: float | None
     er_iqr: float | None
     n: int
+    rph_median: float | None = None
+    rph_iqr: float | None = None
 
 
 @dataclass(frozen=True)
@@ -51,6 +54,7 @@ def compute_competitor_baseline(*, competitor: Competitor, now: datetime) -> Bas
 
     vph_values: list[float] = []
     er_values: list[float] = []
+    rph_values: list[float] = []
 
     for item in items:
         snap = MetricSnapshot.objects.filter(content_item=item).order_by("-captured_at").first()
@@ -60,11 +64,32 @@ def compute_competitor_baseline(*, competitor: Competitor, now: datetime) -> Bas
         if age_hours <= 0:
             continue
         vph_values.append(float(snap.views) / age_hours)
+        reactions_total = 0
+        has_reactions = False
+        if snap.likes is not None:
+            reactions_total += int(snap.likes)
+            has_reactions = True
+        if snap.comments is not None:
+            reactions_total += int(snap.comments)
+            has_reactions = True
+        if snap.shares is not None:
+            reactions_total += int(snap.shares)
+            has_reactions = True
+        if has_reactions:
+            rph_values.append(float(reactions_total) / age_hours)
         if snap.likes is not None and snap.comments is not None and snap.views > 0:
             er_values.append(float(snap.likes + snap.comments) / float(snap.views))
 
     if not vph_values:
-        metrics = BaselineMetrics(vph_median=0.0, vph_iqr=1.0, er_median=None, er_iqr=None, n=0)
+        metrics = BaselineMetrics(
+            vph_median=0.0,
+            vph_iqr=1.0,
+            er_median=None,
+            er_iqr=None,
+            n=0,
+            rph_median=None,
+            rph_iqr=None,
+        )
     else:
         vph_med = median(vph_values)
         vph_i = max(iqr(vph_values), EPS)
@@ -74,7 +99,21 @@ def compute_competitor_baseline(*, competitor: Competitor, now: datetime) -> Bas
         else:
             er_med = None
             er_i = None
-        metrics = BaselineMetrics(vph_median=vph_med, vph_iqr=vph_i, er_median=er_med, er_iqr=er_i, n=len(vph_values))
+        if rph_values:
+            rph_med = median(rph_values)
+            rph_i = max(iqr(rph_values), EPS)
+        else:
+            rph_med = None
+            rph_i = None
+        metrics = BaselineMetrics(
+            vph_median=vph_med,
+            vph_iqr=vph_i,
+            er_median=er_med,
+            er_iqr=er_i,
+            n=len(vph_values),
+            rph_median=rph_med,
+            rph_iqr=rph_i,
+        )
 
     CompetitorBaseline.objects.create(
         competitor=competitor,
@@ -87,6 +126,8 @@ def compute_competitor_baseline(*, competitor: Competitor, now: datetime) -> Bas
             "er_median": metrics.er_median,
             "er_iqr": metrics.er_iqr,
             "n": metrics.n,
+            "rph_median": metrics.rph_median,
+            "rph_iqr": metrics.rph_iqr,
         },
     )
     return metrics
@@ -106,7 +147,7 @@ def score_items_for_period(
     # Hard floor to avoid noisy "viral" picks on very short periods (e.g. a few minutes).
     # The main threshold is scaled by period length below.
     min_delta_floor = 20
-    max_age_days = 30
+    max_age_days = int(getattr(settings, "REPORT_MAX_ITEM_AGE_DAYS", 14))
     min_published_at = period_end - timedelta(days=max_age_days)
 
     for item in items:
@@ -129,6 +170,8 @@ def score_items_for_period(
         likes_end = int(snap_end.likes) if snap_end.likes is not None else None
         comments_end = int(snap_end.comments) if snap_end.comments is not None else None
         shares_end = int(snap_end.shares) if snap_end.shares is not None else None
+        if views_end < min_views_end:
+            continue
 
         # Main signal: delta views within the report period (views/hour).
         # If we don't have a start snapshot yet (warm-up), fall back to average views/hour since publish.
@@ -170,9 +213,23 @@ def score_items_for_period(
         z_vel = (velocity - baseline.vph_median) / max(baseline.vph_iqr, EPS)
         if er_end is not None and baseline.er_median is not None and baseline.er_iqr is not None:
             z_er = (er_end - baseline.er_median) / max(baseline.er_iqr, EPS)
-            score = 0.75 * z_vel + 0.25 * z_er
+            relative_score = 0.75 * z_vel + 0.25 * z_er
         else:
-            score = z_vel
+            relative_score = z_vel
+
+        age_hours_end = max((snap_end.captured_at - item.published_at).total_seconds() / 3600.0, 0.0)
+        views_signal = math.log10(max(float(views_end), 1.0))
+        delta_signal = math.log10(max(float(delta_views or views_end), 1.0))
+        baseline_vph = float(baseline.vph_median or 0.0)
+        virality_ratio = float(velocity) / max(baseline_vph, EPS) if baseline_vph > 0 else 0.0
+        recency_bonus = max(0.0, 1.0 - min(age_hours_end / float(max(max_age_days * 24, 1)), 1.0))
+        score = (
+            relative_score
+            + (0.32 * delta_signal)
+            + (0.18 * views_signal)
+            + (0.20 * min(virality_ratio, 25.0) / 5.0)
+            + (0.20 * recency_bonus)
+        )
 
         scored.append(
             ScoredItem(

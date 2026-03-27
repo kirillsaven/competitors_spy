@@ -6,6 +6,7 @@ import re
 from dataclasses import asdict
 from datetime import timedelta
 from urllib.parse import urlparse
+from uuid import uuid4
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -54,19 +55,35 @@ from tracking.models import (
 )
 from tracking.services.account_linking import replace_user_linked_accounts, suggest_accounts_for_platforms
 from tracking.services.competitor_service import upsert_competitor
-from tracking.services.niche_service import infer_niche_keywords, is_niche_keywords_poor
-from tracking.services.platform_onboarding import PlatformOnboardingError, discover_competitors_for_onboarding
+from tracking.services.niche_service import infer_niche_keywords
+from tracking.services.platform_onboarding import (
+    PlatformOnboardingError,
+    build_search_ready_keywords,
+    discover_competitors_for_onboarding,
+)
 from tracking.services.seed_resolver import (
+    SeedResolveAmbiguity,
     SeedResolveError,
+    SeedResolveAttempt,
     can_search_youtube_seed_candidates,
+    candidate_platforms_for_exact_seed,
+    attempt_exact_seed_resolution,
     resolve_exact_seed,
     resolve_seed_for_platform,
 )
+from tracking.services.setup_runtime import (
+    PLATFORM_STATE_AVAILABLE,
+    PLATFORM_STATE_ERROR,
+    PLATFORM_STATE_UNAVAILABLE,
+    SetupRunContext,
+    get_platform_state,
+)
 from tracking.services.youtube_service import search_youtube_seed_candidates
-from tracking.tasks import bootstrap_user_data
+from tracking.tasks import run_user_report_now
 
 logger = logging.getLogger(__name__)
 router = Router()
+_SETUP_RUNTIMES: dict[str, SetupRunContext] = {}
 
 
 def _candidate_key(seed: SeedResolution | dict) -> str:
@@ -114,6 +131,39 @@ def _platform_label(platform: str | None) -> str:
         Platform.TIKTOK: "TikTok",
         Platform.INSTAGRAM: "Instagram",
     }.get(str(platform or ""), str(platform or "Platform"))
+
+
+def _new_setup_runtime_id() -> str:
+    runtime_id = uuid4().hex
+    _SETUP_RUNTIMES[runtime_id] = SetupRunContext()
+    return runtime_id
+
+
+def _get_setup_runtime(data: dict) -> SetupRunContext:
+    runtime_id = str(data.get("setup_runtime_id") or "").strip()
+    if not runtime_id:
+        runtime_id = _new_setup_runtime_id()
+        data["setup_runtime_id"] = runtime_id
+    return _SETUP_RUNTIMES.setdefault(runtime_id, SetupRunContext())
+
+
+async def _clear_setup_runtime(state: FSMContext) -> None:
+    data = await state.get_data()
+    runtime_id = str(data.get("setup_runtime_id") or "").strip()
+    if runtime_id:
+        _SETUP_RUNTIMES.pop(runtime_id, None)
+
+
+def _platform_unavailable_message(*, platform: str, reason: str, continuation: str) -> str:
+    return f"{_platform_label(platform)} временно недоступен: {reason}. {continuation}"
+
+
+def _manual_niche_fallback_message(*, platform: str, reason: str) -> str:
+    return (
+        f"{_platform_label(platform)} сейчас недоступен, поэтому я не могу подтвердить этот профиль автоматически.\n"
+        f"Причина: {reason}\n\n"
+        "Можем продолжить в сокращенном режиме: введи ключевые слова по нише вручную."
+    )
 
 
 def _parse_keywords(text: str) -> list[str]:
@@ -279,28 +329,50 @@ def _candidate_display_name(c: dict) -> str:
 def _build_prune_text(
     *,
     selected_total: int,
-    total: int,
     selected_by_platform: dict[str, int],
-    total_by_platform: dict[str, int],
     limit: int,
     discovery_notes: list[str],
 ) -> str:
+    total_limit = limit * 3
     lines = [
         "Нашел конкурентов.",
         "Нажимай на профили, чтобы исключить лишних. По умолчанию выбраны все.",
-        f"Выбрано всего: {selected_total}/{total}.",
-        f"YouTube: {selected_by_platform.get(Platform.YOUTUBE, 0)}/{total_by_platform.get(Platform.YOUTUBE, 0)} (лимит {limit}).",
-        f"TikTok: {selected_by_platform.get(Platform.TIKTOK, 0)}/{total_by_platform.get(Platform.TIKTOK, 0)}.",
-        f"Instagram: {selected_by_platform.get(Platform.INSTAGRAM, 0)}/{total_by_platform.get(Platform.INSTAGRAM, 0)}.",
+        f"Выбрано всего: {selected_total}/{total_limit}.",
+        f"YouTube: {selected_by_platform.get(Platform.YOUTUBE, 0)}/{limit}.",
+        f"TikTok: {selected_by_platform.get(Platform.TIKTOK, 0)}/{limit}.",
+        f"Instagram: {selected_by_platform.get(Platform.INSTAGRAM, 0)}/{limit}.",
     ]
-    selected_youtube = selected_by_platform.get(Platform.YOUTUBE, 0)
-    if selected_youtube > limit:
-        lines.append(f"Нужно исключить YouTube-конкурентов еще: {selected_youtube - limit}.")
+    for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM):
+        selected = selected_by_platform.get(platform, 0)
+        if selected > limit:
+            lines.append(f"Нужно исключить {_platform_label(platform)}-конкурентов еще: {selected - limit}.")
     if discovery_notes:
         lines.append("")
         lines.extend(discovery_notes)
     lines.append("Когда готово, нажми «Готово».")
     return "\n".join(lines)
+
+
+def _selected_counts_by_platform(*, candidates: list[dict], excluded: set[int]) -> dict[str, int]:
+    return {
+        platform: sum(
+            1
+            for idx, candidate in enumerate(candidates)
+            if idx not in excluded and str(candidate.get("platform") or "") == platform
+        )
+        for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)
+    }
+
+
+def _quota_error_text(*, selected_by_platform: dict[str, int], limit: int) -> str | None:
+    overflow: list[str] = []
+    for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM):
+        selected = selected_by_platform.get(platform, 0)
+        if selected > limit:
+            overflow.append(f"{_platform_label(platform)}: исключи еще {selected - limit}")
+    if not overflow:
+        return None
+    return "Слишком много выбранных конкурентов.\n" + "\n".join(overflow)
 
 
 def _build_keywords_edit_text(*, keywords: list[str], excluded: set[str]) -> str:
@@ -324,6 +396,29 @@ async def _persist_linked_accounts(state: FSMContext) -> None:
     user = await db_call(TgUser.objects.get, id=data["user_id"])
     linked_accounts = data.get("linked_accounts") or {}
     await db_run(lambda: replace_user_linked_accounts(user=user, accounts_by_platform=linked_accounts))
+
+
+async def _enter_manual_niche_mode(
+    message: Message,
+    state: FSMContext,
+    *,
+    seed_profile_id: int,
+    notice: str,
+) -> None:
+    await state.update_data(
+        seed_profile_id=seed_profile_id,
+        seed=None,
+        linked_accounts={},
+        link_platform_queue=[],
+        link_suggestions={},
+        skipped_link_platforms=[],
+        competitor_seeds=[],
+        niche_keywords=[],
+        excluded_keywords=[],
+        niche_source="manual",
+    )
+    await state.set_state(SetupStates.ADD_NICHE)
+    await message.answer(notice)
 
 
 def _seed_from_linked_account_row(linked: UserLinkedAccount) -> SeedResolution:
@@ -376,10 +471,35 @@ async def _ask_next_linked_account(message: Message, state: FSMContext) -> None:
         await message.answer("Потерял подтвержденный исходный профиль. Запусти /setup еще раз.")
         return
 
+    suggestions_by_platform = dict(data.get("link_suggestions") or {})
+    skipped_platforms = [str(item) for item in (data.get("skipped_link_platforms") or []) if str(item).strip()]
+    unavailable_notes: list[str] = []
+    while queue:
+        current_platform = queue[0]
+        suggestion = suggestions_by_platform.get(current_platform)
+        status = str((suggestion or {}).get("status") or PLATFORM_STATE_AVAILABLE)
+        note = str((suggestion or {}).get("note") or "").strip()
+        if status not in {PLATFORM_STATE_UNAVAILABLE, PLATFORM_STATE_ERROR}:
+            break
+        if current_platform not in skipped_platforms:
+            skipped_platforms.append(current_platform)
+        queue = queue[1:]
+        unavailable_notes.append(
+            _platform_unavailable_message(
+                platform=current_platform,
+                reason=note or "провайдер недоступен",
+                continuation=f"Продолжаю без {_platform_label(current_platform)}.",
+            )
+        )
+
+    if unavailable_notes:
+        await state.update_data(link_platform_queue=queue, skipped_link_platforms=skipped_platforms)
+        for note in unavailable_notes:
+            await message.answer(note)
+
     if not queue:
         await _persist_linked_accounts(state)
         linked_accounts = data.get("linked_accounts") or {}
-        skipped_platforms = [str(item) for item in (data.get("skipped_link_platforms") or []) if str(item).strip()]
         await message.answer(_build_linked_accounts_summary(linked_accounts=linked_accounts, skipped_platforms=skipped_platforms))
         await _enter_competitor_step(
             message,
@@ -390,7 +510,6 @@ async def _ask_next_linked_account(message: Message, state: FSMContext) -> None:
         return
 
     platform = queue[0]
-    suggestions_by_platform = dict(data.get("link_suggestions") or {})
     suggestion = suggestions_by_platform.get(platform)
     if not isinstance(suggestion, dict):
         suggestion = {"candidates": [], "note": "Не удалось подготовить подсказки для этой платформы."}
@@ -414,12 +533,15 @@ async def _begin_account_linking(
     seed_profile_id: int,
     seed: SeedResolution,
 ) -> None:
+    data = await state.get_data()
+    runtime = _get_setup_runtime(data)
     target_platforms = [platform for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM) if platform != seed.platform]
     raw_suggestions = await asyncio.to_thread(
         suggest_accounts_for_platforms,
         seed=seed,
         target_platforms=target_platforms,
         max_candidates=3,
+        context=runtime,
     )
     link_suggestions = {
         platform: {
@@ -428,6 +550,7 @@ async def _begin_account_linking(
                 for candidate in suggestion.candidates
             ],
             "note": suggestion.note,
+            "status": suggestion.status,
         }
         for platform, suggestion in raw_suggestions.items()
     }
@@ -491,8 +614,9 @@ async def cmd_setup(message: Message, state: FSMContext) -> None:
     # Reset active competitors for a clean re-setup.
     await db_run(lambda: UserCompetitor.objects.filter(user=user).update(is_active=False))
 
+    await _clear_setup_runtime(state)
     await state.clear()
-    await state.update_data(user_id=user.id)
+    await state.update_data(user_id=user.id, setup_runtime_id=_new_setup_runtime_id())
     await _ask_seed(message, state)
 
 
@@ -509,14 +633,16 @@ async def cmd_schedule(message: Message, state: FSMContext) -> None:
         last_name=message.from_user.last_name,
         language_code=message.from_user.language_code,
     )
+    await _clear_setup_runtime(state)
     await state.clear()
-    await state.update_data(user_id=user.id)
+    await state.update_data(user_id=user.id, setup_runtime_id=_new_setup_runtime_id())
     await _ask_timezone_method(message, state)
 
 
 @router.message(SetupStates.WAIT_SEED_INPUT)
 async def on_seed_input(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
+    runtime = _get_setup_runtime(data)
     user = await db_call(TgUser.objects.get, id=data["user_id"])
     raw = (message.text or "").strip()
     if not raw:
@@ -540,17 +666,57 @@ async def on_seed_input(message: Message, state: FSMContext) -> None:
         await message.answer("Не понял эту ссылку. Пришли ссылку на профиль или хендл/никнейм.")
         return
 
-    try:
-        seed = await asyncio.to_thread(resolve_exact_seed, raw)
-    except SeedResolveError as e:
-        await db_run(lambda: SeedProfile.objects.filter(id=sp.id).update(status=SeedStatus.FAILED))
-        await message.answer("Не получилось подтвердить профиль.\n" f"Причина: {e}")
-        return
-    except Exception as e:
-        logger.warning("Seed resolve failed: %s", e)
-        await db_run(lambda: SeedProfile.objects.filter(id=sp.id).update(status=SeedStatus.FAILED))
-        await message.answer("Не получилось подтвердить профиль.\n" f"Причина: {e}")
-        return
+    if url_platform:
+        try:
+            seed = await asyncio.to_thread(resolve_seed_for_platform, platform=url_platform, raw_input=raw, context=runtime)
+        except SeedResolveError as e:
+            platform_state = get_platform_state(runtime, url_platform)
+            if platform_state.state in {PLATFORM_STATE_UNAVAILABLE, PLATFORM_STATE_ERROR}:
+                await db_run(
+                    lambda: SeedProfile.objects.filter(id=sp.id).update(
+                        detected_platform=url_platform,
+                        status=SeedStatus.PENDING,
+                    )
+                )
+                await _enter_manual_niche_mode(
+                    message,
+                    state,
+                    seed_profile_id=sp.id,
+                    notice=_manual_niche_fallback_message(platform=url_platform, reason=str(e)),
+                )
+                return
+            await db_run(lambda: SeedProfile.objects.filter(id=sp.id).update(status=SeedStatus.FAILED))
+            await message.answer("Не получилось подтвердить профиль.\n" f"Причина: {e}")
+            return
+        except Exception as e:
+            logger.warning("Seed resolve failed: %s", e)
+            await db_run(lambda: SeedProfile.objects.filter(id=sp.id).update(status=SeedStatus.FAILED))
+            await message.answer("Не получилось подтвердить профиль.\n" f"Причина: {e}")
+            return
+    else:
+        try:
+            seed = await asyncio.to_thread(resolve_exact_seed, raw, context=runtime)
+        except SeedResolveAmbiguity as e:
+            candidates = [_seed_to_dict(candidate) for candidate in e.candidates]
+            await state.update_data(seed_profile_id=sp.id, seed_candidates=candidates)
+            await state.set_state(SetupStates.PICK_SEED_CANDIDATE)
+            note = ""
+            if e.errors:
+                note = "\n\nНе все платформы удалось проверить:\n" + "\n".join(f"- {error}" for error in e.errors[:2])
+            await message.answer(
+                "Нашел точные совпадения на нескольких платформах. Выбери нужный профиль:" + note,
+                reply_markup=kb_seed_candidates(candidates=candidates),
+            )
+            return
+        except SeedResolveError as e:
+            await db_run(lambda: SeedProfile.objects.filter(id=sp.id).update(status=SeedStatus.FAILED))
+            await message.answer("Не получилось подтвердить профиль.\n" f"Причина: {e}")
+            return
+        except Exception as e:
+            logger.warning("Seed resolve failed: %s", e)
+            await db_run(lambda: SeedProfile.objects.filter(id=sp.id).update(status=SeedStatus.FAILED))
+            await message.answer("Не получилось подтвердить профиль.\n" f"Причина: {e}")
+            return
 
     if seed:
         await db_run(
@@ -704,14 +870,25 @@ async def on_link_manual_input(message: Message, state: FSMContext) -> None:
         await message.answer("Пришли ссылку или хендл/никнейм.")
         return
     data = await state.get_data()
+    runtime = _get_setup_runtime(data)
     platform = str(data.get("current_link_platform") or "")
     if not platform:
         await message.answer("Не понял, для какой платформы подтверждать профиль. Пришли /setup еще раз.")
         return
 
     try:
-        seed = await asyncio.to_thread(resolve_seed_for_platform, platform=platform, raw_input=raw)
+        seed = await asyncio.to_thread(resolve_seed_for_platform, platform=platform, raw_input=raw, context=runtime)
     except SeedResolveError as exc:
+        platform_state = get_platform_state(runtime, platform)
+        if platform_state.state in {PLATFORM_STATE_UNAVAILABLE, PLATFORM_STATE_ERROR}:
+            await message.answer(
+                _platform_unavailable_message(
+                    platform=platform,
+                    reason=str(exc),
+                    continuation="Нажми «Пропустить», и я продолжу без этой платформы.",
+                )
+            )
+            return
         await message.answer(f"Не получилось подтвердить {_platform_label(platform)}.\nПричина: {exc}")
         return
     except Exception as exc:
@@ -810,6 +987,7 @@ async def on_competitor_list(message: Message, state: FSMContext) -> None:
 
 async def _start_keywords_step(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
+    runtime = _get_setup_runtime(data)
     user = await db_call(TgUser.objects.get, id=data["user_id"])
     sp_id = data.get("seed_profile_id")
     sp = await db_call(SeedProfile.objects.get, id=sp_id) if sp_id else None
@@ -839,7 +1017,19 @@ async def _start_keywords_step(message: Message, state: FSMContext) -> None:
     if context_seed is None:
         await state.update_data(niche_keywords=[], excluded_keywords=[])
         await state.set_state(SetupStates.ADD_NICHE)
-        await message.answer("Чтобы подобрать конкурентов, напиши ключевые слова по нише (через запятую или с новой строки).")
+        unavailable_lines = []
+        for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM):
+            platform_state = get_platform_state(runtime, platform)
+            if platform_state.state in {PLATFORM_STATE_UNAVAILABLE, PLATFORM_STATE_ERROR}:
+                unavailable_lines.append(
+                    _platform_unavailable_message(
+                        platform=platform,
+                        reason=platform_state.reason or "провайдер недоступен",
+                        continuation=f"Продолжаю без {_platform_label(platform)}.",
+                    )
+                )
+        suffix = ("\n\n" + "\n".join(unavailable_lines)) if unavailable_lines else ""
+        await message.answer("Чтобы подобрать конкурентов, напиши ключевые слова по нише (через запятую или с новой строки)." + suffix)
         return
 
     await message.answer("Секунду, подбираю ключевые слова по нише…")
@@ -850,6 +1040,7 @@ async def _start_keywords_step(message: Message, state: FSMContext) -> None:
             seed=context_seed,
             competitors=comp_seeds,
             linked_accounts=context_accounts,
+            context=runtime,
         )
     except Exception as e:
         logger.warning("infer_niche_keywords failed: %s", e)
@@ -862,7 +1053,8 @@ async def _start_keywords_step(message: Message, state: FSMContext) -> None:
         )
         return
 
-    kws = [k.strip() for k in (kws or []) if isinstance(k, str) and k.strip()][:12]
+    kws = [k.strip() for k in (kws or []) if isinstance(k, str) and k.strip()][:16]
+    kws = build_search_ready_keywords(keywords=kws, max_keywords=8) or kws[:8]
     if not kws:
         await state.update_data(niche_keywords=[], excluded_keywords=[])
         await state.set_state(SetupStates.ADD_NICHE)
@@ -1031,6 +1223,7 @@ async def on_add_niche(message: Message, state: FSMContext) -> None:
 
 async def _start_discovery(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
+    runtime = _get_setup_runtime(data)
     user = await db_call(TgUser.objects.get, id=data["user_id"])
     linked_accounts = await _load_confirmed_linked_accounts(user=user, state=state)
 
@@ -1060,11 +1253,11 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
             linked_accounts=linked_accounts,
             max_youtube_search_calls=int(getattr(settings, "YT_MAX_SEARCH_CALLS_PER_SETUP", 3)),
             max_candidates_per_platform=int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20)),
+            context=runtime,
         )
     except PlatformOnboardingError as e:
-        await message.answer(f"Не получилось подобрать конкурентов автоматически.\nПричина: {e}")
-        await _ask_timezone_method(message, state)
-        return
+        discovery = None
+        discovery_notes = [f"Автоподбор недоступен: {e}"]
     except Exception as e:
         logger.warning("Discovery failed: %s", e)
         discovery = None
@@ -1138,16 +1331,10 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
     excluded: set[int] = set()
     competitor_rows = [(i, _candidate_display_name(c)) for i, c in enumerate(candidates)]
     selected_total = len(candidates) - len(excluded)
-    total_by_platform = {
-        platform: sum(1 for c in candidates if str(c.get("platform") or "") == platform)
-        for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)
-    }
-    selected_by_platform = dict(total_by_platform)
+    selected_by_platform = _selected_counts_by_platform(candidates=candidates, excluded=excluded)
     text = _build_prune_text(
         selected_total=selected_total,
-        total=len(candidates),
         selected_by_platform=selected_by_platform,
-        total_by_platform=total_by_platform,
         limit=limit,
         discovery_notes=discovery_notes,
     )
@@ -1220,14 +1407,10 @@ async def on_prune_done(cb: CallbackQuery, state: FSMContext) -> None:
         return
 
     limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
-    selected_youtube = sum(
-        1 for i in selected_indices if str((candidates[i] or {}).get("platform") or "") == Platform.YOUTUBE
-    )
-    if selected_youtube > limit:
-        await cb.answer(
-            f"Слишком много YouTube-конкурентов. Исключи еще: {selected_youtube - limit}.",
-            show_alert=True,
-        )
+    selected_by_platform = _selected_counts_by_platform(candidates=candidates, excluded=excluded)
+    quota_error = _quota_error_text(selected_by_platform=selected_by_platform, limit=limit)
+    if quota_error:
+        await cb.answer(quota_error, show_alert=True)
         return
 
     await db_run(lambda: UserCompetitor.objects.filter(user=user).update(is_active=False))
@@ -1259,23 +1442,10 @@ async def _render_prune(message: Message, state: FSMContext) -> None:
     limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
     competitor_rows = [(i, _candidate_display_name(c)) for i, c in enumerate(candidates)]
     selected_total = len(candidates) - len(excluded)
-    total_by_platform = {
-        platform: sum(1 for c in candidates if str(c.get("platform") or "") == platform)
-        for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)
-    }
-    selected_by_platform = {
-        platform: sum(
-            1
-            for idx, candidate in enumerate(candidates)
-            if idx not in excluded and str(candidate.get("platform") or "") == platform
-        )
-        for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)
-    }
+    selected_by_platform = _selected_counts_by_platform(candidates=candidates, excluded=excluded)
     text = _build_prune_text(
         selected_total=selected_total,
-        total=len(candidates),
         selected_by_platform=selected_by_platform,
-        total_by_platform=total_by_platform,
         limit=limit,
         discovery_notes=discovery_notes,
     )
@@ -1571,6 +1741,7 @@ async def _finalize_schedule(message: Message, state: FSMContext) -> None:
             for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)
         }
     )
+    await _clear_setup_runtime(state)
     await state.clear()
 
     await message.answer(
@@ -1580,7 +1751,7 @@ async def _finalize_schedule(message: Message, state: FSMContext) -> None:
         f"Расписание: {', '.join(times)}\n"
         f"Время: {tz_label}\n"
         f"Следующий отчет: {format_dt_local(next_run_at, user.timezone_str)}\n\n"
-        "Сейчас соберу стартовые метрики, чтобы первый отчет пришел точно по расписанию.",
+        "Сейчас соберу первый отчет, чтобы все проверить.",
     )
 
-    bootstrap_user_data.delay(user.id)
+    run_user_report_now.delay(user.id, "setup")

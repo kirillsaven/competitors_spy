@@ -21,6 +21,12 @@ from tracking.adapters.youtube import (
 from tracking.models import Competitor, ContentItem, MetricSnapshot, Platform
 from tracking.services.provider_config import get_instagram_apify_config, get_tiktok_apify_config
 from tracking.services.provider_runtime import ProviderFetchCache
+from tracking.services.platform_onboarding import (
+    PlatformOnboardingError,
+    fetch_instagram_profiles_cached,
+    fetch_tiktok_profile_feed_cached,
+)
+from tracking.services.youtube_service import YouTubeNotConfigured, get_youtube_client
 
 logger = logging.getLogger(__name__)
 
@@ -41,44 +47,58 @@ def _normalize_content_text_fields(*, title: str | None, description: str | None
 
 
 def _get_youtube_client() -> YouTubeClient:
-    api_key = getattr(settings, "YOUTUBE_API_KEY", "") or ""
-    if not api_key:
-        raise CollectorError("YOUTUBE_API_KEY is not set")
-    return YouTubeClient(api_key=api_key)
+    try:
+        return get_youtube_client()
+    except YouTubeNotConfigured as exc:
+        raise CollectorError(str(exc)) from exc
 
 
 def _get_tiktok_client() -> ApifyTikTokClient:
     config = get_tiktok_apify_config()
+    profile_actor_id = str(getattr(config, "profile_actor_id", getattr(config, "actor_id", "")) or "")
+    search_actor_id = str(getattr(config, "search_actor_id", "") or "")
     if config.provider != "apify":
         raise CollectorError(f"Unsupported TikTok provider: {config.provider}")
     if not config.access_token:
         raise CollectorError("TIKTOK_PROVIDER_ACCESS_TOKEN is not set")
-    if not config.actor_id:
+    if not profile_actor_id:
         raise CollectorError("TIKTOK_APIFY_PROFILE_ACTOR_ID is not set")
     if not config.base_url:
         raise CollectorError("TIKTOK_PROVIDER_BASE_URL is not set")
     return ApifyTikTokClient(
         access_token=config.access_token,
-        actor_id=config.actor_id,
+        actor_id=profile_actor_id,
+        search_actor_id=search_actor_id,
         base_url=config.base_url,
     )
 
 
 def _get_instagram_client() -> ApifyInstagramClient:
     config = get_instagram_apify_config()
+    profile_actor_id = str(getattr(config, "profile_actor_id", getattr(config, "actor_id", "")) or "")
+    search_actor_id = str(getattr(config, "search_actor_id", "") or "")
     if config.provider != "apify":
         raise CollectorError(f"Unsupported Instagram provider: {config.provider}")
     if not config.access_token:
         raise CollectorError("INSTAGRAM_PROVIDER_ACCESS_TOKEN is not set")
-    if not config.actor_id:
+    if not profile_actor_id:
         raise CollectorError("INSTAGRAM_APIFY_PROFILE_ACTOR_ID is not set")
     if not config.base_url:
         raise CollectorError("INSTAGRAM_PROVIDER_BASE_URL is not set")
     return ApifyInstagramClient(
         access_token=config.access_token,
-        actor_id=config.actor_id,
+        actor_id=profile_actor_id,
+        search_actor_id=search_actor_id,
         base_url=config.base_url,
     )
+
+
+def _youtube_short_reason(*, competitor: Competitor) -> str:
+    return f"YouTube channel returned no recent Shorts with usable metrics: channel_id={competitor.external_id}"
+
+
+def _instagram_reels_reason(*, username: str) -> str:
+    return f"Instagram profile returned no recent reels with views: username={username}"
 
 
 def refresh_youtube_competitor(
@@ -137,15 +157,20 @@ def refresh_youtube_competitor(
             playlist_items = client.playlist_items(playlist_id=str(uploads_playlist_id), max_results=max_results)
         video_ids = playlist_items_to_video_ids(playlist_items)
         if not video_ids:
-            return []
+            raise CollectorError(_youtube_short_reason(competitor=competitor))
 
         video_items = client.videos_list(ids=video_ids, part="snippet,statistics,contentDetails")
-        details = video_items_to_details(video_items)
+        details = [
+            item
+            for item in video_items_to_details(video_items)
+            if item.duration_seconds is not None and item.duration_seconds <= 60
+        ]
+        if not details:
+            raise CollectorError(_youtube_short_reason(competitor=competitor))
 
         updated_items: list[ContentItem] = []
         with transaction.atomic():
             for v in details:
-                content_type = "short" if v.duration_seconds is not None and v.duration_seconds <= 60 else "video"
                 title_text, description_text = _normalize_content_text_fields(title=v.title, description=v.description)
                 obj, created = ContentItem.objects.get_or_create(
                     platform=Platform.YOUTUBE,
@@ -157,7 +182,7 @@ def refresh_youtube_competitor(
                         "description": description_text,
                         "published_at": v.published_at,
                         "duration_seconds": v.duration_seconds,
-                        "meta": {"content_type": content_type},
+                        "meta": {"content_type": "short"},
                     },
                 )
                 # Keep mutable fields fresh.
@@ -176,8 +201,8 @@ def refresh_youtube_competitor(
                         setattr(obj, field, value)
                         changed = True
                 meta = dict(obj.meta or {})
-                if meta.get("content_type") != content_type:
-                    meta["content_type"] = content_type
+                if meta.get("content_type") != "short":
+                    meta["content_type"] = "short"
                     obj.meta = meta
                     changed = True
                 if changed and not created:
@@ -208,6 +233,10 @@ def refresh_tiktok_competitor(
 ) -> list[ContentItem]:
     if competitor.platform != Platform.TIKTOK:
         return []
+    if provider_fetch_cache is not None:
+        cached_error = provider_fetch_cache.get_platform_error(platform=Platform.TIKTOK)
+        if cached_error:
+            raise CollectorError(cached_error)
 
     config = get_tiktok_apify_config()
     max_results = int(getattr(settings, "YT_RECENT_N_FOR_METRICS", 15))
@@ -227,11 +256,23 @@ def refresh_tiktok_competitor(
         raise CollectorError(f"TikTok competitor {competitor.id or competitor.external_id} has no resolvable handle")
 
     items = provider_fetch_cache.get_tiktok_feed(handle=handle) if provider_fetch_cache else None
-    client = None
+    purpose = provider_fetch_cache.purpose if provider_fetch_cache else "report_collection"
+    context_id = provider_fetch_cache.context_id if provider_fetch_cache else None
     try:
         if items is None:
-            client = _get_tiktok_client()
-            items = client.fetch_profile_feed(handle=handle, results_per_page=max_results)
+            try:
+                items = fetch_tiktok_profile_feed_cached(
+                    handle=handle,
+                    results_per_page=max_results,
+                    purpose=purpose,
+                    context_id=context_id,
+                )
+            except PlatformOnboardingError as exc:
+                if provider_fetch_cache is not None:
+                    provider_fetch_cache.mark_platform_error(platform=Platform.TIKTOK, reason=str(exc))
+                raise CollectorError(str(exc)) from exc
+            if provider_fetch_cache is not None and items:
+                provider_fetch_cache.store_tiktok_feed(handle=handle, items=items)
         if not items:
             raise CollectorError(f"TikTok profile returned no items: handle={handle}")
 
@@ -327,8 +368,7 @@ def refresh_tiktok_competitor(
 
         return updated_items
     finally:
-        if client is not None:
-            client.close()
+        pass
 
 
 def refresh_instagram_competitor(
@@ -340,6 +380,10 @@ def refresh_instagram_competitor(
 ) -> list[ContentItem]:
     if competitor.platform != Platform.INSTAGRAM:
         return []
+    if provider_fetch_cache is not None:
+        cached_error = provider_fetch_cache.get_platform_error(platform=Platform.INSTAGRAM)
+        if cached_error:
+            raise CollectorError(cached_error)
 
     lookup = (competitor.handle or "").strip()
     if not lookup:
@@ -350,17 +394,28 @@ def refresh_instagram_competitor(
         raise CollectorError(f"Instagram competitor {competitor.id or competitor.external_id} has no resolvable lookup value")
 
     cached_profile = provider_fetch_cache.get_instagram_profile(lookup=lookup) if provider_fetch_cache else None
-    client = None
+    purpose = provider_fetch_cache.purpose if provider_fetch_cache else "report_collection"
+    context_id = provider_fetch_cache.context_id if provider_fetch_cache else None
     try:
         if cached_profile is not None:
             profiles = [cached_profile]
         else:
-            client = _get_instagram_client()
-            profiles = client.fetch_profiles(inputs=[lookup])
+            try:
+                profiles = fetch_instagram_profiles_cached(
+                    inputs=[lookup],
+                    purpose=purpose,
+                    context_id=context_id,
+                )
+            except PlatformOnboardingError as exc:
+                if provider_fetch_cache is not None:
+                    provider_fetch_cache.mark_platform_error(platform=Platform.INSTAGRAM, reason=str(exc))
+                raise CollectorError(str(exc)) from exc
         if not profiles:
             raise CollectorError(f"Instagram profile returned no items: lookup={lookup}")
 
         profile = profiles[0]
+        if provider_fetch_cache is not None:
+            provider_fetch_cache.store_instagram_profile(profile=profile, lookups=[lookup])
         username = str(profile.get("username") or "").strip()
         profile_id = str(profile.get("id") or "").strip()
         if not username:
@@ -370,7 +425,7 @@ def refresh_instagram_competitor(
 
         details = profile_to_video_details(profile)
         if not details:
-            raise CollectorError(f"Instagram profile returned no recent items with views: username={username}")
+            raise CollectorError(_instagram_reels_reason(username=username))
 
         changed_fields: set[str] = set()
         competitor_meta = dict(competitor.meta or {})
@@ -406,7 +461,7 @@ def refresh_instagram_competitor(
                     title=item.title,
                     description=item.description,
                 )
-                content_meta = {"content_type": "video", "provider": "apify"}
+                content_meta = {"content_type": "reel", "provider": "apify"}
                 obj, created = ContentItem.objects.get_or_create(
                     platform=Platform.INSTAGRAM,
                     external_id=item.video_id,
@@ -453,8 +508,7 @@ def refresh_instagram_competitor(
 
         return updated_items
     finally:
-        if client is not None:
-            client.close()
+        pass
 
 
 def refresh_competitor(

@@ -16,7 +16,7 @@ def test_setup_bootstrap_does_not_suppress_first_real_scheduled_report(monkeypat
 
     bootstrap_now = due_at + timedelta(minutes=2)
     monkeypatch.setattr(task_module.timezone, "now", lambda: bootstrap_now)
-    monkeypatch.setattr(task_module, "refresh_youtube_competitor", lambda competitor, mode, captured_at: [])
+    monkeypatch.setattr(task_module, "refresh_competitor", lambda competitor, mode, captured_at: [])
 
     task_module.bootstrap_user_data.run(user.id)
 

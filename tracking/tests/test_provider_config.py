@@ -59,6 +59,7 @@ def test_provider_config_returns_builtin_for_non_stubbed_platform():
     TIKTOK_PROVIDER_BASE_URL="",
     TIKTOK_PROVIDER_ACCESS_TOKEN="apify-token",
     TIKTOK_APIFY_PROFILE_ACTOR_ID="clockworks/custom-actor",
+    TIKTOK_APIFY_SEARCH_ACTOR_ID="clockworks/custom-search",
 )
 def test_tiktok_apify_config_uses_default_fetch_limit():
     config = get_tiktok_apify_config()
@@ -66,7 +67,8 @@ def test_tiktok_apify_config_uses_default_fetch_limit():
     assert config.provider == "apify"
     assert config.base_url == "https://api.apify.com/v2"
     assert config.access_token == "apify-token"
-    assert config.actor_id == "clockworks/custom-actor"
+    assert config.profile_actor_id == "clockworks/custom-actor"
+    assert config.search_actor_id == "clockworks/custom-search"
     assert config.results_per_profile == 10
 
 
@@ -75,6 +77,7 @@ def test_tiktok_apify_config_uses_default_fetch_limit():
     TIKTOK_PROVIDER_BASE_URL="",
     TIKTOK_PROVIDER_ACCESS_TOKEN="apify-token",
     TIKTOK_APIFY_PROFILE_ACTOR_ID="clockworks/custom-actor",
+    TIKTOK_APIFY_SEARCH_ACTOR_ID="clockworks/custom-search",
     TIKTOK_APIFY_RESULTS_PER_PROFILE=25,
 )
 def test_tiktok_apify_config_uses_custom_fetch_limit():
@@ -83,7 +86,8 @@ def test_tiktok_apify_config_uses_custom_fetch_limit():
     assert config.provider == "apify"
     assert config.base_url == "https://api.apify.com/v2"
     assert config.access_token == "apify-token"
-    assert config.actor_id == "clockworks/custom-actor"
+    assert config.profile_actor_id == "clockworks/custom-actor"
+    assert config.search_actor_id == "clockworks/custom-search"
     assert config.results_per_profile == 25
 
 
@@ -92,6 +96,7 @@ def test_tiktok_apify_config_uses_custom_fetch_limit():
     INSTAGRAM_PROVIDER_BASE_URL="",
     INSTAGRAM_PROVIDER_ACCESS_TOKEN="ig-token",
     INSTAGRAM_APIFY_PROFILE_ACTOR_ID="apify/custom-instagram-actor",
+    INSTAGRAM_APIFY_SEARCH_ACTOR_ID="iron-crawler/custom-search",
 )
 def test_instagram_apify_config_uses_defaults_and_actor_settings():
     config = get_instagram_apify_config()
@@ -99,4 +104,5 @@ def test_instagram_apify_config_uses_defaults_and_actor_settings():
     assert config.provider == "apify"
     assert config.base_url == "https://api.apify.com/v2"
     assert config.access_token == "ig-token"
-    assert config.actor_id == "apify/custom-instagram-actor"
+    assert config.profile_actor_id == "apify/custom-instagram-actor"
+    assert config.search_actor_id == "iron-crawler/custom-search"
