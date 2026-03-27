@@ -3,7 +3,17 @@ from __future__ import annotations
 import logging
 import re
 
-from common.text import KeywordSource, _USEFUL_THEME_STEMS, _stem_token, extract_keywords
+from common.text import (
+    KeywordSource,
+    _LOW_INFORMATION,
+    _STOPWORDS_EN,
+    _STOPWORDS_RU,
+    _STRUCTURAL_JUNK,
+    _USEFUL_THEME_STEMS,
+    _normalize_token,
+    _stem_token,
+    extract_keywords,
+)
 
 from tracking.adapters.base import SeedResolution
 from tracking.services.llm_gemini import GeminiError, infer_keywords_ru
@@ -13,6 +23,10 @@ from tracking.services.setup_runtime import SetupRunContext
 logger = logging.getLogger(__name__)
 _IDENTITY_SAFE_THEME_STEMS = set(_USEFUL_THEME_STEMS) | {"ege", "exam", "егэ", "огэ", "экзам"}
 _EXAM_SUBJECT_RE = re.compile(r"\b(егэ|огэ)\s+по\s+([0-9a-zа-яё-]{3,})", flags=re.IGNORECASE)
+_FOR_BEGINNERS_RE = re.compile(r"\b(для\s+начинающ[0-9a-zа-яё-]*|с\s+нуля|начальн[0-9a-zа-яё-]*\s+уров[0-9a-zа-яё-]*)", flags=re.IGNORECASE)
+_FOR_ADULTS_RE = re.compile(r"\b(для\s+взросл[0-9a-zа-яё-]*|преподавать\s+взросл[0-9a-zа-яё-]*)", flags=re.IGNORECASE)
+_CONVERSATIONAL_RE = re.compile(r"\b(разговорн[0-9a-zа-яё-]*|заговор[0-9a-zа-яё-]*)", flags=re.IGNORECASE)
+_ACCOUNT_TOKEN_RE = re.compile(r"[0-9a-zа-яё]+", flags=re.IGNORECASE)
 
 
 def _account_key(seed: SeedResolution) -> str:
@@ -185,6 +199,22 @@ def build_keyword_sources(
     return sources
 
 
+def _source_stem_counts(keyword_sources: list[KeywordSource] | None) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for source in keyword_sources or []:
+        seen_in_source: set[str] = set()
+        for raw in _ACCOUNT_TOKEN_RE.findall(str(source.text or "")):
+            norm = _normalize_token(raw)
+            if len(norm) < 3:
+                continue
+            stem = _stem_token(norm)
+            if stem in seen_in_source:
+                continue
+            seen_in_source.add(stem)
+            counts[stem] = counts.get(stem, 0) + 1
+    return counts
+
+
 def build_keyword_blocked_terms(
     *,
     seed: SeedResolution,
@@ -192,11 +222,16 @@ def build_keyword_blocked_terms(
     keyword_sources: list[KeywordSource] | None = None,
 ) -> set[str]:
     blocked: set[str] = set()
+    source_stem_support = _source_stem_counts(keyword_sources)
     for account in _ordered_accounts(seed=seed, linked_accounts=linked_accounts):
         for token in re.findall(r"[0-9a-zа-яё]+", str(account.handle or ""), flags=re.IGNORECASE):
             norm = token.strip().lower().replace("ё", "е")
             stem = _stem_token(norm)
-            if len(norm) >= 3 and stem not in _IDENTITY_SAFE_THEME_STEMS:
+            if (
+                len(norm) >= 3
+                and stem not in _IDENTITY_SAFE_THEME_STEMS
+                and source_stem_support.get(stem, 0) < 2
+            ):
                 blocked.add(norm)
 
         title_tokens = [
@@ -208,6 +243,7 @@ def build_keyword_blocked_terms(
             token
             for token in title_tokens
             if _stem_token(token) not in _IDENTITY_SAFE_THEME_STEMS
+            and source_stem_support.get(_stem_token(token), 0) < 2
         ]
         blocked.update(unsupported_title_tokens)
 
@@ -255,6 +291,168 @@ def _build_title_keyword_sources(
                 seen=seen,
             )
     return sources
+
+
+def _build_source_token_stats(keyword_sources: list[KeywordSource]) -> tuple[set[str], set[str], set[str]]:
+    tokens: set[str] = set()
+    stems: set[str] = set()
+    digits: set[str] = set()
+    for source in keyword_sources:
+        for raw in _ACCOUNT_TOKEN_RE.findall(str(source.text or "")):
+            norm = _normalize_token(raw)
+            if not norm:
+                continue
+            if norm.isdigit():
+                digits.add(norm)
+                continue
+            if (
+                len(norm) < 3
+                or norm in _STOPWORDS_EN
+                or norm in _STOPWORDS_RU
+                or norm in _STRUCTURAL_JUNK
+                or norm in _LOW_INFORMATION
+            ):
+                continue
+            tokens.add(norm)
+            stems.add(_stem_token(norm))
+    return tokens, stems, digits
+
+
+def _candidate_subject_terms(
+    *,
+    seed: SeedResolution,
+    linked_accounts: list[SeedResolution] | None,
+    keywords: list[str],
+    keyword_sources: list[KeywordSource],
+) -> list[tuple[str, bool]]:
+    source_tokens, source_stems, source_digits = _build_source_token_stats(keyword_sources)
+    stem_support = _source_stem_counts(keyword_sources)
+    out: list[tuple[str, bool]] = []
+    seen: set[tuple[str, bool]] = set()
+
+    def add(term: str, *, expandable: bool) -> None:
+        value = _normalize_subject_term(term)
+        if len(value) < 3:
+            return
+        key = (value, expandable)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append((value, expandable))
+
+    for keyword in keywords:
+        value = " ".join(str(keyword or "").split()).strip()
+        if not value:
+            continue
+        if len(value.split()) == 1:
+            stem = _stem_token(value)
+            if stem not in _GENERIC_SUBJECT_STEMS and (
+                stem in _IDENTITY_SAFE_THEME_STEMS or stem_support.get(stem, 0) >= 2
+            ):
+                add(value, expandable=True)
+
+    for account in _ordered_accounts(seed=seed, linked_accounts=linked_accounts):
+        handle_norm = re.sub(r"[^0-9a-zа-яё]+", "", _normalize_token(account.handle or ""))
+        if handle_norm:
+            for token in sorted(source_tokens, key=lambda item: (-len(item), item)):
+                stem = _stem_token(token)
+                if len(token) >= 4 and token in handle_norm and (
+                    stem in _IDENTITY_SAFE_THEME_STEMS or stem_support.get(stem, 0) >= 2
+                ):
+                    add(token, expandable=True)
+
+        for raw in _ACCOUNT_TOKEN_RE.findall(str(account.title or "")):
+            norm = _normalize_token(raw)
+            if len(norm) < 3:
+                continue
+            if raw.isupper():
+                add(norm, expandable=False)
+                if "2" in source_digits and not any(ch.isdigit() for ch in norm):
+                    add(f"{norm} 2", expandable=False)
+
+        for raw in _ACCOUNT_TOKEN_RE.findall(str(account.description or "")):
+            norm = _normalize_token(raw)
+            if len(norm) < 3 or norm.isdigit():
+                continue
+            stem = _stem_token(norm)
+            if stem in source_stems and stem not in _GENERIC_SUBJECT_STEMS and (
+                stem in _IDENTITY_SAFE_THEME_STEMS or stem_support.get(stem, 0) >= 2
+            ):
+                add(norm, expandable=True)
+
+    return out[:4]
+
+
+_GENERIC_SUBJECT_STEMS = {
+    "group",
+    "groups",
+    "lesson",
+    "online",
+    "групп",
+    "онлайн",
+    "репетитор",
+    "преподав",
+    "преподавател",
+    "урок",
+    "учеб",
+    "ученик",
+    "учител",
+    "школ",
+}
+
+
+def _normalize_subject_term(term: str) -> str:
+    value = " ".join(str(term or "").split()).strip().lower()
+    if not value:
+        return ""
+    if " " in value:
+        return " ".join(_normalize_subject_term(part) for part in value.split() if part).strip()
+    if value.endswith("ого") or value.endswith("ому"):
+        return value[:-3] + "ий"
+    if value.endswith("его") or value.endswith("ему"):
+        return value[:-3] + "ий"
+    return value
+
+
+def _supplement_search_utility_keywords(
+    *,
+    seed: SeedResolution,
+    linked_accounts: list[SeedResolution] | None,
+    keywords: list[str],
+    keyword_sources: list[KeywordSource],
+) -> list[str]:
+    subject_terms = _candidate_subject_terms(
+        seed=seed,
+        linked_accounts=linked_accounts,
+        keywords=keywords,
+        keyword_sources=keyword_sources,
+    )
+    if not subject_terms:
+        return []
+
+    source_text = "\n".join(str(source.text or "") for source in keyword_sources)
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: str) -> None:
+        phrase = " ".join(str(value or "").split()).strip().lower()
+        if len(phrase) < 3 or phrase in seen:
+            return
+        seen.add(phrase)
+        out.append(phrase)
+
+    for subject, expandable in subject_terms:
+        add(subject)
+        if not expandable:
+            continue
+        if _FOR_BEGINNERS_RE.search(source_text):
+            add(f"{subject} для начинающих")
+        if _FOR_ADULTS_RE.search(source_text):
+            add(f"{subject} для взрослых")
+        if _CONVERSATIONAL_RE.search(source_text):
+            add(f"разговорный {subject}")
+
+    return out
 
 
 def _merge_keyword_lists(*lists: list[str], max_keywords: int = 8) -> list[str]:
@@ -306,6 +504,16 @@ def infer_niche_keywords(
         blocked_terms=blocked_terms,
     )
     auto_keywords = _supplement_exam_subject_keywords(keywords=auto_keywords, keyword_sources=keyword_sources)[:8]
+    auto_keywords = _merge_keyword_lists(
+        _supplement_search_utility_keywords(
+            seed=seed,
+            linked_accounts=linked_accounts,
+            keywords=auto_keywords,
+            keyword_sources=keyword_sources,
+        ),
+        auto_keywords,
+        max_keywords=8,
+    )
     title_keywords = extract_keywords(
         _build_title_keyword_sources(seed=seed, linked_accounts=linked_accounts),
         max_keywords=3,

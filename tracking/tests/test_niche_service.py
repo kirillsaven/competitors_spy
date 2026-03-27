@@ -188,11 +188,39 @@ def test_infer_niche_keywords_auto_prefers_phrase_like_teacher_topics(monkeypatc
 
     assert source == "auto"
     assert 1 <= len(keywords) <= 8
-    assert all(len(keyword.split()) >= 2 for keyword in keywords)
     assert any("английск" in keyword for keyword in keywords)
     assert any("преподав" in keyword or "репетитор" in keyword for keyword in keywords)
+    assert any(len(keyword.split()) >= 2 for keyword in keywords)
     for banned in {"дарья", "панчо", "объяснять", "бояться", "новый", "сложных", "уровень", "рост"}:
         assert all(banned not in keyword for keyword in keywords)
+
+
+def test_infer_niche_keywords_expands_teacher_search_phrases_from_recent_content(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: [
+            "Как начать преподавать взрослым? Оставляй заявку на занятия в группе преподавателей",
+            "Что посмотреть в оригинале, если у тебя начальный уровень языка?",
+            "Помогаю ученикам заговорить на английском без зубрежки",
+        ],
+    )
+    seed = SeedResolution(
+        platform=Platform.YOUTUBE,
+        external_id="yt-1",
+        handle="dariapancho",
+        url="https://www.youtube.com/@dariapancho",
+        title="Daria Pancho",
+        description="Онлайн-репетитор по английскому и группы для преподавателей английского.",
+        uploads_playlist_id="UU1",
+    )
+
+    keywords, source = niche_service.infer_niche_keywords(seed=seed, competitors=[], prefer_llm=False)
+
+    assert source == "auto"
+    assert "английский для взрослых" in keywords
+    assert "английский для начинающих" in keywords
+    assert "разговорный английский" in keywords
 
 
 def test_infer_niche_keywords_blocks_seed_identity_tokens_even_if_they_repeat_in_description(monkeypatch):
@@ -248,6 +276,32 @@ def test_infer_niche_keywords_keeps_topical_handle_words_when_supported_by_conte
 
     assert any("english" in keyword for keyword in keywords)
     assert any("teacher" in keyword or "lesson" in keyword for keyword in keywords)
+
+
+def test_infer_niche_keywords_keeps_game_subject_from_title_and_description(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: [
+            "ПУТЬ В ТОП 100 — ТОКСИЧНЫЕ РУИНЕРЫ",
+            "С НУЛЯ ДО ТИТАНА — РАНГ ПСИХОВ",
+            "ЗАСНАЙПИЛ ГОЛОВАЧА И ДОВЕЛ ЕГО ДО ИСТЕРИКИ",
+        ],
+    )
+    seed = SeedResolution(
+        platform=Platform.YOUTUBE,
+        external_id="yt-dota",
+        handle="pinkmandota",
+        url="https://www.youtube.com/@pinkmandota",
+        title="PiNKMAN DOTA",
+        description="Человек, который любит проводить время с лучшими представителями мира Доты 2.",
+        uploads_playlist_id="UU1",
+    )
+
+    keywords, _ = niche_service.infer_niche_keywords(seed=seed, competitors=[], prefer_llm=False)
+
+    assert any(keyword in {"dota", "dota 2"} for keyword in keywords)
+    assert all("pinkman" not in keyword for keyword in keywords)
 
 
 def test_infer_niche_keywords_dedupes_same_stem_phrase_reordering(monkeypatch):
