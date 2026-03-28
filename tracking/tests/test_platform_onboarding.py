@@ -1520,6 +1520,70 @@ def test_instagram_search_refetches_when_cached_pool_is_too_small_for_higher_lim
     assert calls == [2, 4]
 
 
+def test_search_instagram_candidates_raw_uses_full_overreturned_pool_for_validation(monkeypatch):
+    monkeypatch.setattr(platform_onboarding, "_discovery_queries", lambda **kwargs: ["english tutors"])
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_cached_instagram_search_results",
+        lambda **kwargs: [
+            {"id": f"ig-{idx}", "username": f"teacher_{idx}", "full_name": f"Teacher {idx}"}
+            for idx in range(25)
+        ],
+    )
+    monkeypatch.setattr(platform_onboarding, "fetch_instagram_profiles_cached", lambda **kwargs: [])
+
+    candidates = platform_onboarding._search_instagram_candidates_raw(
+        keywords=["english tutors"],
+        competitors=[],
+        max_candidates=20,
+    )
+
+    assert len(candidates) == 25
+    assert {candidate.external_id for candidate in candidates} == {f"ig-{idx}" for idx in range(25)}
+
+
+def test_search_instagram_candidates_raw_expands_related_profiles(monkeypatch):
+    monkeypatch.setattr(platform_onboarding, "_discovery_queries", lambda **kwargs: ["english tutors"])
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_cached_instagram_search_results",
+        lambda **kwargs: [
+            {"id": "ig-1", "username": "teacher_hub", "full_name": "Teacher Hub"},
+        ],
+    )
+
+    def fake_fetch_instagram_profiles_cached(*, inputs, context=None, purpose=None, context_id=None):
+        assert inputs == ["https://www.instagram.com/teacher_hub/"]
+        return [
+            {
+                "id": "ig-1",
+                "username": "teacher_hub",
+                "url": "https://www.instagram.com/teacher_hub/",
+                "biography": "English teachers and lesson ideas",
+                "relatedProfiles": [
+                    {
+                        "id": "ig-2",
+                        "username": "lesson_lab",
+                        "full_name": "Lesson Lab",
+                        "is_verified": True,
+                    }
+                ],
+            }
+        ]
+
+    monkeypatch.setattr(platform_onboarding, "fetch_instagram_profiles_cached", fake_fetch_instagram_profiles_cached)
+
+    candidates = platform_onboarding._search_instagram_candidates_raw(
+        keywords=["english tutors"],
+        competitors=[],
+        max_candidates=20,
+    )
+
+    assert [candidate.external_id for candidate in candidates[:2]] == ["ig-2", "ig-1"]
+    related = next(candidate for candidate in candidates if candidate.external_id == "ig-2")
+    assert related.metadata["source"] == "related_profile"
+
+
 def test_discover_competitors_for_onboarding_validates_multiple_ig_tt_candidates(monkeypatch):
     recent_instagram_ts = (datetime.now(UTC) - timedelta(days=1)).isoformat().replace("+00:00", "Z")
     recent_tiktok_ts = (datetime.now(UTC) - timedelta(days=2)).isoformat().replace("+00:00", "Z")

@@ -146,8 +146,8 @@ _DISCOVERY_INITIAL_QUERY_BUDGET = {
 }
 _DISCOVERY_RESULT_BUDGET = {
     Platform.YOUTUBE: 50,
-    Platform.INSTAGRAM: 3,
-    Platform.TIKTOK: 5,
+    Platform.INSTAGRAM: 20,
+    Platform.TIKTOK: 20,
 }
 _DISCOVERY_EARLY_STOP_CANDIDATES = {
     Platform.YOUTUBE: 20,
@@ -161,14 +161,16 @@ _DISCOVERY_VALIDATION_BUDGET = {
 }
 _DISCOVERY_VALIDATION_MAX_SCAN = {
     Platform.YOUTUBE: 140,
-    Platform.INSTAGRAM: 40,
-    Platform.TIKTOK: 40,
+    Platform.INSTAGRAM: 100,
+    Platform.TIKTOK: 80,
 }
 _DISCOVERY_VALIDATION_ITEMS = 5
 _DISCOVERY_MIN_RECENT_SHORTS = 2
 _DISCOVERY_RECENT_WINDOW_DAYS = 60
 _DISCOVERY_YOUTUBE_UPLOAD_SCAN_LIMIT = 30
 _YOUTUBE_LOW_RECALL_RESCUE_THRESHOLD = 12
+_INSTAGRAM_RELATED_EXPANSION_PROFILES = 20
+_INSTAGRAM_RELATED_PER_PROFILE = 12
 _GENERIC_DISCOVERY_STEMS = {
     "coach",
     "course",
@@ -2562,6 +2564,76 @@ def _build_instagram_candidate(raw: dict[str, Any], *, queries: set[str]) -> _Di
     )
 
 
+def _build_instagram_related_candidate(raw: dict[str, Any], *, queries: set[str]) -> _DiscoveryCandidate | None:
+    external_id = str(raw.get("id") or "").strip()
+    username = str(raw.get("username") or "").strip()
+    if not external_id or not username:
+        return None
+    return _DiscoveryCandidate(
+        platform=Platform.INSTAGRAM,
+        external_id=external_id,
+        handle=username,
+        url=build_instagram_profile_url(username),
+        display_name=str(raw.get("full_name") or raw.get("fullName") or username).strip() or None,
+        description="",
+        query_hits=set(queries),
+        metadata={
+            "verified": bool(raw.get("is_verified") or raw.get("isVerified")),
+            "source": "related_profile",
+        },
+    )
+
+
+def _expand_instagram_related_candidates(
+    *,
+    candidates: list[_DiscoveryCandidate],
+    context: SetupRunContext | None = None,
+) -> list[_DiscoveryCandidate]:
+    if not candidates:
+        return []
+    ranked = sorted(
+        candidates,
+        key=lambda item: (-_score_candidate(item), -len(item.query_hits), item.sort_tiebreak),
+    )
+    expansion_candidates = ranked[:_INSTAGRAM_RELATED_EXPANSION_PROFILES]
+    lookups = [str(candidate.url or candidate.handle or candidate.external_id or "").strip() for candidate in expansion_candidates]
+    profiles = fetch_instagram_profiles_cached(
+        inputs=lookups,
+        context=context,
+        purpose="candidate_validation",
+    )
+    merged: dict[str, _DiscoveryCandidate] = {candidate.external_id: candidate for candidate in candidates}
+    for candidate, lookup in zip(expansion_candidates, lookups):
+        profile = _find_instagram_profile_for_lookup(profiles, lookup)
+        if not profile:
+            continue
+        biography = str(profile.get("biography") or "").strip()
+        if biography and not str(candidate.description or "").strip():
+            candidate.description = biography
+        related_items = profile.get("relatedProfiles") or []
+        if not isinstance(related_items, list):
+            continue
+        for raw_related in related_items[:_INSTAGRAM_RELATED_PER_PROFILE]:
+            if not isinstance(raw_related, dict):
+                continue
+            related = _build_instagram_related_candidate(raw_related, queries=candidate.query_hits)
+            if not related:
+                continue
+            existing = merged.get(related.external_id)
+            if existing is None:
+                merged[related.external_id] = related
+                continue
+            existing.query_hits.update(related.query_hits)
+            existing.metadata.update(related.metadata)
+            if not existing.display_name and related.display_name:
+                existing.display_name = related.display_name
+            if not existing.handle and related.handle:
+                existing.handle = related.handle
+            if not existing.url and related.url:
+                existing.url = related.url
+    return list(merged.values())
+
+
 def _search_instagram_candidates_raw(
     *,
     keywords: list[str],
@@ -2605,11 +2677,16 @@ def _search_instagram_candidates_raw(
     if not raw_by_id:
         return []
 
+    raw_pool = _expand_instagram_related_candidates(
+        candidates=list(raw_by_id.values()),
+        context=context,
+    )
+
     ranked = sorted(
-        raw_by_id.values(),
+        raw_pool,
         key=lambda item: (-_score_candidate(item), -len(item.query_hits), item.sort_tiebreak),
     )
-    return ranked[:max_candidates]
+    return ranked
 
 
 def discover_instagram_competitors(
@@ -2634,6 +2711,7 @@ def discover_instagram_competitors(
             max_candidates=max_candidates,
             context=context,
         )
+        [:max_candidates]
     ]
 
 
@@ -2701,7 +2779,7 @@ def _search_tiktok_candidates_raw(
         raw_by_id.values(),
         key=lambda item: (-_score_candidate(item), -len(item.query_hits), item.sort_tiebreak),
     )
-    return ranked[:max_candidates]
+    return ranked
 
 
 def discover_tiktok_competitors(
@@ -2726,6 +2804,7 @@ def discover_tiktok_competitors(
             max_candidates=max_candidates,
             context=context,
         )
+        [:max_candidates]
     ]
 
 
