@@ -1238,6 +1238,14 @@ def _theme_content_passes(
     if platform == Platform.INSTAGRAM:
         if metrics["strong_text_matches"] >= 2:
             return True
+        if (
+            bool(candidate.metadata.get("verified"))
+            and metrics["matched_phrases"] >= 2
+            and metrics["specific_overlap"] >= 4
+            and metrics["strong_anchor_matches"] >= 1
+            and float(candidate.metadata.get("profile_theme_score") or 0) >= 8
+        ):
+            return True
         return (
             (metrics["matched_phrases"] >= 2 or metrics["specific_overlap"] >= 4)
             and metrics["strong_anchor_matches"] >= 2
