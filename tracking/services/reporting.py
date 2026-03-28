@@ -310,19 +310,27 @@ def _render_platform_section(
     for idx, it in enumerate(items, start=1):
         title_text = _clean_title(str(it.get("title") or "Без названия"))
         url = it.get("url") or ""
+        competitor = it.get("competitor") or {}
+        channel_name = (
+            str(competitor.get("display_name") or "").strip()
+            or str(competitor.get("handle") or "").strip()
+            or str(competitor.get("external_id") or "").strip()
+            or "Без названия"
+        )
         views_end = it.get("views_end")
         avg_views_same_age = it.get("avg_views_same_age")
         reactions_end = it.get("reactions_end")
         avg_reactions_same_age = it.get("avg_reactions_same_age")
-        lines.append(f"{idx}) {title_text}")
+        lines.append(f"{idx}) {channel_name}")
+        lines.append(title_text)
         if url:
             lines.append(url)
         lines.append(
-            f"Просмотры: {_format_int(views_end)} vs {_format_int(avg_views_same_age)} "
+            f"Просмотры: {_format_int(views_end)} сейчас vs {_format_int(avg_views_same_age)} среднее у канала для такого же возраста "
             f"({_format_delta_pct(it.get('views_delta_pct'))})"
         )
         lines.append(
-            f"Реакции: {_format_int(reactions_end)} vs {_format_int(avg_reactions_same_age)} "
+            f"Реакции: {_format_int(reactions_end)} сейчас vs {_format_int(avg_reactions_same_age)} среднее у канала для такого же возраста "
             f"({_format_delta_pct(it.get('reactions_delta_pct'))})"
         )
         lines.append(f"ER: {_format_percent(it.get('er_end'))}")

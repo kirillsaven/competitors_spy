@@ -81,11 +81,10 @@ def test_render_report_text_preserves_youtube_section_and_stub_lines():
     text = render_report_text(payload=payload, timezone_str="UTC")
 
     assert "YouTube:" in text
-    assert "1) Title 1" in text
-    assert "Просмотры: 5000 vs 3200 (+56.2%)" in text
-    assert "Реакции:" in text
-    assert "140" in text
-    assert "(+60.7%)" in text
+    assert "1) Comp 1" in text
+    assert "Title 1" in text
+    assert "Просмотры: 5000 сейчас vs 3200 среднее у канала для такого же возраста (+56.2%)" in text
+    assert "Реакции: 220 сейчас vs 140 среднее у канала для такого же возраста (+60.7%)" in text
     assert "ER: 4.4%" in text
     assert "Вирусность: 1.8x" in text
     assert "TikTok:" in text
@@ -105,8 +104,9 @@ def test_render_report_text_renders_tiktok_items_with_share_counts():
     text = render_report_text(payload=payload, timezone_str="UTC")
 
     assert "TikTok:" in text
+    assert "1) Comp 3" in text
     assert "Title 3" in text
-    assert "Реакции: 225 vs 140 (+60.7%)" in text
+    assert "Реакции: 225 сейчас vs 140 среднее у канала для такого же возраста (+60.7%)" in text
     assert "https://example.com/3" in text
 
 
@@ -120,6 +120,7 @@ def test_render_report_text_renders_instagram_items():
     text = render_report_text(payload=payload, timezone_str="UTC")
 
     assert "Instagram:" in text
+    assert "1) Comp 4" in text
     assert "Title 4" in text
     assert "ER: 4.4%" in text
     assert "https://example.com/4" in text
