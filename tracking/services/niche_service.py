@@ -280,14 +280,6 @@ def _same_handle_profile_hint_sources(
         if not account_handle or account_handle != seed_handle:
             continue
         source_id = _account_key(account)
-        if account.title:
-            _append_keyword_source(
-                out,
-                text=account.title,
-                source_id=source_id,
-                source_type="description",
-                seen=seen,
-            )
         if account.description:
             _append_keyword_source(
                 out,
@@ -1017,6 +1009,7 @@ def infer_niche_keywords(
         existing_keywords=auto_keywords,
         limit=8,
     )
+    compact_source_phrases = [phrase for phrase in supported_source_phrases if len(str(phrase).split()) <= 3]
     if seed.platform == "youtube":
         try:
             youtube_keywords = infer_youtube_keywords(seed)
@@ -1035,11 +1028,11 @@ def infer_niche_keywords(
     auto_keywords = _merge_keyword_lists(game_topic_keywords, auto_keywords, max_keywords=8)
     auto_keywords = _prioritize_keywords(primary=auto_keywords, topic_phrases=topic_phrases)
     if is_niche_keywords_poor(keywords=auto_keywords, seed=seed):
-        auto_keywords = _merge_keyword_lists(supported_source_phrases, auto_keywords, max_keywords=8)
+        auto_keywords = _merge_keyword_lists(auto_keywords, compact_source_phrases, supported_source_phrases, max_keywords=8)
     auto_keywords = _filter_search_noise_keywords(auto_keywords)
     auto_keywords = _drop_generic_singletons_with_richer_phrases(auto_keywords)[:8]
     if len(auto_keywords) < 5 or is_niche_keywords_poor(keywords=auto_keywords, seed=seed):
-        auto_keywords = _merge_keyword_lists(auto_keywords, supported_source_phrases, max_keywords=8)
+        auto_keywords = _merge_keyword_lists(auto_keywords, compact_source_phrases, supported_source_phrases, max_keywords=8)
         auto_keywords = _filter_search_noise_keywords(auto_keywords)
         auto_keywords = _drop_generic_singletons_with_richer_phrases(auto_keywords)[:8]
     return auto_keywords, "auto"
