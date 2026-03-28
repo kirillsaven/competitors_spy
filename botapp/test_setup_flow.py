@@ -411,3 +411,65 @@ def test_start_discovery_reports_per_platform_statuses_without_vague_failure(mon
     assert "TikTok: EMPTY" in message.answers[-1]
     assert "Instagram: ERROR — provider timeout" in message.answers[-1]
     assert "Автоподбор не сработал:" not in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_direct_time_input_is_accepted_from_first_picker_state(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(
+        tg_user_id=505,
+        tg_chat_id=505,
+        timezone_str="UTC+07:00",
+    )
+    state = DummyState(
+        {
+            "user_id": user.id,
+            "reports_per_day": 2,
+            "times": [],
+        }
+    )
+    message = DummyMessage()
+    message.text = "07:30"
+
+    monkeypatch.setattr(setup, "db_call", _db_call)
+    called = {}
+
+    async def fake_finalize_schedule(message, state):
+        called["finalized"] = True
+
+    monkeypatch.setattr(setup, "_finalize_schedule", fake_finalize_schedule)
+
+    async_to_sync(setup.on_time_1_direct_text)(message, state)
+
+    assert "finalized" not in called
+    assert state.state == SetupStates.PICK_TIME_CUSTOM_2
+    assert state.data["times"] == ["07:30"]
+    assert "Когда присылать второй отчет?" in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_direct_time_input_is_accepted_from_second_picker_state(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(
+        tg_user_id=606,
+        tg_chat_id=606,
+        timezone_str="UTC+07:00",
+    )
+    state = DummyState(
+        {
+            "user_id": user.id,
+            "reports_per_day": 2,
+            "times": ["07:30"],
+        }
+    )
+    message = DummyMessage()
+    message.text = "19:45"
+
+    called = {}
+
+    async def fake_finalize_schedule(message, state):
+        called["times"] = list((await state.get_data()).get("times") or [])
+
+    monkeypatch.setattr(setup, "_finalize_schedule", fake_finalize_schedule)
+
+    async_to_sync(setup.on_time_2_direct_text)(message, state)
+
+    assert called["times"] == ["07:30", "19:45"]

@@ -207,14 +207,18 @@ def kb_prune_competitors(
     start = page * page_size
     end = min(total, start + page_size)
     b = InlineKeyboardBuilder()
+    link_buttons: list[InlineKeyboardButton] = []
 
-    for cid, name, url in competitor_rows[start:end]:
+    for visible_idx, (cid, name, url) in enumerate(competitor_rows[start:end], start=1):
         mark = "❌" if cid in excluded_ids else "✅"
-        buttons = [InlineKeyboardButton(text=f"{mark} {name}"[:64], callback_data=f"prune_toggle:{cid}")]
+        buttons = [InlineKeyboardButton(text=f"{mark} {visible_idx}. {name}"[:64], callback_data=f"prune_toggle:{cid}")]
         safe_url = _safe_http_url(url)
         if safe_url:
-            buttons.append(InlineKeyboardButton(text="↗", url=safe_url))
+            link_buttons.append(InlineKeyboardButton(text=f"{visible_idx}↗", url=safe_url))
         b.row(*buttons)
+
+    for idx in range(0, len(link_buttons), 4):
+        b.row(*link_buttons[idx : idx + 4])
 
     nav: list[InlineKeyboardButton] = []
     if page > 0:

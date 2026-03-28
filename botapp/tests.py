@@ -70,10 +70,14 @@ class CompetitorPickerKeyboardTests(TestCase):
         )
 
         first_row = markup.inline_keyboard[0]
-        self.assertEqual(len(first_row), 2)
+        self.assertEqual(len(first_row), 1)
         self.assertEqual(first_row[0].callback_data, "prune_toggle:0")
-        self.assertEqual(first_row[1].text, "↗")
-        self.assertEqual(first_row[1].url, "https://www.youtube.com/@dariapancho")
+        self.assertEqual(first_row[0].text, "✅ 1. [YouTube] Daria Pancho")
+
+        second_row = markup.inline_keyboard[1]
+        self.assertEqual(len(second_row), 1)
+        self.assertEqual(second_row[0].text, "1↗")
+        self.assertEqual(second_row[0].url, "https://www.youtube.com/@dariapancho")
 
     def test_prune_keyboard_skips_profile_link_button_for_invalid_url(self) -> None:
         markup = kb_prune_competitors(
@@ -86,3 +90,18 @@ class CompetitorPickerKeyboardTests(TestCase):
         first_row = markup.inline_keyboard[0]
         self.assertEqual(len(first_row), 1)
         self.assertEqual(first_row[0].callback_data, "prune_toggle:0")
+        self.assertEqual(first_row[0].text, "✅ 1. [YouTube] Daria Pancho")
+
+
+class CompetitorDisplayNameTests(TestCase):
+    def test_candidate_display_name_uses_short_platform_labels(self) -> None:
+        from botapp.handlers.setup import _candidate_display_name
+
+        self.assertEqual(
+            _candidate_display_name({"platform": "youtube", "display_name": "Daria Pancho"}),
+            "[YT] Daria Pancho",
+        )
+        self.assertEqual(
+            _candidate_display_name({"platform": "tiktok", "display_name": "Speak Easy"}),
+            "[TT] Speak Easy",
+        )

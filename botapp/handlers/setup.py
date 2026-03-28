@@ -321,7 +321,11 @@ def _build_linked_accounts_summary(*, linked_accounts: dict[str, dict], skipped_
 
 def _candidate_display_name(c: dict) -> str:
     platform = str(c.get("platform") or "").strip()
-    platform_label = _platform_label(platform)
+    platform_label = {
+        Platform.YOUTUBE: "YT",
+        Platform.TIKTOK: "TT",
+        Platform.INSTAGRAM: "IG",
+    }.get(platform, _platform_label(platform))
     name = (c.get("display_name") or c.get("handle") or c.get("external_id") or "").strip() or "Без названия"
     return f"[{platform_label}] {name}"
 
@@ -1682,6 +1686,16 @@ async def on_time_1_manual(message: Message, state: FSMContext) -> None:
     await message.answer(f"Когда присылать второй отчет?\nВремя: {tz_label}", reply_markup=kb_time_presets_second())
 
 
+@router.message(SetupStates.PICK_TIME_SINGLE)
+async def on_time_single_direct_text(message: Message, state: FSMContext) -> None:
+    await on_time_1_manual(message, state)
+
+
+@router.message(SetupStates.PICK_TIME_CUSTOM_1)
+async def on_time_1_direct_text(message: Message, state: FSMContext) -> None:
+    await on_time_1_manual(message, state)
+
+
 @router.message(SetupStates.WAIT_TIME_2)
 async def on_time_2_manual(message: Message, state: FSMContext) -> None:
     try:
@@ -1700,6 +1714,11 @@ async def on_time_2_manual(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(times=times)
     await _finalize_schedule(message, state)
+
+
+@router.message(SetupStates.PICK_TIME_CUSTOM_2)
+async def on_time_2_direct_text(message: Message, state: FSMContext) -> None:
+    await on_time_2_manual(message, state)
 
 
 async def _finalize_schedule(message: Message, state: FSMContext) -> None:
