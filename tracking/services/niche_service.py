@@ -96,7 +96,12 @@ _UTILITY_JUNK_STEMS = {
     "оставля",
     "заяв",
     "человек",
+    "contact",
+    "fork",
+    "gmail",
+    "inside",
     "провод",
+    "risk",
     "врем",
     "лучш",
     "представител",
@@ -151,7 +156,38 @@ def _sanitize_keyword_source_text(text: str) -> str:
     raw = str(text or "").strip()
     if not raw:
         return ""
-    segments = re.split(r"[\n\r]+|(?<=[.!?;])\s+", raw)
+    cleaned = re.sub(r"my main account is\s+@[0-9a-z._]+", " ", raw, flags=re.IGNORECASE)
+    cleaned = re.sub(
+        r"send me stuff\s*:.*?(anything sent to the above address|contact\s*:|videos are for entertainment purposes only|attempt any repairs at your own risk|$)",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    cleaned = re.sub(
+        r"anything sent to the above address.*?(contact\s*:|videos are for entertainment purposes only|attempt any repairs at your own risk|$)",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    cleaned = re.sub(
+        r"contact\s*:.*?(videos are for entertainment purposes only|attempt any repairs at your own risk|$)",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    cleaned = re.sub(
+        r"videos are for entertainment purposes only.*?$",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    cleaned = re.sub(
+        r"attempt any repairs at your own risk.*?$",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    segments = re.split(r"[\n\r]+|(?<=[.!?;])\s+", cleaned)
     kept: list[str] = []
     for segment in segments:
         value = str(segment or "").strip()
