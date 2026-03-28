@@ -188,7 +188,14 @@ def _prefetch_provider_data_for_competitors(
             for handle, items in grouped.items():
                 if items:
                     provider_fetch_cache.store_tiktok_feed(handle=handle, items=items)
-        except PlatformOnboardingError as exc:
+        except Exception as exc:
+            logger.warning(
+                "Skipping TikTok provider prefetch for report pipeline "
+                "(purpose=%s handles=%s): %s",
+                provider_fetch_cache.purpose,
+                ",".join(tiktok_handles),
+                exc,
+            )
             provider_fetch_cache.mark_platform_error(platform=Platform.TIKTOK, reason=str(exc))
 
     instagram_lookups: list[str] = []
@@ -216,7 +223,14 @@ def _prefetch_provider_data_for_competitors(
                 profile = _find_instagram_profile_for_lookup(profiles, lookup)
                 if isinstance(profile, dict) and profile:
                     provider_fetch_cache.store_instagram_profile(profile=profile, lookups=[lookup])
-        except PlatformOnboardingError as exc:
+        except Exception as exc:
+            logger.warning(
+                "Skipping Instagram provider prefetch for report pipeline "
+                "(purpose=%s lookups=%s): %s",
+                provider_fetch_cache.purpose,
+                ",".join(instagram_lookups),
+                exc,
+            )
             provider_fetch_cache.mark_platform_error(platform=Platform.INSTAGRAM, reason=str(exc))
 
 

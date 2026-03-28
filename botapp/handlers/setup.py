@@ -431,6 +431,31 @@ def _selected_counts_by_platform(*, candidates: list[dict], excluded: set[int]) 
     }
 
 
+def _cap_candidates_per_platform(*, candidates: list[dict], limit: int) -> tuple[list[dict], list[str]]:
+    known_platforms = (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)
+    kept_by_platform: dict[str, int] = {platform: 0 for platform in known_platforms}
+    trimmed_by_platform: dict[str, int] = {platform: 0 for platform in known_platforms}
+    kept: list[dict] = []
+
+    for candidate in candidates:
+        platform = str(candidate.get("platform") or "")
+        if platform not in kept_by_platform:
+            kept.append(candidate)
+            continue
+        if kept_by_platform[platform] >= limit:
+            trimmed_by_platform[platform] += 1
+            continue
+        kept_by_platform[platform] += 1
+        kept.append(candidate)
+
+    notes = [
+        f"{_platform_label(platform)}: нашел больше {limit} кандидатов, поэтому показал первые {limit}."
+        for platform in known_platforms
+        if trimmed_by_platform[platform] > 0
+    ]
+    return kept, notes
+
+
 def _quota_error_text(*, selected_by_platform: dict[str, int], limit: int) -> str | None:
     overflow: list[str] = []
     for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM):
@@ -1386,7 +1411,10 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
             prefer=False,
         )
 
-    candidates = list(candidates_by_id.values())
+    limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
+    candidates, trim_notes = _cap_candidates_per_platform(candidates=list(candidates_by_id.values()), limit=limit)
+    if trim_notes:
+        discovery_notes = [*discovery_notes, *trim_notes]
     if not candidates:
         details = "\n".join(discovery_notes)
         await message.answer(
@@ -1404,7 +1432,6 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
     )
     await state.set_state(SetupStates.PRUNE_COMPETITORS)
 
-    limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
     excluded: set[int] = set()
     competitor_rows = [(i, _candidate_display_name(c), str(c.get("url") or "").strip() or None) for i, c in enumerate(candidates)]
     selected_total = len(candidates) - len(excluded)

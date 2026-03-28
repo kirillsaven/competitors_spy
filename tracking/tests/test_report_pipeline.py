@@ -308,6 +308,68 @@ def test_build_report_preview_keeps_youtube_section_when_tiktok_provider_fails(d
     assert "platform-feature-disabled" in sections[Platform.TIKTOK]["note"]
 
 
+def test_build_report_preview_keeps_youtube_section_when_instagram_prefetch_fails(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=141, tg_chat_id=141, timezone_str="UTC")
+    youtube = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="yt-1",
+        handle="yt_handle",
+        url="https://youtube.com/@yt_handle",
+        display_name="YT Handle",
+    )
+    instagram = Competitor.objects.create(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-1",
+        handle="ig_handle",
+        url="https://www.instagram.com/ig_handle/",
+        display_name="IG Handle",
+    )
+    UserCompetitor.objects.create(user=user, competitor=youtube, is_active=True)
+    UserCompetitor.objects.create(user=user, competitor=instagram, is_active=True)
+
+    now = datetime(2026, 3, 24, 12, 0, tzinfo=UTC)
+
+    def fake_fetch_instagram_profiles_cached(**kwargs):
+        raise RuntimeError("Apify Instagram API error: status=403 body={'error': {'type': 'platform-feature-disabled'}}")
+
+    def fake_refresh(*, competitor, mode, captured_at, provider_fetch_cache=None):
+        if competitor.platform == Platform.INSTAGRAM:
+            raise RuntimeError(provider_fetch_cache.get_platform_error(platform=Platform.INSTAGRAM))
+        item = competitor.content_items.create(
+            platform=competitor.platform,
+            external_id=f"item-{competitor.external_id}",
+            url=competitor.url,
+            title="Latest short",
+            description="desc",
+            published_at=now - timedelta(hours=2),
+            duration_seconds=30,
+            meta={"content_type": "short"},
+        )
+        MetricSnapshot.objects.create(
+            content_item=item,
+            captured_at=now,
+            views=1000,
+            likes=100,
+            comments=10,
+            shares=5,
+        )
+        return [item]
+
+    monkeypatch.setattr(report_pipeline, "fetch_instagram_profiles_cached", fake_fetch_instagram_profiles_cached)
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", fake_refresh)
+
+    preview = build_report_preview(
+        user=user,
+        period_start=now - timedelta(hours=24),
+        period_end=now,
+    )
+
+    sections = {section["platform"]: section for section in preview.payload["sections"]}
+    assert len(sections[Platform.YOUTUBE]["items"]) == 1
+    assert sections[Platform.INSTAGRAM]["items"] == []
+    assert "platform-feature-disabled" in sections[Platform.INSTAGRAM]["note"]
+
+
 def test_build_report_preview_excludes_items_already_shown_in_regular_reports(db, monkeypatch):
     user = TgUser.objects.create(tg_user_id=15, tg_chat_id=15, timezone_str="UTC")
     competitor = Competitor.objects.create(

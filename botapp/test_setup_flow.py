@@ -268,6 +268,22 @@ def test_prune_text_and_quota_are_independent_per_platform():
     assert setup._quota_error_text(selected_by_platform=counts, limit=20) is None
 
 
+def test_cap_candidates_per_platform_trims_overflow_before_prune():
+    candidates = [
+        {"platform": "instagram", "external_id": f"ig-{idx}", "display_name": f"IG {idx}"}
+        for idx in range(22)
+    ] + [
+        {"platform": "youtube", "external_id": "yt-1", "display_name": "YT 1"}
+    ]
+
+    capped, notes = setup._cap_candidates_per_platform(candidates=candidates, limit=20)
+
+    instagram_ids = [candidate["external_id"] for candidate in capped if candidate["platform"] == "instagram"]
+    assert len(instagram_ids) == 20
+    assert instagram_ids == [f"ig-{idx}" for idx in range(20)]
+    assert any("Instagram" in note and "первые 20" in note for note in notes)
+
+
 @pytest.mark.django_db
 def test_start_keywords_step_passes_confirmed_linked_accounts(monkeypatch):
     user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=303, tg_chat_id=303)
