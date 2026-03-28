@@ -111,6 +111,14 @@ _UTILITY_JUNK_STEMS = {
 }
 _SOURCE_PHRASE_SPLIT_RE = re.compile(r"[\n\r.!?;:,()\[\]{}|]+")
 _BOILERPLATE_SOURCE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bmy main account is\b", re.IGNORECASE),
+    re.compile(r"\bsend me stuff\b", re.IGNORECASE),
+    re.compile(r"\banything sent to the above address\b", re.IGNORECASE),
+    re.compile(r"\bcontact\s*:\b", re.IGNORECASE),
+    re.compile(r"\bgmail dot com\b", re.IGNORECASE),
+    re.compile(r"\bat your own risk\b", re.IGNORECASE),
+    re.compile(r"\b(?:global|brand) ambassador\b", re.IGNORECASE),
+    re.compile(r"\b\d{2,6}\s+[A-Za-z][A-Za-z0-9. ]+\b(?:st|street|suite|ave|avenue|road|rd)\b", re.IGNORECASE),
     re.compile(r"\baffiliate advertising program\b", re.IGNORECASE),
     re.compile(r"\bamazon services llc associates program\b", re.IGNORECASE),
     re.compile(r"\bas an amazon associate\b", re.IGNORECASE),

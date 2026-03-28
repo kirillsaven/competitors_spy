@@ -585,6 +585,12 @@ def test_infer_niche_keywords_filters_affiliate_boilerplate_from_linked_accounts
             url="https://www.youtube.com/@randomtechseed",
             title="Random Tech Seed",
             description=(
+                "My main account is @randomtechseed. "
+                "EcoFlow Global Ambassador. "
+                "SEND ME STUFF: 125 E Main St. Suite 335. "
+                "Anything sent to the above address will not be returned. "
+                "Contact: randomtechseed at gmail dot com. "
+                "Attempt any repairs at your own risk. "
                 "This affiliate advertising program is designed to provide a means for sites to earn advertising fees. "
                 "As an Amazon Associate I earn from qualifying purchases. "
                 "Tech durability tests and teardown videos."
@@ -600,7 +606,11 @@ def test_infer_niche_keywords_filters_affiliate_boilerplate_from_linked_accounts
     )
 
     assert any("durability" in keyword or "teardown" in keyword or "repair" in keyword for keyword in keywords)
-    assert all("affiliate" not in keyword and "amazon" not in keyword and "advertising" not in keyword for keyword in keywords)
+    assert all(
+        bad not in keyword
+        for keyword in keywords
+        for bad in ("affiliate", "amazon", "advertising", "ambassador", "gmail", "address", "main account")
+    )
 
 
 def test_build_niche_context_text_includes_multi_platform_bundle(monkeypatch):
