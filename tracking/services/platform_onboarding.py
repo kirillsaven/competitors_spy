@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from difflib import SequenceMatcher
+import logging
 import re
 from typing import Any
 
@@ -24,6 +25,22 @@ from tracking.adapters.tiktok import (
 )
 from tracking.adapters.youtube import YouTubeApiError, playlist_items_to_video_ids, video_items_to_details
 from tracking.models import Platform
+from tracking.services.discovery_profiles import (
+    DiscoveryDiagnostics,
+    ENTITY_CREATOR_EDUCATIONAL,
+    ENTITY_CREATOR_PERSONAL,
+    ENTITY_INSTITUTION_CLINIC,
+    ENTITY_INSTITUTION_SCHOOL,
+)
+from tracking.services.instagram_intent import DiscoveryIntent, build_instagram_discovery_intent, build_instagram_queries
+from tracking.services.instagram_ranking import (
+    candidate_passes_activity_gate,
+    candidate_passes_entity_gate,
+    candidate_passes_topic_gate,
+    compute_entity_scores,
+    compute_topic_scores,
+    score_instagram_candidate,
+)
 from tracking.services.provider_config import get_instagram_apify_config, get_tiktok_apify_config
 from tracking.services.provider_runtime import log_provider_call
 from tracking.services.setup_retry_cache import get_cached_retry_value, store_retry_value
@@ -43,6 +60,9 @@ from tracking.services.youtube_service import YouTubeNotConfigured, get_recent_v
 
 class PlatformOnboardingError(RuntimeError):
     pass
+
+
+logger = logging.getLogger(__name__)
 
 
 DISCOVERY_FOUND = "FOUND"
@@ -1344,7 +1364,20 @@ def _theme_profile_passes(*, candidate: _DiscoveryCandidate, keywords: list[str]
             or float(candidate.metadata.get("profile_theme_score") or 0) >= 4
             or (bool(candidate.metadata.get("verified")) and len(str(candidate.description or "").strip()) >= 12)
         )
-    return False
+
+
+def _store_discovery_diagnostics(
+    *,
+    context: SetupRunContext | None,
+    platform: str,
+    diagnostics: DiscoveryDiagnostics | dict[str, object],
+) -> None:
+    if context is None:
+        return
+    if isinstance(diagnostics, DiscoveryDiagnostics):
+        context.discovery_diagnostics[platform] = diagnostics.as_dict()
+        return
+    context.discovery_diagnostics[platform] = dict(diagnostics)
 
 
 def _theme_content_passes(
@@ -2509,6 +2542,13 @@ def _collector_aware_candidates(
 ) -> tuple[list[_DiscoveryCandidate], str]:
     if platform not in {Platform.YOUTUBE, Platform.INSTAGRAM, Platform.TIKTOK} or not candidates:
         return candidates, ""
+    if platform == Platform.INSTAGRAM:
+        return _collector_aware_instagram_candidates(
+            candidates=candidates,
+            keywords=keywords,
+            max_candidates=max_candidates,
+            context=context,
+        )
     strong_profile_candidates: list[_DiscoveryCandidate] = []
     borderline_candidates: list[_DiscoveryCandidate] = []
     for candidate in candidates:
@@ -2591,6 +2631,192 @@ def _collector_aware_candidates(
     if platform == Platform.INSTAGRAM:
         return [], "поиск выполнен, но топ-кандидаты не прошли проверку reels по теме."
     return [], "поиск выполнен, но топ-кандидаты не прошли проверку recent TikTok-видео по теме."
+
+
+def _fallback_instagram_intent(*, keywords: list[str]) -> DiscoveryIntent:
+    return build_instagram_discovery_intent(
+        seed=None,
+        linked_accounts=[],
+        fallback_keywords=keywords,
+        recent_texts=[],
+    )
+
+
+def _instagram_candidate_intent(*, candidates: list[_DiscoveryCandidate], keywords: list[str]) -> DiscoveryIntent:
+    for candidate in candidates:
+        intent = candidate.metadata.get("_instagram_intent")
+        if isinstance(intent, DiscoveryIntent):
+            return intent
+    return _fallback_instagram_intent(keywords=keywords)
+
+
+def _instagram_debug_entry(
+    candidate: _DiscoveryCandidate,
+    *,
+    reason: str,
+    total_score: float | None = None,
+) -> dict[str, object]:
+    metadata = candidate.metadata
+    entry: dict[str, object] = {
+        "external_id": candidate.external_id,
+        "handle": candidate.handle,
+        "display_name": candidate.display_name,
+        "retrieval_source": metadata.get("retrieval_source") or metadata.get("source") or "unknown",
+        "entity_type_guess": metadata.get("entity_type_guess") or "unknown",
+        "archetype_guess": metadata.get("archetype_guess") or "unknown",
+        "reason": reason,
+        "query_hits": sorted(candidate.query_hits),
+    }
+    if total_score is not None:
+        entry["score_total"] = round(float(total_score), 3)
+    return entry
+
+
+def _collector_aware_instagram_candidates(
+    *,
+    candidates: list[_DiscoveryCandidate],
+    keywords: list[str],
+    max_candidates: int,
+    context: SetupRunContext | None = None,
+) -> tuple[list[_DiscoveryCandidate], str]:
+    if not candidates:
+        diagnostics = _build_instagram_discovery_diagnostics(
+            intent=_fallback_instagram_intent(keywords=keywords),
+            queries_used=[],
+            raw_candidates=[],
+            post_entity_candidates=[],
+            post_topic_candidates=[],
+            final_candidates=[],
+            drop_reasons={},
+            candidate_debug=[],
+        )
+        _store_discovery_diagnostics(context=context, platform=Platform.INSTAGRAM, diagnostics=diagnostics)
+        return [], "по текущим поисковым фразам поиск был выполнен, но кандидаты не найдены."
+
+    intent = _instagram_candidate_intent(candidates=candidates, keywords=keywords)
+    queries_used = list(intent.query_classes) or sorted({query for candidate in candidates for query in candidate.query_hits})
+    try:
+        _hydrate_instagram_candidates(candidates=candidates, context=context, purpose="candidate_validation")
+    except (PlatformOnboardingError, InstagramApiError, RuntimeError) as exc:
+        logger.warning("Instagram candidate hydration failed during validation: %s", exc)
+
+    drop_reasons: dict[str, int] = {}
+    candidate_debug: list[dict[str, object]] = []
+
+    def mark_drop(reason: str, candidate: _DiscoveryCandidate, *, score: float | None = None) -> None:
+        drop_reasons[reason] = drop_reasons.get(reason, 0) + 1
+        if len(candidate_debug) < 50:
+            candidate_debug.append(_instagram_debug_entry(candidate, reason=reason, total_score=score))
+
+    post_entity_candidates: list[_DiscoveryCandidate] = []
+    for candidate in candidates:
+        entity_scores = compute_entity_scores(candidate, intent, texts=None)
+        candidate.metadata.update(entity_scores)
+        legacy_profile_pass = _theme_profile_passes(candidate=candidate, keywords=keywords)
+        candidate.metadata["instagram_legacy_profile_pass"] = bool(legacy_profile_pass)
+        if not candidate_passes_entity_gate(candidate, intent, entity_scores=entity_scores):
+            mark_drop("entity_gate", candidate)
+            continue
+        post_entity_candidates.append(candidate)
+
+    if not post_entity_candidates:
+        diagnostics = _build_instagram_discovery_diagnostics(
+            intent=intent,
+            queries_used=queries_used,
+            raw_candidates=candidates,
+            post_entity_candidates=[],
+            post_topic_candidates=[],
+            final_candidates=[],
+            drop_reasons=drop_reasons,
+            candidate_debug=candidate_debug,
+        )
+        _store_discovery_diagnostics(context=context, platform=Platform.INSTAGRAM, diagnostics=diagnostics)
+        return [], "поиск выполнен, но кандидаты не совпали с типом целевого профиля."
+
+    for candidate in post_entity_candidates:
+        profile_score = score_instagram_candidate(candidate, intent, texts=None).total
+        profile_score += float(candidate.metadata.get("profile_theme_score") or 0) / 2.0
+        candidate.metadata["instagram_profile_rank"] = profile_score
+    ranked_candidates = sorted(
+        post_entity_candidates,
+        key=lambda item: (-float(item.metadata.get("instagram_profile_rank") or 0), -len(item.query_hits), item.sort_tiebreak),
+    )
+
+    validated: list[_DiscoveryCandidate] = []
+    post_topic_candidates: list[_DiscoveryCandidate] = []
+    min_recent = _DISCOVERY_MIN_RECENT_ITEMS_BY_PLATFORM.get(Platform.INSTAGRAM, _DISCOVERY_MIN_RECENT_SHORTS)
+    target_count = min(max_candidates, _DISCOVERY_EARLY_STOP_CANDIDATES.get(Platform.INSTAGRAM, max_candidates))
+    for candidate_batch in _progressive_validation_batches(platform=Platform.INSTAGRAM, ranked_candidates=ranked_candidates):
+        batch_texts = _batch_fetch_recent_instagram_reel_texts(
+            candidates=candidate_batch,
+            n=_DISCOVERY_VALIDATION_ITEMS,
+            context=context,
+        )
+        for candidate in candidate_batch:
+            texts, views, recent_count = batch_texts.get(candidate.external_id, ([], [], 0))
+            if not texts:
+                mark_drop("no_recent_reels", candidate)
+                continue
+            if recent_count < min_recent:
+                mark_drop("low_activity", candidate)
+                continue
+            _mark_candidate_collectible(
+                candidate,
+                item_count=len(texts),
+                max_views=max(views) if views else 0,
+                recent_count=recent_count,
+            )
+            if not candidate_passes_activity_gate(candidate):
+                mark_drop("low_activity", candidate)
+                continue
+            legacy_theme_pass = _theme_content_passes(
+                platform=Platform.INSTAGRAM,
+                candidate=candidate,
+                texts=texts,
+                keywords=keywords,
+            )
+            scores = score_instagram_candidate(candidate, intent, texts=texts)
+            candidate.metadata["instagram_rank_total"] = scores.total
+            if float(candidate.metadata.get("penalty") or 0) >= 6.0 and float(candidate.metadata.get("graph_score") or 0) <= 2.0:
+                mark_drop("spam_penalty", candidate, score=scores.total)
+                continue
+            if not candidate_passes_entity_gate(candidate, intent, entity_scores=candidate.metadata):
+                mark_drop("entity_gate_after_content", candidate, score=scores.total)
+                continue
+            if not candidate_passes_topic_gate(candidate, intent, topic_scores=candidate.metadata) and not legacy_theme_pass:
+                mark_drop("topic_gate", candidate, score=scores.total)
+                continue
+            post_topic_candidates.append(candidate)
+            validated.append(candidate)
+            if len(candidate_debug) < 50:
+                candidate_debug.append(_instagram_debug_entry(candidate, reason="validated", total_score=scores.total))
+            if len(validated) >= target_count:
+                break
+        if len(validated) >= target_count:
+            break
+
+    ranked = sorted(
+        validated,
+        key=lambda item: (-float(item.metadata.get("instagram_rank_total") or 0), -len(item.query_hits), item.sort_tiebreak),
+    )
+    diagnostics = _build_instagram_discovery_diagnostics(
+        intent=intent,
+        queries_used=queries_used,
+        raw_candidates=candidates,
+        post_entity_candidates=post_entity_candidates,
+        post_topic_candidates=post_topic_candidates,
+        final_candidates=ranked[:max_candidates],
+        drop_reasons=drop_reasons,
+        candidate_debug=candidate_debug,
+    )
+    _store_discovery_diagnostics(context=context, platform=Platform.INSTAGRAM, diagnostics=diagnostics)
+    if ranked:
+        return ranked[:max_candidates], ""
+    if drop_reasons.get("low_activity", 0) >= max(drop_reasons.get("topic_gate", 0), drop_reasons.get("no_recent_reels", 0), 1):
+        return [], "поиск выполнен, но топ-кандидаты не прошли фильтр активности: нет recent Reels за 60 дней."
+    if drop_reasons.get("entity_gate", 0) >= max(drop_reasons.get("topic_gate", 0), 1):
+        return [], "поиск выполнен, но кандидаты не совпали с типом целевого профиля."
+    return [], "поиск выполнен, но топ-кандидаты не прошли проверку reels по теме."
 
 
 def _balanced_validation_candidates(
@@ -2883,6 +3109,26 @@ def _build_instagram_candidate(raw: dict[str, Any], *, queries: set[str]) -> _Di
     )
 
 
+def _build_instagram_candidate_from_profile(
+    profile: dict[str, Any],
+    *,
+    queries: set[str],
+    retrieval_source: str,
+    graph_distance: int = 1,
+    graph_support_count: int = 1,
+) -> _DiscoveryCandidate | None:
+    candidate = _build_instagram_candidate(profile, queries=queries)
+    if candidate is None:
+        return None
+    candidate.metadata["retrieval_source"] = retrieval_source
+    candidate.metadata["graph_distance"] = max(1, int(graph_distance))
+    candidate.metadata["graph_support_count"] = max(0, int(graph_support_count))
+    candidate.metadata["source"] = retrieval_source
+    candidate.metadata["graph_depth"] = max(1, int(graph_distance))
+    candidate.metadata["graph_hits"] = max(0, int(graph_support_count))
+    return candidate
+
+
 def _build_instagram_related_candidate(raw: dict[str, Any], *, queries: set[str]) -> _DiscoveryCandidate | None:
     external_id = str(raw.get("id") or "").strip()
     username = str(raw.get("username") or "").strip()
@@ -2903,6 +3149,103 @@ def _build_instagram_related_candidate(raw: dict[str, Any], *, queries: set[str]
             "graph_hits": 1,
         },
     )
+
+
+def _seed_primary_instagram_account(seed_accounts: list[SeedResolution] | None) -> SeedResolution | None:
+    for account in seed_accounts or []:
+        if account and account.platform == Platform.INSTAGRAM:
+            return account
+    return None
+
+
+def _merge_instagram_candidate(target: dict[str, _DiscoveryCandidate], candidate: _DiscoveryCandidate) -> None:
+    existing = target.get(candidate.external_id)
+    if existing is None:
+        target[candidate.external_id] = candidate
+        return
+    existing.query_hits.update(candidate.query_hits)
+    existing.cross_platform_keys.update(candidate.cross_platform_keys)
+    for key, value in candidate.metadata.items():
+        if key in {"graph_support_count", "graph_hits"}:
+            existing.metadata[key] = int(existing.metadata.get(key) or 0) + int(value or 0)
+            continue
+        if key in {"graph_distance", "graph_depth"}:
+            current = int(existing.metadata.get(key) or 0)
+            incoming = int(value or 0)
+            existing.metadata[key] = min(current, incoming) if current and incoming else max(current, incoming)
+            continue
+        existing.metadata[key] = value
+    if not existing.description and candidate.description:
+        existing.description = candidate.description
+    if not existing.display_name and candidate.display_name:
+        existing.display_name = candidate.display_name
+    if not existing.handle and candidate.handle:
+        existing.handle = candidate.handle
+    if not existing.url and candidate.url:
+        existing.url = candidate.url
+
+
+def _build_cross_platform_instagram_candidates(
+    *,
+    seed_accounts: list[SeedResolution] | None,
+    context: SetupRunContext | None = None,
+) -> list[_DiscoveryCandidate]:
+    lookups: list[str] = []
+    seen: set[str] = set()
+    for account in seed_accounts or []:
+        if not account or account.platform == Platform.INSTAGRAM:
+            continue
+        for candidate_lookup in (str(account.handle or "").strip(), str(account.title or "").strip()):
+            if len(candidate_lookup) < 3:
+                continue
+            lowered = candidate_lookup.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            lookups.append(candidate_lookup)
+    if not lookups:
+        return []
+    profiles = fetch_instagram_profiles_cached(inputs=lookups, context=context, purpose="cross_platform_mapping")
+    out: list[_DiscoveryCandidate] = []
+    for lookup in lookups:
+        profile = _find_instagram_profile_for_lookup(profiles, lookup)
+        if not profile:
+            continue
+        candidate = _build_instagram_candidate_from_profile(
+            profile,
+            queries={"cross_platform"},
+            retrieval_source="cross_platform",
+            graph_distance=1,
+            graph_support_count=1,
+        )
+        if candidate:
+            out.append(candidate)
+    return out
+
+
+def _hydrate_instagram_candidates(
+    *,
+    candidates: list[_DiscoveryCandidate],
+    context: SetupRunContext | None = None,
+    purpose: str = "candidate_validation",
+) -> dict[str, dict[str, Any]]:
+    if not candidates:
+        return {}
+    lookups = [str(candidate.url or candidate.handle or candidate.external_id or "").strip() for candidate in candidates]
+    profiles = fetch_instagram_profiles_cached(
+        inputs=lookups,
+        context=context,
+        purpose=purpose,
+    )
+    hydrated: dict[str, dict[str, Any]] = {}
+    for candidate, lookup in zip(candidates, lookups):
+        profile = _find_instagram_profile_for_lookup(profiles, lookup)
+        if not profile:
+            continue
+        candidate.description = str(profile.get("biography") or candidate.description or "").strip()
+        candidate.metadata["verified"] = bool(profile.get("is_verified") or profile.get("isVerified") or candidate.metadata.get("verified"))
+        hydrated[candidate.external_id] = profile
+    return hydrated
 
 
 def _expand_instagram_related_candidates(
@@ -3032,6 +3375,143 @@ def _seed_instagram_related_candidates(
     return list(out.values())
 
 
+def _build_instagram_recent_seed_texts(
+    *,
+    seed_accounts: list[SeedResolution] | None,
+    context: SetupRunContext | None = None,
+) -> list[str]:
+    texts: list[str] = []
+    seen: set[str] = set()
+    for account in seed_accounts or []:
+        try:
+            recent_items = get_recent_seed_content_texts(seed=account, n=6, context=context)
+        except (PlatformOnboardingError, InstagramApiError, RuntimeError) as exc:
+            logger.warning(
+                "Instagram seed recent-content hydration failed for %s:%s: %s",
+                account.platform,
+                account.external_id,
+                exc,
+            )
+            recent_items = []
+        for text in recent_items:
+            normalized = str(text or "").strip()
+            if not normalized:
+                continue
+            lowered = normalized.lower()
+            if lowered in seen:
+                continue
+            seen.add(lowered)
+            texts.append(normalized)
+    return texts[:18]
+
+
+def _annotate_instagram_candidate_intent(candidate: _DiscoveryCandidate, intent: DiscoveryIntent) -> None:
+    candidate.metadata["_instagram_intent"] = intent
+
+
+def _preliminary_instagram_candidate_sort_key(candidate: _DiscoveryCandidate, intent: DiscoveryIntent) -> tuple[float, int, tuple[int, str, str]]:
+    entity_scores = compute_entity_scores(candidate, intent, texts=None)
+    candidate.metadata.update(entity_scores)
+    return (
+        -(
+            float(entity_scores.get("entity_match") or 0)
+            + float(candidate.metadata.get("graph_support_count") or candidate.metadata.get("graph_hits") or 0)
+            + float(candidate.metadata.get("rank_hint") or 0) / 100000.0
+        ),
+        -len(candidate.query_hits),
+        candidate.sort_tiebreak,
+    )
+
+
+def _expand_instagram_graph_frontier(
+    *,
+    frontier: list[_DiscoveryCandidate],
+    intent: DiscoveryIntent,
+    context: SetupRunContext | None = None,
+) -> list[_DiscoveryCandidate]:
+    if not frontier:
+        return []
+    expanded: dict[str, _DiscoveryCandidate] = {}
+    try:
+        hydrated = _hydrate_instagram_candidates(candidates=frontier, context=context, purpose="candidate_validation")
+    except (PlatformOnboardingError, InstagramApiError, RuntimeError) as exc:
+        logger.warning("Instagram graph frontier hydration failed: %s", exc)
+        return []
+    for candidate in frontier:
+        entity_scores = compute_entity_scores(candidate, intent, texts=None)
+        candidate.metadata.update(entity_scores)
+        if not candidate_passes_entity_gate(candidate, intent, entity_scores=entity_scores):
+            continue
+        profile = hydrated.get(candidate.external_id)
+        if not profile:
+            continue
+        related_items = profile.get("relatedProfiles") or []
+        if not isinstance(related_items, list):
+            continue
+        retrieval_source = str(candidate.metadata.get("retrieval_source") or "expanded_related")
+        if retrieval_source == "cross_platform":
+            child_source = "linked_related"
+        elif retrieval_source == "seed_related":
+            child_source = "expanded_related"
+        else:
+            child_source = "expanded_related"
+        for raw_related in related_items[:_INSTAGRAM_RELATED_PER_PROFILE]:
+            if not isinstance(raw_related, dict):
+                continue
+            related = _build_instagram_related_candidate(raw_related, queries=set(candidate.query_hits))
+            if not related:
+                continue
+            related.metadata["retrieval_source"] = child_source
+            related.metadata["graph_distance"] = max(2, int(candidate.metadata.get("graph_distance") or 1) + 1)
+            related.metadata["graph_support_count"] = max(1, int(candidate.metadata.get("graph_support_count") or 1))
+            _annotate_instagram_candidate_intent(related, intent)
+            _merge_instagram_candidate(expanded, related)
+    return list(expanded.values())
+
+
+def _build_instagram_discovery_diagnostics(
+    *,
+    intent: DiscoveryIntent,
+    queries_used: list[str],
+    raw_candidates: list[_DiscoveryCandidate],
+    post_entity_candidates: list[_DiscoveryCandidate],
+    post_topic_candidates: list[_DiscoveryCandidate],
+    final_candidates: list[_DiscoveryCandidate],
+    drop_reasons: dict[str, int],
+    candidate_debug: list[dict[str, object]],
+) -> DiscoveryDiagnostics:
+    top20 = final_candidates[:20]
+    entity_breakdown: dict[str, int] = {}
+    retrieval_breakdown: dict[str, int] = {}
+    for candidate in top20:
+        entity_key = str(candidate.metadata.get("entity_type_guess") or "unknown")
+        retrieval_key = str(candidate.metadata.get("retrieval_source") or "unknown")
+        entity_breakdown[entity_key] = entity_breakdown.get(entity_key, 0) + 1
+        retrieval_breakdown[retrieval_key] = retrieval_breakdown.get(retrieval_key, 0) + 1
+    return DiscoveryDiagnostics(
+        seed_entity_type=intent.entity_type,
+        queries_used=list(queries_used),
+        raw_pool_count=len(raw_candidates),
+        graph_pool_count=sum(
+            1
+            for candidate in raw_candidates
+            if str(candidate.metadata.get("retrieval_source") or "") in {"seed_related", "linked_related", "cross_platform", "expanded_related"}
+        ),
+        search_pool_count=sum(
+            1
+            for candidate in raw_candidates
+            if str(candidate.metadata.get("retrieval_source") or "") == "search"
+        ),
+        post_entity_gate_count=len(post_entity_candidates),
+        post_topic_gate_count=len(post_topic_candidates),
+        final_count=len(final_candidates),
+        entity_breakdown_top20=entity_breakdown,
+        retrieval_breakdown_top20=retrieval_breakdown,
+        drop_reasons=dict(drop_reasons),
+        candidate_debug=list(candidate_debug[:50]),
+    )
+
+
 def _search_instagram_candidates_raw(
     *,
     keywords: list[str],
@@ -3040,62 +3520,72 @@ def _search_instagram_candidates_raw(
     max_candidates: int = 20,
     context: SetupRunContext | None = None,
 ) -> list[_DiscoveryCandidate]:
-    queries = _discovery_queries(
-        platform=Platform.INSTAGRAM,
-        keywords=keywords,
-        competitors=competitors,
-        max_queries=_DISCOVERY_QUERY_BUDGET.get(Platform.INSTAGRAM, 2),
+    seed_accounts = list(seed_accounts or [])
+    primary_seed = _seed_primary_instagram_account(seed_accounts)
+    recent_texts = _build_instagram_recent_seed_texts(seed_accounts=seed_accounts, context=context)
+    intent = build_instagram_discovery_intent(
+        seed=primary_seed or (seed_accounts[0] if seed_accounts else None),
+        linked_accounts=[account for account in seed_accounts if primary_seed is None or account != primary_seed],
+        fallback_keywords=keywords,
+        recent_texts=recent_texts,
     )
+    queries = build_instagram_queries(intent)
+
     raw_by_id: dict[str, _DiscoveryCandidate] = {}
     for candidate in _seed_instagram_related_candidates(seed_accounts=seed_accounts, context=context):
-        raw_by_id[candidate.external_id] = candidate
-    if not queries and raw_by_id:
-        raw_pool = _expand_instagram_related_candidates(
-            candidates=list(raw_by_id.values()),
-            context=context,
-        )
-        return sorted(
-            raw_pool,
-            key=lambda item: (-_score_candidate(item), -len(item.query_hits), item.sort_tiebreak),
-        )
-    if not queries:
-        raise PlatformOnboardingError("No Instagram search queries could be built from niche keywords")
+        candidate.metadata["retrieval_source"] = "seed_related"
+        candidate.metadata["graph_distance"] = 1
+        candidate.metadata["graph_support_count"] = max(1, int(candidate.metadata.get("graph_hits") or 1))
+        _annotate_instagram_candidate_intent(candidate, intent)
+        _merge_instagram_candidate(raw_by_id, candidate)
+    for candidate in _build_cross_platform_instagram_candidates(seed_accounts=seed_accounts, context=context):
+        _annotate_instagram_candidate_intent(candidate, intent)
+        _merge_instagram_candidate(raw_by_id, candidate)
+
     result_limit = max(max_candidates, _DISCOVERY_RESULT_BUDGET[Platform.INSTAGRAM])
-    for index, query in enumerate(queries):
-        for raw in _cached_instagram_search_results(
-            query=query,
-            limit=result_limit,
-            context=context,
-            purpose="discovery_search",
-        ):
-            candidate = _build_instagram_candidate(raw, queries={query})
-            if not candidate:
-                continue
-            existing = raw_by_id.get(candidate.external_id)
-            if existing is None:
-                raw_by_id[candidate.external_id] = candidate
-            else:
-                existing.query_hits.update(candidate.query_hits)
-        if _should_stop_discovery(
-            platform=Platform.INSTAGRAM,
-            query_index=index,
-            unique_candidates=len(raw_by_id),
-            max_candidates=max_candidates,
-        ):
-            break
+    graph_coverage_floor = max(8, max_candidates // 2)
+    if len(raw_by_id) < graph_coverage_floor:
+        for index, query in enumerate(queries):
+            for raw in _cached_instagram_search_results(
+                query=query,
+                limit=result_limit,
+                context=context,
+                purpose="discovery_search",
+            ):
+                candidate = _build_instagram_candidate(raw, queries={query})
+                if not candidate:
+                    continue
+                candidate.metadata["retrieval_source"] = "search"
+                candidate.metadata["graph_distance"] = 3
+                candidate.metadata["graph_support_count"] = 0
+                candidate.metadata["search_query_class"] = intent.query_classes.get(query, "topic")
+                candidate.metadata["search_query_precision_bucket"] = (
+                    "narrow" if candidate.metadata["search_query_class"] in {"creator", "format"} else "broad"
+                )
+                _annotate_instagram_candidate_intent(candidate, intent)
+                _merge_instagram_candidate(raw_by_id, candidate)
+            if _should_stop_discovery(
+                platform=Platform.INSTAGRAM,
+                query_index=index,
+                unique_candidates=len(raw_by_id),
+                max_candidates=max_candidates,
+            ):
+                break
 
-    if not raw_by_id:
-        return []
-
-    raw_pool = _expand_instagram_related_candidates(
-        candidates=list(raw_by_id.values()),
-        context=context,
+    preliminary_ranked = sorted(
+        raw_by_id.values(),
+        key=lambda item: _preliminary_instagram_candidate_sort_key(item, intent),
     )
+    frontier = preliminary_ranked[: min(len(preliminary_ranked), _INSTAGRAM_RELATED_EXPANSION_PROFILES)]
+    for candidate in _expand_instagram_graph_frontier(frontier=frontier, intent=intent, context=context):
+        _merge_instagram_candidate(raw_by_id, candidate)
 
     ranked = sorted(
-        raw_pool,
-        key=lambda item: (-_score_candidate(item), -len(item.query_hits), item.sort_tiebreak),
+        raw_by_id.values(),
+        key=lambda item: _preliminary_instagram_candidate_sort_key(item, intent),
     )
+    for candidate in ranked:
+        _annotate_instagram_candidate_intent(candidate, intent)
     return ranked
 
 

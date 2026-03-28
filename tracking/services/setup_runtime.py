@@ -39,6 +39,7 @@ class SetupRunContext:
     recent_content_cache: dict[str, list[str]] = field(default_factory=dict)
     collectible_signals_cache: dict[str, tuple[list[str], list[int], int]] = field(default_factory=dict)
     search_cache: dict[str, object] = field(default_factory=dict)
+    discovery_diagnostics: dict[str, object] = field(default_factory=dict)
     platform_states: dict[str, PlatformRuntimeState] = field(
         default_factory=lambda: {
             platform: PlatformRuntimeState()
