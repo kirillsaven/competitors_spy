@@ -483,6 +483,50 @@ def test_collector_aware_instagram_recovers_compound_hashtag_science_accounts(mo
     assert [item.external_id for item in validated] == ["ig-science"]
 
 
+def test_collector_aware_instagram_filters_other_language_accounts_for_english_niche(monkeypatch):
+    keywords = [
+        "английский язык",
+        "уроки английского",
+        "преподаватели английского",
+        "планы уроков",
+    ]
+    candidate = platform_onboarding._DiscoveryCandidate(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-de",
+        handle="deutsch_by_schule",
+        url="https://www.instagram.com/deutsch_by_schule/",
+        display_name="Планы-конспекты по немецкому",
+        description="Учитель немецкого языка",
+        query_hits={"планы уроков"},
+    )
+
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_batch_fetch_recent_instagram_reel_texts",
+        lambda **kwargs: {
+            "ig-de": (
+                [
+                    "Планы-конспекты по немецкому языку для учителей.",
+                    "Урок немецкого языка: материалы и рабочие листы.",
+                    "deutschunterricht #немецкийязык #учительнемецкого",
+                ],
+                [500, 450, 420],
+                5,
+            ),
+        },
+    )
+
+    validated, reason = platform_onboarding._collector_aware_candidates(
+        platform=Platform.INSTAGRAM,
+        candidates=[candidate],
+        keywords=keywords,
+        max_candidates=20,
+    )
+
+    assert validated == []
+    assert "по теме" in reason
+
+
 def test_discover_competitors_for_onboarding_ranks_and_dedupes_candidates(monkeypatch):
     monkeypatch.setattr(
         platform_onboarding,

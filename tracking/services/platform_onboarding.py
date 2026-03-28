@@ -219,6 +219,18 @@ _SUBJECT_ALIAS_STEMS = {
     "dota": {"дота", "dota2", "дота2"},
     "dota2": {"dota", "дота", "дота2"},
 }
+_ENGLISH_SUBJECT_STEMS = {"английск", "english"}
+_ENGLISH_CONFLICT_STEMS = {
+    "deutsch",
+    "german",
+    "spanish",
+    "french",
+    "немецк",
+    "испан",
+    "китайск",
+    "корейск",
+    "француз",
+}
 _INSTRUCTIONAL_CONTENT_STEMS = {
     "experi",
     "guide",
@@ -1190,12 +1202,26 @@ def _theme_agreement_metrics(*, texts: list[str], keywords: list[str]) -> dict[s
     }
 
 
+def _is_english_teaching_keywords(keywords: list[str]) -> bool:
+    stems = _expand_alias_stems(_theme_specific_stems(keywords))
+    return bool(stems & _ENGLISH_SUBJECT_STEMS)
+
+
+def _has_subject_conflict(*, texts: list[str], keywords: list[str]) -> bool:
+    if not _is_english_teaching_keywords(keywords):
+        return False
+    stems = _expand_alias_stems(_theme_token_stems(" ".join(texts)))
+    return bool(stems & _ENGLISH_CONFLICT_STEMS) and not bool(stems & _ENGLISH_SUBJECT_STEMS)
+
+
 def _theme_profile_passes(*, candidate: _DiscoveryCandidate, keywords: list[str]) -> bool:
     texts = [
         str(candidate.display_name or "").strip(),
         str(candidate.description or "").strip(),
         str(candidate.handle or "").strip(),
     ]
+    if _has_subject_conflict(texts=texts, keywords=keywords):
+        return False
     metrics = _theme_agreement_metrics(texts=texts, keywords=keywords)
     candidate.metadata["profile_theme_score"] = (
         metrics["matched_phrases"] * 3
@@ -1234,6 +1260,8 @@ def _theme_content_passes(
     candidate.metadata["content_theme_strong_text_matches"] = metrics["strong_text_matches"]
     candidate.metadata["content_theme_strong_anchor_matches"] = metrics["strong_anchor_matches"]
     candidate.metadata["content_format_hits"] = format_hits
+    if _has_subject_conflict(texts=texts, keywords=keywords):
+        return False
     if metrics["anchor_overlap"] <= 0 or metrics["strong_anchor_matches"] <= 0:
         return (
             float(candidate.metadata.get("profile_theme_score") or 0) >= 10
@@ -1251,6 +1279,8 @@ def _theme_content_passes(
             and float(candidate.metadata.get("profile_theme_score") or 0) >= 8
         ):
             return True
+        if _is_english_teaching_keywords(keywords):
+            return format_hits >= 1 and metrics["strong_anchor_matches"] >= 2
         return (
             (metrics["matched_phrases"] >= 2 or metrics["specific_overlap"] >= 4)
             and metrics["strong_anchor_matches"] >= 2
