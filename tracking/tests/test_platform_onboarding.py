@@ -983,6 +983,24 @@ def test_search_queries_do_not_generate_broken_variants_from_ready_multiword_phr
     assert "репетитор английский для" not in queries
 
 
+def test_search_queries_compact_long_sentence_like_keywords_into_searchable_phrases():
+    queries = platform_onboarding.build_search_ready_keywords(
+        keywords=[
+            "evidence based strategies and tools",
+            "explore evidence based strategies",
+            "doctor turned entrepreneur",
+            "psychology of making money",
+            "comment books and I'll send you the list",
+        ],
+        max_keywords=6,
+    )
+
+    assert any("evidence based" in query for query in queries)
+    assert any("doctor turned entrepreneur" == query or "turned entrepreneur" in query for query in queries)
+    assert any("making money" in query for query in queries)
+    assert all("comment books" not in query for query in queries)
+
+
 def test_youtube_fallback_queries_add_cross_language_english_intents():
     queries = platform_onboarding._youtube_fallback_queries(
         [

@@ -287,6 +287,72 @@ _SELF_REFERENTIAL_QUERY_STEMS = {
     "сво",
     "свою",
 }
+_IDENTITY_FILTER_EXEMPT_STEMS = {
+    "analysi",
+    "business",
+    "creator",
+    "doctor",
+    "dota",
+    "entrepreneur",
+    "evidence",
+    "experiment",
+    "finance",
+    "invest",
+    "lesson",
+    "macro",
+    "making",
+    "market",
+    "money",
+    "product",
+    "productiv",
+    "psychology",
+    "research",
+    "science",
+    "school",
+    "strateg",
+    "teacher",
+    "tool",
+}
+_QUERY_COMPRESSION_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "for",
+    "from",
+    "how",
+    "if",
+    "in",
+    "into",
+    "of",
+    "on",
+    "our",
+    "that",
+    "the",
+    "this",
+    "to",
+    "with",
+    "you",
+    "your",
+    "как",
+    "в",
+    "для",
+    "и",
+    "на",
+    "по",
+    "с",
+}
+_QUERY_LEAD_NOISE_STEMS = {
+    "comment",
+    "consider",
+    "discover",
+    "explor",
+    "follow",
+    "join",
+    "learn",
+    "sound",
+    "subscrib",
+    "watch",
+}
 
 
 @dataclass(frozen=True)
@@ -1111,6 +1177,8 @@ def _is_identity_like_query(
     words = [part for part in str(query or "").split() if part]
     if len(words) < 2 or len(specific_stems) < 2:
         return False
+    if specific_stems & _IDENTITY_FILTER_EXEMPT_STEMS:
+        return False
     if not anchor_stems:
         return False
     if len(full_stems) != len(specific_stems):
@@ -1378,7 +1446,7 @@ def _query_utility_score(query: str, *, anchor_stems: set[str]) -> int:
     lesson_hits = len(stems & _LESSON_STEMS)
     school_hits = len(stems & _SCHOOL_STEMS)
     group_hits = len(stems & _GROUP_STEMS)
-    anchor_penalty = 14 if anchor_stems and anchor_overlap <= 0 else 0
+    anchor_penalty = 8 if anchor_stems and anchor_overlap <= 0 else 0
     singleton_penalty = 6 if word_count == 1 and not specific_stems else 0
     audience_only_penalty = 5 if group_hits and not (teacher_hits or lesson_hits or school_hits) else 0
     self_referential_penalty = 12 if stems & _SELF_REFERENTIAL_QUERY_STEMS else 0
@@ -1423,6 +1491,52 @@ def _query_category_gain(tags: set[str], covered_tags: set[str]) -> int:
     return gain
 
 
+def _compact_query_variants(query: str, *, anchor_stems: set[str]) -> list[str]:
+    tokens = [_normalize_token(token) for token in _TOKEN_RE.findall(str(query or ""))]
+    if any(re.search(r"[а-я]", token) for token in tokens):
+        return []
+    filtered: list[str] = []
+    for token in tokens:
+        if len(token) < 3 or token in _QUERY_COMPRESSION_STOPWORDS:
+            continue
+        filtered.append(token)
+    while filtered and _stem_token(filtered[0]) in _QUERY_LEAD_NOISE_STEMS:
+        filtered.pop(0)
+    if len(filtered) < 2:
+        return []
+
+    windows: list[str] = []
+    fallback_windows: list[str] = []
+    max_size = min(3, len(filtered))
+    for size in range(max_size, 1, -1):
+        for start in range(0, len(filtered) - size + 1):
+            window = filtered[start : start + size]
+            stems = _theme_token_stems(" ".join(window))
+            specific = {stem for stem in stems if stem not in _GENERIC_DISCOVERY_STEMS}
+            phrase = " ".join(window).strip()
+            if len(phrase) > 48 or any(len(word) > 14 for word in phrase.split()):
+                continue
+            fallback_windows.append(phrase)
+            if anchor_stems and not (specific & anchor_stems):
+                continue
+            windows.append(phrase)
+        if windows:
+            break
+    if not windows:
+        windows = fallback_windows
+    seen: set[str] = set()
+    out: list[str] = []
+    for phrase in windows:
+        key = phrase.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(phrase)
+        if len(out) >= 2:
+            break
+    return out
+
+
 def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
     if max_queries <= 0:
         return []
@@ -1431,6 +1545,10 @@ def _search_queries(keywords: list[str], *, max_queries: int = 6) -> list[str]:
     scored_queries: list[tuple[int, int, str, set[str], set[str]]] = []
     source_queries = list(keywords or [])
     source_queries.extend(_synthetic_search_queries(keywords, anchor_stems=anchor_stems))
+    compact_queries: list[str] = []
+    for raw in keywords or []:
+        compact_queries.extend(_compact_query_variants(str(raw or ""), anchor_stems=anchor_stems))
+    source_queries.extend(compact_queries)
     for index, raw in enumerate(source_queries):
         query = " ".join(str(raw or "").split()).strip()
         if len(query) < 3:
