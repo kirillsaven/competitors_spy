@@ -29,6 +29,7 @@ _NOISE_KEYWORDS = {
     "platform",
     "handle",
     "channel",
+    "main",
     "video",
     "videos",
     "youtube",
@@ -109,6 +110,16 @@ _UTILITY_JUNK_STEMS = {
     "топ",
 }
 _SOURCE_PHRASE_SPLIT_RE = re.compile(r"[\n\r.!?;:,()\[\]{}|]+")
+_BOILERPLATE_SOURCE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\baffiliate advertising program\b", re.IGNORECASE),
+    re.compile(r"\bamazon services llc associates program\b", re.IGNORECASE),
+    re.compile(r"\bas an amazon associate\b", re.IGNORECASE),
+    re.compile(r"\bearn advertising fees\b", re.IGNORECASE),
+    re.compile(r"\bqualifying purchases\b", re.IGNORECASE),
+    re.compile(r"\bmay contain affiliate links?\b", re.IGNORECASE),
+    re.compile(r"\bi may earn (a )?commission\b", re.IGNORECASE),
+    re.compile(r"\bfor entertainment purposes only\b", re.IGNORECASE),
+)
 
 
 def _keyword_stem_signature(keywords: list[str]) -> tuple[set[str], dict[str, int]]:
@@ -126,6 +137,22 @@ def _keyword_stem_signature(keywords: list[str]) -> tuple[set[str], dict[str, in
             unique.add(stem)
             counts[stem] = counts.get(stem, 0) + 1
     return unique, counts
+
+
+def _sanitize_keyword_source_text(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    segments = re.split(r"[\n\r]+|(?<=[.!?;])\s+", raw)
+    kept: list[str] = []
+    for segment in segments:
+        value = str(segment or "").strip()
+        if not value:
+            continue
+        if any(pattern.search(value) for pattern in _BOILERPLATE_SOURCE_PATTERNS):
+            continue
+        kept.append(value)
+    return " ".join(kept).strip()
 
 
 def _clean_niche_keywords(keywords: list[str]) -> list[str]:
@@ -235,7 +262,10 @@ def _ordered_accounts(*, seed: SeedResolution, linked_accounts: list[SeedResolut
 def _text_theme_stems(texts: list[str]) -> set[str]:
     stems: set[str] = set()
     for text in texts:
-        for raw in _ACCOUNT_TOKEN_RE.findall(str(text or "")):
+        cleaned_text = _sanitize_keyword_source_text(str(text or ""))
+        if not cleaned_text:
+            continue
+        for raw in _ACCOUNT_TOKEN_RE.findall(cleaned_text):
             norm = _normalize_token(raw)
             if (
                 len(norm) < 3
@@ -316,7 +346,7 @@ def _filter_keyword_inference_linked_accounts(
 
 
 def _append_unique(parts: list[str], value: str, seen: set[str]) -> None:
-    text = str(value or "").strip()
+    text = _sanitize_keyword_source_text(str(value or ""))
     if not text:
         return
     key = text.lower()
@@ -334,7 +364,7 @@ def _append_keyword_source(
     source_type: str,
     seen: set[tuple[str, str]],
 ) -> None:
-    value = str(text or "").strip()
+    value = _sanitize_keyword_source_text(str(text or ""))
     if not value:
         return
     key = (source_id, value.lower())

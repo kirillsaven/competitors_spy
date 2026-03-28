@@ -551,6 +551,58 @@ def test_infer_niche_keywords_filters_cta_noise_and_keeps_profile_topic_hints(mo
     assert all("subscrib" not in keyword and "comment" not in keyword and "send" not in keyword for keyword in keywords)
 
 
+def test_infer_niche_keywords_filters_affiliate_boilerplate_from_linked_accounts(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: {
+            Platform.INSTAGRAM: [
+                "Phone durability test",
+                "Tablet teardown",
+                "Repairing a game console",
+            ],
+            Platform.YOUTUBE: [
+                "iPhone durability test",
+                "Nintendo Switch repair",
+                "Laptop teardown",
+            ],
+        }.get(seed.platform, []),
+    )
+    seed = SeedResolution(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-1",
+        handle="randomtechseed",
+        url="https://www.instagram.com/randomtechseed/",
+        title="Random Tech Seed",
+        description="Durability tests and teardowns",
+        uploads_playlist_id=None,
+    )
+    linked_accounts = [
+        SeedResolution(
+            platform=Platform.YOUTUBE,
+            external_id="yt-1",
+            handle="randomtechseed",
+            url="https://www.youtube.com/@randomtechseed",
+            title="Random Tech Seed",
+            description=(
+                "This affiliate advertising program is designed to provide a means for sites to earn advertising fees. "
+                "As an Amazon Associate I earn from qualifying purchases. "
+                "Tech durability tests and teardown videos."
+            ),
+            uploads_playlist_id="UU1",
+        )
+    ]
+
+    keywords, _ = niche_service.infer_niche_keywords(
+        seed=seed,
+        competitors=[],
+        linked_accounts=linked_accounts,
+    )
+
+    assert any("durability" in keyword or "teardown" in keyword or "repair" in keyword for keyword in keywords)
+    assert all("affiliate" not in keyword and "amazon" not in keyword and "advertising" not in keyword for keyword in keywords)
+
+
 def test_build_niche_context_text_includes_multi_platform_bundle(monkeypatch):
     monkeypatch.setattr(
         niche_service,
