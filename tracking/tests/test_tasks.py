@@ -227,3 +227,29 @@ def test_run_user_report_now_skips_stale_setup_job_during_execution_without_clob
     assert job.status == JobStatus.SUCCESS
     assert job.payload["stale_skipped"] is True
     assert sent == []
+
+
+@pytest.mark.django_db
+def test_run_user_report_does_not_retry_non_retryable_provider_limit_error(monkeypatch):
+    user, schedule = _make_user_with_schedule(tg_user_id=9007)
+    due_at = timezone.now()
+    schedule.next_run_at = due_at
+    schedule.save(update_fields=["next_run_at", "updated_at"])
+
+    monkeypatch.setattr(
+        tasks,
+        "_generate_and_send_report",
+        lambda **kwargs: (_ for _ in ()).throw(
+            RuntimeError("Apify TikTok API error: status=403 body={'error': {'type': 'platform-feature-disabled', 'message': 'Monthly usage hard limit exceeded'}}")
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="platform-feature-disabled"):
+        tasks.run_user_report.run(user.id, due_at.isoformat())
+
+    schedule.refresh_from_db()
+    job = JobRun.objects.get(user=user, job_type="run_user_report")
+    assert job.status == JobStatus.FAILED
+    assert job.payload["retry_planned"] is False
+    assert job.payload["non_retryable_error"] is True
+    assert schedule.is_running is False

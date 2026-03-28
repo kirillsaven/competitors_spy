@@ -139,6 +139,21 @@ def _short_error_reason(exc: Exception) -> str:
     return value
 
 
+def _is_non_retryable_report_error(exc: Exception) -> bool:
+    text = " ".join(str(exc or "").split()).strip().lower()
+    if not text:
+        return False
+    markers = (
+        "platform-feature-disabled",
+        "monthly usage hard limit exceeded",
+        "quotaexceeded",
+        "quota exceeded",
+        "daily limit exceeded",
+        "youtube api has not been used",
+    )
+    return any(marker in text for marker in markers)
+
+
 def _already_running_text(*, trigger: str) -> str:
     if trigger == "setup":
         return "Первый отчет после настройки уже собирается. Пришлю его отдельным сообщением, когда он будет готов."
@@ -378,6 +393,7 @@ def run_user_report(self, user_id: int, due_at_iso: str = "", schedule_config_ve
         return
     except Exception as e:
         logger.exception("run_user_report failed (user_id=%s)", user_id)
+        non_retryable_error = _is_non_retryable_report_error(e)
 
         if report is not None:
             report.status = ReportStatus.FAILED
@@ -390,7 +406,12 @@ def run_user_report(self, user_id: int, due_at_iso: str = "", schedule_config_ve
                 schedule.running_started_at = None
                 now_fail = timezone.now()
                 retry_window = timedelta(minutes=max(1, retry_window_min))
-                can_retry = due_at is not None and retry_no < max_retries and (now_fail - due_at) <= retry_window
+                can_retry = (
+                    not non_retryable_error
+                    and due_at is not None
+                    and retry_no < max_retries
+                    and (now_fail - due_at) <= retry_window
+                )
                 if can_retry:
                     schedule.save(update_fields=["is_running", "running_started_at", "updated_at"])
                 else:
@@ -406,10 +427,12 @@ def run_user_report(self, user_id: int, due_at_iso: str = "", schedule_config_ve
         payload.update(
             {
                 "retry_planned": (
-                    due_at is not None
+                    not non_retryable_error
+                    and due_at is not None
                     and retry_no < max_retries
                     and (timezone.now() - due_at) <= timedelta(minutes=max(1, retry_window_min))
                 ),
+                "non_retryable_error": non_retryable_error,
                 "retry_no": retry_no,
                 "max_retries": max_retries,
                 "retry_delay_sec": retry_delay_sec,
@@ -419,7 +442,8 @@ def run_user_report(self, user_id: int, due_at_iso: str = "", schedule_config_ve
         job.save(update_fields=["status", "error", "finished_at", "payload"])
 
         can_retry = (
-            due_at is not None
+            not non_retryable_error
+            and due_at is not None
             and retry_no < max_retries
             and (timezone.now() - due_at) <= timedelta(minutes=max(1, retry_window_min))
         )

@@ -228,14 +228,80 @@ def test_build_report_preview_marks_provider_platform_error_once(db, monkeypatch
 
     monkeypatch.setattr(report_pipeline, "_prefetch_provider_data_for_competitors", fake_prefetch)
     monkeypatch.setattr(report_pipeline, "refresh_competitor", fake_refresh)
-    monkeypatch.setattr(report_pipeline, "build_report_payload", lambda **kwargs: {"sections": []})
+    monkeypatch.setattr(
+        report_pipeline,
+        "build_report_payload",
+        lambda **kwargs: {"sections": [{"platform": Platform.TIKTOK, "items": [], "note": kwargs["platform_notes"][Platform.TIKTOK]}]},
+    )
     monkeypatch.setattr(report_pipeline, "render_report_text", lambda **kwargs: "report")
 
-    with pytest.raises(RuntimeError, match="platform-feature-disabled"):
-        build_report_preview(
-            user=user,
-            period_start=datetime(2026, 3, 24, 11, 0, tzinfo=UTC),
-            period_end=datetime(2026, 3, 24, 12, 0, tzinfo=UTC),
-        )
+    preview = build_report_preview(
+        user=user,
+        period_start=datetime(2026, 3, 24, 11, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 12, 0, tzinfo=UTC),
+    )
 
     assert calls == {"prefetch": 1, "refresh": 1}
+    assert preview.payload["sections"][0]["note"].startswith("Apify TikTok API error:")
+
+
+def test_build_report_preview_keeps_youtube_section_when_tiktok_provider_fails(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=14, tg_chat_id=14, timezone_str="UTC")
+    youtube = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="yt-1",
+        handle="yt_handle",
+        url="https://youtube.com/@yt_handle",
+        display_name="YT Handle",
+    )
+    tiktok = Competitor.objects.create(
+        platform=Platform.TIKTOK,
+        external_id="tt-1",
+        handle="tt_handle",
+        url="https://www.tiktok.com/@tt_handle",
+        display_name="TT Handle",
+    )
+    UserCompetitor.objects.create(user=user, competitor=youtube, is_active=True)
+    UserCompetitor.objects.create(user=user, competitor=tiktok, is_active=True)
+
+    now = datetime(2026, 3, 24, 12, 0, tzinfo=UTC)
+
+    def fake_refresh(*, competitor, mode, captured_at, provider_fetch_cache=None):
+        if competitor.platform == Platform.TIKTOK:
+            provider_fetch_cache.mark_platform_error(
+                platform=Platform.TIKTOK,
+                reason="Apify TikTok API error: status=403 body={'error': {'type': 'platform-feature-disabled'}}",
+            )
+            raise RuntimeError("Apify TikTok API error: status=403 body={'error': {'type': 'platform-feature-disabled'}}")
+        item = competitor.content_items.create(
+            platform=competitor.platform,
+            external_id=f"item-{competitor.external_id}",
+            url=competitor.url,
+            title="Latest short",
+            description="desc",
+            published_at=now - timedelta(hours=2),
+            duration_seconds=30,
+            meta={"content_type": "short"},
+        )
+        MetricSnapshot.objects.create(
+            content_item=item,
+            captured_at=now,
+            views=1000,
+            likes=100,
+            comments=10,
+            shares=5,
+        )
+        return [item]
+
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", fake_refresh)
+
+    preview = build_report_preview(
+        user=user,
+        period_start=now - timedelta(hours=24),
+        period_end=now,
+    )
+
+    sections = {section["platform"]: section for section in preview.payload["sections"]}
+    assert len(sections[Platform.YOUTUBE]["items"]) == 1
+    assert sections[Platform.TIKTOK]["items"] == []
+    assert "platform-feature-disabled" in sections[Platform.TIKTOK]["note"]

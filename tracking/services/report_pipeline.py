@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
@@ -35,6 +36,8 @@ from tracking.services.reporting import (
     split_telegram_text,
 )
 from tracking.services.scoring import compute_competitor_baseline, score_items_for_period
+
+logger = logging.getLogger(__name__)
 
 
 class ReportPipelineError(RuntimeError):
@@ -192,15 +195,35 @@ def build_report_preview(
     )
 
     updated_items = []
+    platform_notes: dict[str, str] = {}
+    blocked_platforms: set[str] = set()
     for competitor in competitors:
-        updated_items.extend(
-            refresh_competitor(
-                competitor=competitor,
-                mode="incremental",
-                captured_at=period_end,
-                provider_fetch_cache=provider_fetch_cache,
+        if competitor.platform in blocked_platforms:
+            continue
+        try:
+            updated_items.extend(
+                refresh_competitor(
+                    competitor=competitor,
+                    mode="incremental",
+                    captured_at=period_end,
+                    provider_fetch_cache=provider_fetch_cache,
+                )
             )
-        )
+        except Exception as exc:
+            reason = _short_reason(str(exc))
+            platform_notes.setdefault(competitor.platform, reason)
+            logger.warning(
+                "Skipping competitor during report preview due to refresh error "
+                "(user_id=%s competitor_id=%s platform=%s external_id=%s): %s",
+                user.id,
+                competitor.id,
+                competitor.platform,
+                competitor.external_id,
+                exc,
+            )
+            if provider_fetch_cache.get_platform_error(platform=competitor.platform):
+                blocked_platforms.add(competitor.platform)
+            continue
 
     competitor_by_item_id = {item.id: item.competitor for item in updated_items}
     baseline_by_competitor_id = {
@@ -219,6 +242,7 @@ def build_report_preview(
         period_start=period_start,
         period_end=period_end,
         baseline_by_competitor_id=baseline_by_competitor_id,
+        platform_notes=platform_notes,
     )
     text = render_report_text(payload=payload, timezone_str=user.timezone_str)
     section_counts = {

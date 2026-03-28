@@ -24,6 +24,7 @@ def build_report_payload(
     period_start: datetime,
     period_end: datetime,
     baseline_by_competitor_id: dict[int, object] | None = None,
+    platform_notes: dict[str, str] | None = None,
 ) -> dict:
     section_items: dict[str, list[dict]] = {platform: [] for platform in PLATFORM_SECTION_ORDER}
     for s in scored:
@@ -93,7 +94,11 @@ def build_report_payload(
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
         "sections": [
-            {"platform": platform, "items": section_items[platform]}
+            {
+                "platform": platform,
+                "items": section_items[platform],
+                **({"note": str((platform_notes or {}).get(platform) or "").strip()} if (platform_notes or {}).get(platform) else {}),
+            }
             for platform in PLATFORM_SECTION_ORDER
         ],
     }
@@ -130,13 +135,16 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
 
     lines.append("")
     yt_items = (sections_by_platform.get(Platform.YOUTUBE) or {}).get("items") or []
-    _render_platform_section(lines=lines, title="YouTube:", items=yt_items)
+    yt_note = str((sections_by_platform.get(Platform.YOUTUBE) or {}).get("note") or "").strip()
+    _render_platform_section(lines=lines, title="YouTube:", items=yt_items, note=yt_note)
 
     tiktok_items = (sections_by_platform.get(Platform.TIKTOK) or {}).get("items") or []
-    _render_platform_section(lines=lines, title="TikTok:", items=tiktok_items)
+    tiktok_note = str((sections_by_platform.get(Platform.TIKTOK) or {}).get("note") or "").strip()
+    _render_platform_section(lines=lines, title="TikTok:", items=tiktok_items, note=tiktok_note)
 
     instagram_items = (sections_by_platform.get(Platform.INSTAGRAM) or {}).get("items") or []
-    _render_platform_section(lines=lines, title="Instagram:", items=instagram_items)
+    instagram_note = str((sections_by_platform.get(Platform.INSTAGRAM) or {}).get("note") or "").strip()
+    _render_platform_section(lines=lines, title="Instagram:", items=instagram_items, note=instagram_note)
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -290,8 +298,11 @@ def _render_platform_section(
     lines: list[str],
     title: str,
     items: list[dict],
+    note: str = "",
 ) -> None:
     lines.append(title)
+    if note:
+        lines.append(f"Причина: {note}")
     if not items:
         lines.append("Нет подходящих роликов.")
         return
