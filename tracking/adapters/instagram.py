@@ -190,6 +190,12 @@ def seed_from_profile(profile: dict[str, Any]) -> SeedResolution | None:
     profile_id = str(profile.get("id") or "").strip()
     if not username or not profile_id:
         return None
+    image_url = str(
+        profile.get("profilePicUrlHD")
+        or profile.get("profilePicUrl")
+        or profile.get("profile_pic_url")
+        or ""
+    ).strip() or None
     return SeedResolution(
         platform="instagram",
         external_id=profile_id,
@@ -198,6 +204,7 @@ def seed_from_profile(profile: dict[str, Any]) -> SeedResolution | None:
         title=profile.get("fullName") or username,
         description=profile.get("biography"),
         uploads_playlist_id=None,
+        image_url=image_url,
     )
 
 

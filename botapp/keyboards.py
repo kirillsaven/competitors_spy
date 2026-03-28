@@ -29,6 +29,14 @@ def _add_back_button(builder: InlineKeyboardBuilder) -> None:
     builder.row(InlineKeyboardButton(text="Назад", callback_data=GLOBAL_BACK_CALLBACK))
 
 
+def _platform_chip(platform: str | None) -> str:
+    return {
+        "youtube": "[YT]",
+        "instagram": "[IG]",
+        "tiktok": "[TT]",
+    }.get(str(platform or "").strip().lower(), "[?]")
+
+
 def kb_back_only() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     _add_back_button(b)
@@ -38,21 +46,26 @@ def kb_back_only() -> InlineKeyboardMarkup:
 def kb_seed_candidates(*, candidates: list[dict]) -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     for idx, c in enumerate((candidates or [])[:8]):
+        platform_chip = _platform_chip(c.get("platform"))
         title = (c.get("title") or "").strip()
         handle = (c.get("handle") or "").strip()
         subs = c.get("subscriber_count")
         if not title:
             title = handle or (c.get("external_id") or "")
-        txt = title
+        txt = f"{platform_chip} {title}".strip()
         if handle:
-            txt = f"{title} (@{handle})"
+            txt = f"{txt} (@{handle})"
         try:
             subs_i = int(subs) if subs is not None else 0
         except Exception:
             subs_i = 0
         if subs_i > 0:
             txt = f"{txt} - {subs_i:,}".replace(",", " ")
-        b.row(InlineKeyboardButton(text=txt[:64], callback_data=f"seed_pick:{idx}"))
+        buttons = [InlineKeyboardButton(text=txt[:64], callback_data=f"seed_pick:{idx}")]
+        safe_url = _safe_http_url(c.get("url"))
+        if safe_url:
+            buttons.append(InlineKeyboardButton(text="↗", url=safe_url))
+        b.row(*buttons)
     b.row(InlineKeyboardButton(text="Это не то", callback_data="seed_retry"))
     _add_back_button(b)
     return b.as_markup()

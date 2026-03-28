@@ -166,6 +166,11 @@ _DISCOVERY_VALIDATION_MAX_SCAN = {
 }
 _DISCOVERY_VALIDATION_ITEMS = 5
 _DISCOVERY_MIN_RECENT_SHORTS = 2
+_DISCOVERY_MIN_RECENT_ITEMS_BY_PLATFORM = {
+    Platform.YOUTUBE: 2,
+    Platform.INSTAGRAM: 1,
+    Platform.TIKTOK: 2,
+}
 _DISCOVERY_RECENT_WINDOW_DAYS = 60
 _DISCOVERY_YOUTUBE_UPLOAD_SCAN_LIMIT = 30
 _YOUTUBE_LOW_RECALL_RESCUE_THRESHOLD = 12
@@ -1115,17 +1120,25 @@ def _is_identity_like_query(
 
 def _theme_anchor_stems(keywords: list[str]) -> set[str]:
     counts: dict[str, int] = {}
+    ordered_stems: list[str] = []
     for query in _dedupe_keyword_queries(keywords, max_queries=8):
         specific_stems = {stem for stem in _theme_token_stems(query) if stem not in _GENERIC_DISCOVERY_STEMS}
         if not specific_stems:
             continue
         for stem in specific_stems:
             counts[stem] = counts.get(stem, 0) + (2 if len(str(query or "").split()) == 1 else 1)
+        for token in _TOKEN_RE.findall(str(query or "")):
+            stem = _stem_token(token)
+            if not stem or stem in _GENERIC_DISCOVERY_STEMS or stem in ordered_stems:
+                continue
+            ordered_stems.append(stem)
     anchors = {stem for stem, count in counts.items() if count >= 2}
     if anchors:
         return anchors
-    strongest = sorted(counts.items(), key=lambda item: (-item[1], -len(item[0]), item[0]))
-    return {stem for stem, _count in strongest[:2]}
+    if ordered_stems:
+        return set(ordered_stems[:3])
+    strongest = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+    return {stem for stem, _count in strongest[:3]}
 
 
 def _strong_phrase_overlap(stems: set[str], phrase_stems: set[str]) -> int:
@@ -1277,6 +1290,16 @@ def _theme_content_passes(
             and format_hits >= 2
         )
     if platform == Platform.INSTAGRAM:
+        if (
+            int(candidate.metadata.get("recent_collectible_count") or 0) == 1
+            and metrics["matched_phrases"] >= 1
+            and metrics["strong_anchor_matches"] >= 1
+            and (
+                metrics["specific_overlap"] >= 2
+                or float(candidate.metadata.get("profile_theme_score") or 0) >= 8
+            )
+        ):
+            return True
         if metrics["strong_text_matches"] >= 2:
             return True
         if (
@@ -2174,7 +2197,8 @@ def _validate_instagram_candidate_collectible(
     context: SetupRunContext | None = None,
 ) -> bool:
     texts, views, recent_count = _fetch_recent_instagram_reel_texts(candidate=candidate, n=3, context=context)
-    if not texts or recent_count < _DISCOVERY_MIN_RECENT_SHORTS:
+    min_recent = _DISCOVERY_MIN_RECENT_ITEMS_BY_PLATFORM.get(Platform.INSTAGRAM, _DISCOVERY_MIN_RECENT_SHORTS)
+    if not texts or recent_count < min_recent:
         return False
     _mark_candidate_collectible(
         candidate,
@@ -2191,7 +2215,8 @@ def _validate_tiktok_candidate_collectible(
     context: SetupRunContext | None = None,
 ) -> bool:
     texts, views, recent_count = _fetch_recent_tiktok_texts(candidate=candidate, n=3, context=context)
-    if not texts or recent_count < _DISCOVERY_MIN_RECENT_SHORTS:
+    min_recent = _DISCOVERY_MIN_RECENT_ITEMS_BY_PLATFORM.get(Platform.TIKTOK, _DISCOVERY_MIN_RECENT_SHORTS)
+    if not texts or recent_count < min_recent:
         return False
     _mark_candidate_collectible(
         candidate,
@@ -2208,7 +2233,8 @@ def _validate_youtube_candidate_collectible(
     context: SetupRunContext | None = None,
 ) -> bool:
     texts, views, recent_count = _fetch_recent_youtube_short_signals(candidate=candidate, n=3, context=context)
-    if not texts or recent_count < _DISCOVERY_MIN_RECENT_SHORTS:
+    min_recent = _DISCOVERY_MIN_RECENT_ITEMS_BY_PLATFORM.get(Platform.YOUTUBE, _DISCOVERY_MIN_RECENT_SHORTS)
+    if not texts or recent_count < min_recent:
         return False
     _mark_candidate_collectible(
         candidate,
@@ -2248,6 +2274,7 @@ def _collector_aware_candidates(
     failed_no_content = 0
     failed_low_activity = 0
     failed_offtopic = 0
+    min_recent = _DISCOVERY_MIN_RECENT_ITEMS_BY_PLATFORM.get(platform, _DISCOVERY_MIN_RECENT_SHORTS)
     for candidate_batch in _progressive_validation_batches(platform=platform, ranked_candidates=ranked_candidates):
         batch_texts: dict[str, tuple[list[str], list[int], int]] = {}
         if platform == Platform.INSTAGRAM:
@@ -2270,7 +2297,7 @@ def _collector_aware_candidates(
             if not texts:
                 failed_no_content += 1
                 continue
-            if recent_count < _DISCOVERY_MIN_RECENT_SHORTS:
+            if recent_count < min_recent:
                 failed_low_activity += 1
                 continue
             _mark_candidate_collectible(
@@ -2303,7 +2330,7 @@ def _collector_aware_candidates(
         if platform == Platform.YOUTUBE:
             return [], "поиск выполнен, но топ-кандидаты не прошли фильтр активности: меньше 2 recent Shorts за 60 дней."
         if platform == Platform.INSTAGRAM:
-            return [], "поиск выполнен, но топ-кандидаты не прошли фильтр активности: меньше 2 recent Reels за 60 дней."
+            return [], "поиск выполнен, но топ-кандидаты не прошли фильтр активности: нет recent Reels за 60 дней."
         return [], "поиск выполнен, но топ-кандидаты не прошли фильтр активности: меньше 2 recent TikTok-видео за 60 дней."
     if platform == Platform.YOUTUBE:
         return [], "поиск выполнен, но топ-кандидаты не прошли проверку recent Shorts по теме."

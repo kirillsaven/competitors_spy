@@ -122,6 +122,7 @@ def _seed_from_dict(data: dict) -> SeedResolution:
         description=data.get("description"),
         uploads_playlist_id=data.get("uploads_playlist_id"),
         subscriber_count=subscriber_count,
+        image_url=str(data.get("image_url") or "").strip() or None,
     )
 
 
@@ -131,6 +132,14 @@ def _platform_label(platform: str | None) -> str:
         Platform.TIKTOK: "TikTok",
         Platform.INSTAGRAM: "Instagram",
     }.get(str(platform or ""), str(platform or "Platform"))
+
+
+def _platform_short_label(platform: str | None) -> str:
+    return {
+        Platform.YOUTUBE: "YT",
+        Platform.TIKTOK: "TT",
+        Platform.INSTAGRAM: "IG",
+    }.get(str(platform or ""), _platform_label(platform))
 
 
 def _new_setup_runtime_id() -> str:
@@ -317,6 +326,60 @@ def _build_linked_accounts_summary(*, linked_accounts: dict[str, dict], skipped_
         else:
             lines.append(f"{_platform_label(platform)}: не задан")
     return "\n".join(lines)
+
+
+def _safe_http_url(raw_url: str | None) -> str | None:
+    value = str(raw_url or "").strip()
+    if not value:
+        return None
+    try:
+        parsed = urlparse(value)
+    except Exception:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+    return value
+
+
+def _seed_choice_label(candidate: dict) -> str:
+    title = str(candidate.get("title") or candidate.get("handle") or candidate.get("external_id") or "Без названия").strip()
+    handle = str(candidate.get("handle") or "").strip()
+    prefix = f"[{_platform_short_label(candidate.get('platform'))}]"
+    line = f"{prefix} {title}"
+    if handle:
+        line += f" (@{handle})"
+    return line
+
+
+def _build_seed_candidates_text(*, intro: str, candidates: list[dict], note: str = "") -> str:
+    lines = [intro]
+    for idx, candidate in enumerate((candidates or [])[:8], start=1):
+        lines.append("")
+        lines.append(f"{idx}. {_seed_choice_label(candidate)}")
+        url = _safe_http_url(candidate.get("url"))
+        if url:
+            lines.append(url)
+    if note:
+        lines.append(note)
+    return "\n".join(lines)
+
+
+async def _send_seed_candidate_previews(message: Message, *, candidates: list[dict]) -> None:
+    sent = 0
+    for idx, candidate in enumerate((candidates or [])[:3], start=1):
+        image_url = _safe_http_url(candidate.get("image_url"))
+        if not image_url:
+            continue
+        try:
+            await message.answer_photo(
+                photo=image_url,
+                caption=f"{idx}. {_seed_choice_label(candidate)}",
+            )
+            sent += 1
+        except Exception:
+            continue
+    if sent:
+        await message.answer("Выше отправил превью найденных профилей, если платформа отдала аватар.")
 
 
 def _candidate_display_name(c: dict) -> str:
@@ -707,8 +770,13 @@ async def on_seed_input(message: Message, state: FSMContext) -> None:
             note = ""
             if e.errors:
                 note = "\n\nНе все платформы удалось проверить:\n" + "\n".join(f"- {error}" for error in e.errors[:2])
+            await _send_seed_candidate_previews(message, candidates=candidates)
             await message.answer(
-                "Нашел точные совпадения на нескольких платформах. Выбери нужный профиль:" + note,
+                _build_seed_candidates_text(
+                    intro="Нашел точные совпадения на нескольких платформах. Выбери нужный профиль:",
+                    candidates=candidates,
+                    note=note,
+                ),
                 reply_markup=kb_seed_candidates(candidates=candidates),
             )
             return
@@ -760,9 +828,14 @@ async def on_seed_input(message: Message, state: FSMContext) -> None:
         seed_candidates=[_seed_to_dict(c) for c in candidates],
     )
     await state.set_state(SetupStates.PICK_SEED_CANDIDATE)
+    candidate_dicts = [_seed_to_dict(c) for c in candidates]
+    await _send_seed_candidate_previews(message, candidates=candidate_dicts)
     await message.answer(
-        "Нашел несколько вариантов. Выбери профиль:",
-        reply_markup=kb_seed_candidates(candidates=[_seed_to_dict(c) for c in candidates]),
+        _build_seed_candidates_text(
+            intro="Нашел несколько вариантов. Выбери профиль:",
+            candidates=candidate_dicts,
+        ),
+        reply_markup=kb_seed_candidates(candidates=candidate_dicts),
     )
 
 

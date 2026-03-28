@@ -1,6 +1,6 @@
 from django.test import TestCase
 
-from botapp.keyboards import kb_prune_competitors
+from botapp.keyboards import kb_prune_competitors, kb_seed_candidates
 from botapp.user_sync import normalize_profile_text, normalize_tg_username, upsert_tg_user
 from tracking.models import TgUser
 
@@ -105,3 +105,23 @@ class CompetitorDisplayNameTests(TestCase):
             _candidate_display_name({"platform": "tiktok", "display_name": "Speak Easy"}),
             "[TT] Speak Easy",
         )
+
+
+class SeedPickerKeyboardTests(TestCase):
+    def test_seed_keyboard_shows_platform_chip_and_profile_link(self) -> None:
+        markup = kb_seed_candidates(
+            candidates=[
+                {
+                    "platform": "instagram",
+                    "title": "Anatoliy",
+                    "handle": "anatoliypanov",
+                    "url": "https://www.instagram.com/anatoliypanov/",
+                }
+            ]
+        )
+
+        first_row = markup.inline_keyboard[0]
+        self.assertEqual(first_row[0].text, "[IG] Anatoliy (@anatoliypanov)")
+        self.assertEqual(first_row[0].callback_data, "seed_pick:0")
+        self.assertEqual(first_row[1].text, "↗")
+        self.assertEqual(first_row[1].url, "https://www.instagram.com/anatoliypanov/")

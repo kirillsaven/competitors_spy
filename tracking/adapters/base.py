@@ -14,6 +14,7 @@ class SeedResolution:
     description: str | None
     uploads_playlist_id: str | None
     subscriber_count: int | None = None
+    image_url: str | None = None
 
 
 @dataclass(frozen=True)

@@ -211,6 +211,13 @@ def search_youtube_seed_candidates(*, query: str, max_results: int = 8) -> list[
             uploads = ((cd.get("relatedPlaylists") or {}).get("uploads")) if cd else None
             custom_url = snippet.get("customUrl") or ""
             handle = custom_url[1:] if isinstance(custom_url, str) and custom_url.startswith("@") else None
+            thumbnails = snippet.get("thumbnails") or {}
+            image_url = str(
+                (thumbnails.get("high") or {}).get("url")
+                or (thumbnails.get("medium") or {}).get("url")
+                or (thumbnails.get("default") or {}).get("url")
+                or ""
+            ).strip() or None
             out.append(
                 SeedResolution(
                     platform="youtube",
@@ -220,6 +227,7 @@ def search_youtube_seed_candidates(*, query: str, max_results: int = 8) -> list[
                     title=snippet.get("title"),
                     description=snippet.get("description"),
                     uploads_playlist_id=uploads,
+                    image_url=image_url,
                 )
             )
         result = out[: max_results]

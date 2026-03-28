@@ -166,6 +166,13 @@ def seed_from_item(item: dict[str, Any]) -> SeedResolution | None:
     author_id = str(author_meta.get("id") or "").strip()
     if not author_handle or not author_id:
         return None
+    image_url = str(
+        author_meta.get("avatarLarger")
+        or author_meta.get("avatarMedium")
+        or author_meta.get("avatarThumb")
+        or author_meta.get("avatar")
+        or ""
+    ).strip() or None
     return SeedResolution(
         platform="tiktok",
         external_id=author_id,
@@ -174,6 +181,7 @@ def seed_from_item(item: dict[str, Any]) -> SeedResolution | None:
         title=author_meta.get("nickName") or author_handle,
         description=author_meta.get("signature"),
         uploads_playlist_id=None,
+        image_url=image_url,
     )
 
 

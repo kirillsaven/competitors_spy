@@ -424,6 +424,39 @@ def test_infer_niche_keywords_auto_weights_repeated_topics_across_linked_account
     assert "mission explainers" in keywords
 
 
+def test_infer_niche_keywords_adds_diverse_supported_source_phrases_for_generic_finance_seed(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: [
+            "Global macro investing and stock market analysis",
+            "Portfolio strategy and macro trends for long term investors",
+            "Stock market outlook, portfolio allocation, investing psychology",
+            "Macro research, market cycles, equity strategy",
+        ],
+    )
+    seed = SeedResolution(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-finance",
+        handle="macrovision",
+        url="https://www.instagram.com/macrovision/",
+        title="Macro Vision",
+        description="Global macro investor and stock market strategist",
+        uploads_playlist_id=None,
+    )
+
+    keywords, _ = niche_service.infer_niche_keywords(seed=seed, competitors=[])
+
+    assert len(keywords) >= 5
+    assert any("macro" in keyword for keyword in keywords)
+    assert any("stock market" in keyword for keyword in keywords)
+    assert sum(
+        1
+        for keyword in keywords
+        if any(marker in keyword for marker in ("portfolio", "equity", "psychology", "strategy", "cycles"))
+    ) >= 2
+
+
 def test_build_niche_context_text_includes_multi_platform_bundle(monkeypatch):
     monkeypatch.setattr(
         niche_service,

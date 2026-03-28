@@ -297,6 +297,13 @@ def resolve_seed_input(client: YouTubeClient, raw_input: str) -> SeedResolution 
     title = snippet.get("title")
     desc = snippet.get("description")
     url = f"https://www.youtube.com/channel/{cid}" if cid else ""
+    thumbnails = snippet.get("thumbnails") or {}
+    image_url = str(
+        (thumbnails.get("high") or {}).get("url")
+        or (thumbnails.get("medium") or {}).get("url")
+        or (thumbnails.get("default") or {}).get("url")
+        or ""
+    ).strip() or None
     return SeedResolution(
         platform="youtube",
         external_id=str(cid),
@@ -306,6 +313,7 @@ def resolve_seed_input(client: YouTubeClient, raw_input: str) -> SeedResolution 
         description=desc,
         uploads_playlist_id=uploads,
         subscriber_count=_to_int(stats.get("subscriberCount")),
+        image_url=image_url,
     )
 
 

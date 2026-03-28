@@ -1810,6 +1810,42 @@ def test_discover_competitors_for_onboarding_validates_multiple_ig_tt_candidates
     ]
 
 
+def test_instagram_candidate_with_single_recent_reel_can_pass_validation(monkeypatch):
+    candidate = platform_onboarding._DiscoveryCandidate(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-1",
+        handle="marketlab",
+        url="https://www.instagram.com/marketlab/",
+        display_name="Market Lab",
+        description="stock market analysis and macro investing",
+        query_hits={"stock market analysis", "macro investing"},
+        metadata={"verified": True},
+    )
+
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_batch_fetch_recent_instagram_reel_texts",
+        lambda **kwargs: {
+            "ig-1": (
+                ["stock market analysis and macro investing"],
+                [12000],
+                1,
+            )
+        },
+    )
+
+    validated, reason = platform_onboarding._collector_aware_candidates(
+        platform=Platform.INSTAGRAM,
+        candidates=[candidate],
+        keywords=["stock market analysis", "macro investing", "portfolio strategy"],
+        max_candidates=20,
+        context=None,
+    )
+
+    assert reason == ""
+    assert [item.external_id for item in validated] == ["ig-1"]
+
+
 def test_tiktok_search_refetches_when_cached_pool_is_too_small_for_higher_limit(monkeypatch):
     clear_retry_cache()
     calls: list[int] = []

@@ -10,6 +10,9 @@ from common.text import (
     _STOPWORDS_RU,
     _STRUCTURAL_JUNK,
     _USEFUL_THEME_STEMS,
+    _TOKEN_RE,
+    _is_content_token,
+    _normalize_blocked_terms,
     _normalize_token,
     _stem_token,
     extract_keywords,
@@ -94,6 +97,24 @@ _UTILITY_JUNK_STEMS = {
     "путь",
     "топ",
 }
+_SOURCE_PHRASE_SPLIT_RE = re.compile(r"[\n\r.!?;:,()\[\]{}|]+")
+
+
+def _keyword_stem_signature(keywords: list[str]) -> tuple[set[str], dict[str, int]]:
+    unique: set[str] = set()
+    counts: dict[str, int] = {}
+    for keyword in keywords or []:
+        stems = {
+            _stem_token(token)
+            for token in re.findall(r"[0-9a-zа-яё]+", str(keyword or ""), flags=re.IGNORECASE)
+            if len(token) >= 3
+        }
+        for stem in stems:
+            if not stem:
+                continue
+            unique.add(stem)
+            counts[stem] = counts.get(stem, 0) + 1
+    return unique, counts
 
 
 def _clean_niche_keywords(keywords: list[str]) -> list[str]:
@@ -164,6 +185,13 @@ def is_niche_keywords_poor(*, keywords: list[str], seed: SeedResolution | None =
         return False
 
     if phrase_count == 0 and cyr_count <= 1:
+        return True
+
+    unique_stems, stem_counts = _keyword_stem_signature(kws)
+    dominant = max(stem_counts.values(), default=0)
+    if len(unique_stems) <= 5 and len(kws) <= 4:
+        return True
+    if dominant >= max(3, len(kws) - 1) and len(unique_stems) <= 6:
         return True
 
     if seed and seed.title:
@@ -725,6 +753,88 @@ def _drop_generic_singletons_with_richer_phrases(keywords: list[str]) -> list[st
     return out
 
 
+def _derive_supported_source_phrases(
+    *,
+    keyword_sources: list[KeywordSource],
+    blocked_terms: list[str],
+    existing_keywords: list[str],
+    limit: int = 8,
+) -> list[str]:
+    blocked_tokens, blocked_stems = _normalize_blocked_terms(blocked_terms)
+    phrase_support: dict[tuple[str, ...], dict[str, object]] = {}
+    existing_signatures = {
+        tuple(
+            sorted(
+                {
+                    _stem_token(token)
+                    for token in re.findall(r"[0-9a-zа-яё]+", str(keyword or ""), flags=re.IGNORECASE)
+                    if len(token) >= 3
+                }
+            )
+        )
+        for keyword in existing_keywords or []
+    }
+    for source_index, source in enumerate(keyword_sources):
+        source_id = str(source.source_id or f"source-{source_index}")
+        for chunk_index, raw_segment in enumerate(_SOURCE_PHRASE_SPLIT_RE.split(str(source.text or "")), start=1):
+            tokens = [_normalize_token(token) for token in _TOKEN_RE.findall(raw_segment)]
+            if len(tokens) < 2:
+                continue
+            for start in range(len(tokens)):
+                for size in (2, 3):
+                    window = tokens[start : start + size]
+                    if len(window) != size:
+                        continue
+                    if not all(
+                        _is_content_token(token, blocked_tokens=blocked_tokens, blocked_stems=blocked_stems)
+                        for token in window
+                    ):
+                        continue
+                    signature = tuple(sorted(_stem_token(token) for token in window if len(token) >= 3))
+                    if not signature or signature in existing_signatures:
+                        continue
+                    normalized_phrase = " ".join(window).strip().lower()
+                    if not normalized_phrase:
+                        continue
+                    record = phrase_support.setdefault(
+                        signature,
+                        {
+                            "display": normalized_phrase,
+                            "source_ids": set(),
+                            "chunk_ids": set(),
+                            "length": size,
+                            "count": 0,
+                        },
+                    )
+                    record["source_ids"].add(source_id)
+                    record["chunk_ids"].add(f"{source_id}:{chunk_index}")
+                    record["count"] = int(record["count"]) + 1
+
+    ranked = sorted(
+        phrase_support.items(),
+        key=lambda item: (
+            -len(item[1]["source_ids"]),
+            -len(item[1]["chunk_ids"]),
+            -int(item[1]["count"]),
+            int(item[1]["length"]),
+            str(item[1]["display"]),
+        ),
+    )
+    out: list[str] = []
+    seen_stems: set[tuple[str, ...]] = set(existing_signatures)
+    for signature, record in ranked:
+        if signature in seen_stems:
+            continue
+        display = str(record["display"]).strip()
+        if len(display.split()) < 2:
+            continue
+        seen_stems.add(signature)
+        out.append(display)
+        if len(out) >= limit:
+            break
+    return out
+
+
 def _derive_game_topic_keywords(text: str) -> list[str]:
     raw = str(text or "").strip().lower()
     if not raw:
@@ -788,6 +898,12 @@ def infer_niche_keywords(
         blocked_terms=blocked_terms,
     )
     auto_keywords = _merge_keyword_lists(auto_keywords, title_keywords, max_keywords=8)
+    supported_source_phrases = _derive_supported_source_phrases(
+        keyword_sources=keyword_sources,
+        blocked_terms=blocked_terms,
+        existing_keywords=auto_keywords,
+        limit=8,
+    )
     if seed.platform == "youtube":
         try:
             youtube_keywords = infer_youtube_keywords(seed)
@@ -798,11 +914,17 @@ def infer_niche_keywords(
             topic_phrases,
             youtube_keywords,
             auto_keywords,
+            supported_source_phrases,
             max_keywords=8,
         )
     else:
-        auto_keywords = _merge_keyword_lists(topic_phrases, auto_keywords, max_keywords=8)
+        auto_keywords = _merge_keyword_lists(topic_phrases, auto_keywords, supported_source_phrases, max_keywords=8)
     auto_keywords = _merge_keyword_lists(game_topic_keywords, auto_keywords, max_keywords=8)
     auto_keywords = _prioritize_keywords(primary=auto_keywords, topic_phrases=topic_phrases)
+    if is_niche_keywords_poor(keywords=auto_keywords, seed=seed):
+        auto_keywords = _merge_keyword_lists(supported_source_phrases, auto_keywords, max_keywords=8)
     auto_keywords = _drop_generic_singletons_with_richer_phrases(auto_keywords)[:8]
+    if len(auto_keywords) < 5 or is_niche_keywords_poor(keywords=auto_keywords, seed=seed):
+        auto_keywords = _merge_keyword_lists(auto_keywords, supported_source_phrases, max_keywords=8)
+        auto_keywords = _drop_generic_singletons_with_richer_phrases(auto_keywords)[:8]
     return auto_keywords, "auto"
