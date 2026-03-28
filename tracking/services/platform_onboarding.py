@@ -2820,10 +2820,66 @@ def _expand_instagram_related_candidates(
     return list(merged.values())
 
 
+def _instagram_seed_accounts(*, seed_accounts: list[SeedResolution] | None) -> list[SeedResolution]:
+    out: list[SeedResolution] = []
+    seen: set[str] = set()
+    for account in seed_accounts or []:
+        if not account or account.platform != Platform.INSTAGRAM:
+            continue
+        key = str(account.external_id or account.handle or account.url or "").strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(account)
+    return out
+
+
+def _seed_instagram_related_candidates(
+    *,
+    seed_accounts: list[SeedResolution] | None,
+    context: SetupRunContext | None = None,
+) -> list[_DiscoveryCandidate]:
+    instagram_accounts = _instagram_seed_accounts(seed_accounts=seed_accounts)
+    if not instagram_accounts:
+        return []
+    lookups = [str(account.url or account.handle or account.external_id or "").strip() for account in instagram_accounts]
+    try:
+        profiles = fetch_instagram_profiles_cached(
+            inputs=lookups,
+            context=context,
+            purpose="keyword_recent_content",
+        )
+    except (PlatformOnboardingError, InstagramApiError, RuntimeError):
+        return []
+
+    out: dict[str, _DiscoveryCandidate] = {}
+    for account, lookup in zip(instagram_accounts, lookups):
+        profile = _find_instagram_profile_for_lookup(profiles, lookup)
+        if not profile:
+            continue
+        related_items = profile.get("relatedProfiles") or []
+        if not isinstance(related_items, list):
+            continue
+        for raw_related in related_items[:_INSTAGRAM_RELATED_PER_PROFILE]:
+            if not isinstance(raw_related, dict):
+                continue
+            candidate = _build_instagram_related_candidate(raw_related, queries={"seed_related"})
+            if not candidate:
+                continue
+            existing = out.get(candidate.external_id)
+            if existing is None:
+                out[candidate.external_id] = candidate
+                continue
+            existing.query_hits.update(candidate.query_hits)
+            existing.metadata.update(candidate.metadata)
+    return list(out.values())
+
+
 def _search_instagram_candidates_raw(
     *,
     keywords: list[str],
     competitors: list[SeedResolution],
+    seed_accounts: list[SeedResolution] | None = None,
     max_candidates: int = 20,
     context: SetupRunContext | None = None,
 ) -> list[_DiscoveryCandidate]:
@@ -2833,9 +2889,20 @@ def _search_instagram_candidates_raw(
         competitors=competitors,
         max_queries=_DISCOVERY_QUERY_BUDGET.get(Platform.INSTAGRAM, 2),
     )
+    raw_by_id: dict[str, _DiscoveryCandidate] = {}
+    for candidate in _seed_instagram_related_candidates(seed_accounts=seed_accounts, context=context):
+        raw_by_id[candidate.external_id] = candidate
+    if not queries and raw_by_id:
+        raw_pool = _expand_instagram_related_candidates(
+            candidates=list(raw_by_id.values()),
+            context=context,
+        )
+        return sorted(
+            raw_pool,
+            key=lambda item: (-_score_candidate(item), -len(item.query_hits), item.sort_tiebreak),
+        )
     if not queries:
         raise PlatformOnboardingError("No Instagram search queries could be built from niche keywords")
-    raw_by_id: dict[str, _DiscoveryCandidate] = {}
     result_limit = min(max_candidates, _DISCOVERY_RESULT_BUDGET[Platform.INSTAGRAM])
     for index, query in enumerate(queries):
         for raw in _cached_instagram_search_results(
@@ -2894,6 +2961,7 @@ def discover_instagram_competitors(
         for item in _search_instagram_candidates_raw(
             keywords=keywords,
             competitors=list(competitors or []),
+            seed_accounts=[],
             max_candidates=max_candidates,
             context=context,
         )
@@ -3108,6 +3176,7 @@ def discover_competitors_for_onboarding(
             candidates_by_platform[Platform.INSTAGRAM] = _search_instagram_candidates_raw(
                 keywords=keywords,
                 competitors=competitors,
+                seed_accounts=([seed] if seed else []) + list(linked_accounts or []),
                 max_candidates=max_candidates_per_platform,
                 context=context,
             )

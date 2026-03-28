@@ -1663,6 +1663,52 @@ def test_search_instagram_candidates_raw_expands_related_profiles(monkeypatch):
     assert related.metadata["source"] == "related_profile"
 
 
+def test_search_instagram_candidates_raw_uses_seed_related_profiles(monkeypatch):
+    monkeypatch.setattr(platform_onboarding, "_discovery_queries", lambda **kwargs: ["productivity creator"])
+    monkeypatch.setattr(platform_onboarding, "_cached_instagram_search_results", lambda **kwargs: [])
+
+    def fake_fetch_instagram_profiles_cached(*, inputs, context=None, purpose=None, context_id=None):
+        if purpose == "candidate_validation":
+            return []
+        assert purpose == "keyword_recent_content"
+        return [
+            {
+                "id": "seed-ig",
+                "username": "creatorlab",
+                "url": "https://www.instagram.com/creatorlab/",
+                "relatedProfiles": [
+                    {
+                        "id": "ig-2",
+                        "username": "creatorsystems",
+                        "full_name": "Creator Systems",
+                        "is_verified": True,
+                    }
+                ],
+            }
+        ]
+
+    monkeypatch.setattr(platform_onboarding, "fetch_instagram_profiles_cached", fake_fetch_instagram_profiles_cached)
+
+    candidates = platform_onboarding._search_instagram_candidates_raw(
+        keywords=["productivity creator"],
+        competitors=[],
+        seed_accounts=[
+            _seed(
+                platform=Platform.INSTAGRAM,
+                external_id="seed-ig",
+                handle="creatorlab",
+                title="Creator Lab",
+                description="productivity creator systems",
+                url="https://www.instagram.com/creatorlab/",
+            )
+        ],
+        max_candidates=20,
+    )
+
+    assert [candidate.external_id for candidate in candidates] == ["ig-2"]
+    assert candidates[0].query_hits == {"seed_related"}
+
+
 def test_expand_instagram_related_candidates_falls_back_on_profile_quota_error(monkeypatch):
     candidates = [
         platform_onboarding._DiscoveryCandidate(
