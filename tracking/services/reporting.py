@@ -248,11 +248,11 @@ def _render_setup_competitor_block(*, index: int, entry: dict) -> list[str]:
     if item_url:
         lines.append(str(item_url))
     lines.append(
-        f"Просмотры: {_format_int(latest_item.get('views'))} vs {_format_int(latest_item.get('avg_views_same_age'))} "
+        f"Просмотры: {_format_int(latest_item.get('views'))} vs {_format_int(latest_item.get('avg_views_same_age'))} среднее за тот же период "
         f"({_format_delta_pct(latest_item.get('views_delta_pct'))})"
     )
     lines.append(
-        f"Реакции: {_format_int(latest_item.get('reactions'))} vs {_format_int(latest_item.get('avg_reactions_same_age'))} "
+        f"Реакции: {_format_int(latest_item.get('reactions'))} vs {_format_int(latest_item.get('avg_reactions_same_age'))} среднее за тот же период "
         f"({_format_delta_pct(latest_item.get('reactions_delta_pct'))})"
     )
     lines.append("")
@@ -326,11 +326,11 @@ def _render_platform_section(
         if url:
             lines.append(url)
         lines.append(
-            f"Просмотры: {_format_int(views_end)} сейчас vs {_format_int(avg_views_same_age)} среднее у канала для такого же возраста "
+            f"Просмотры: {_format_int(views_end)} vs {_format_int(avg_views_same_age)} "
             f"({_format_delta_pct(it.get('views_delta_pct'))})"
         )
         lines.append(
-            f"Реакции: {_format_int(reactions_end)} сейчас vs {_format_int(avg_reactions_same_age)} среднее у канала для такого же возраста "
+            f"Реакции: {_format_int(reactions_end)} vs {_format_int(avg_reactions_same_age)} "
             f"({_format_delta_pct(it.get('reactions_delta_pct'))})"
         )
         lines.append(f"ER: {_format_percent(it.get('er_end'))}")

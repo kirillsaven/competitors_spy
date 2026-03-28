@@ -83,8 +83,8 @@ def test_render_report_text_preserves_youtube_section_and_stub_lines():
     assert "YouTube:" in text
     assert "1) Comp 1" in text
     assert "Title 1" in text
-    assert "Просмотры: 5000 сейчас vs 3200 среднее у канала для такого же возраста (+56.2%)" in text
-    assert "Реакции: 220 сейчас vs 140 среднее у канала для такого же возраста (+60.7%)" in text
+    assert "Просмотры: 5000 vs 3200 (+56.2%)" in text
+    assert "Реакции: 220 vs 140 (+60.7%)" in text
     assert "ER: 4.4%" in text
     assert "Вирусность: 1.8x" in text
     assert "TikTok:" in text
@@ -106,7 +106,7 @@ def test_render_report_text_renders_tiktok_items_with_share_counts():
     assert "TikTok:" in text
     assert "1) Comp 3" in text
     assert "Title 3" in text
-    assert "Реакции: 225 сейчас vs 140 среднее у канала для такого же возраста (+60.7%)" in text
+    assert "Реакции: 225 vs 140 (+60.7%)" in text
     assert "https://example.com/3" in text
 
 
@@ -167,6 +167,8 @@ def test_render_setup_verification_text_is_compact_and_strips_hashtags():
     assert "English with Anna" in text
     assert "Среднее: 123.4 views/h | 9.5 reactions/h | ER 5.2% | virality 1.1x" in text
     assert "Последнее: Lesson" in text
+    assert "Просмотры: 2400 vs 1800 среднее за тот же период (+33.3%)" in text
+    assert "Реакции: 120 vs 90 среднее за тот же период (+33.3%)" in text
     assert text.count("Последнее:") == 1
     assert "#english" not in text
     assert "Источник:" not in text
