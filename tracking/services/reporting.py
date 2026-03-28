@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
+from django.conf import settings
+
 from common.time import format_dt_local, format_timezone_label
 
 from tracking.models import MetricSnapshot, Platform
@@ -26,10 +28,11 @@ def build_report_payload(
     baseline_by_competitor_id: dict[int, object] | None = None,
     platform_notes: dict[str, str] | None = None,
 ) -> dict:
+    max_items_per_platform = max(1, int(getattr(settings, "REPORT_MAX_ITEMS_PER_PLATFORM", 10) or 10))
     section_items: dict[str, list[dict]] = {platform: [] for platform in PLATFORM_SECTION_ORDER}
     for s in scored:
         platform = str(s.content_item.platform or s.competitor.platform or "")
-        if platform not in section_items or len(section_items[platform]) >= 5:
+        if platform not in section_items or len(section_items[platform]) >= max_items_per_platform:
             continue
         content_type = (s.content_item.meta or {}).get("content_type") if isinstance(s.content_item.meta, dict) else None
         reactions_end = _reaction_total(

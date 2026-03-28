@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from django.test import override_settings
 
-from tracking.models import Competitor, MetricSnapshot, Platform, TgUser, UserCompetitor
+from tracking.models import Competitor, MetricSnapshot, Platform, Report, TgUser, UserCompetitor
 from tracking.services import report_pipeline
 from tracking.services.report_pipeline import (
     ReportPipelineError,
@@ -305,3 +306,123 @@ def test_build_report_preview_keeps_youtube_section_when_tiktok_provider_fails(d
     assert len(sections[Platform.YOUTUBE]["items"]) == 1
     assert sections[Platform.TIKTOK]["items"] == []
     assert "platform-feature-disabled" in sections[Platform.TIKTOK]["note"]
+
+
+def test_build_report_preview_excludes_items_already_shown_in_regular_reports(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=15, tg_chat_id=15, timezone_str="UTC")
+    competitor = Competitor.objects.create(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-1",
+        handle="teacher_ig",
+        url="https://www.instagram.com/teacher_ig/",
+        display_name="Teacher IG",
+    )
+    UserCompetitor.objects.create(user=user, competitor=competitor, is_active=True)
+    Report.objects.create(
+        user=user,
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        status="sent",
+        payload={
+            "sections": [
+                {
+                    "platform": Platform.INSTAGRAM,
+                    "items": [
+                        {
+                            "platform": Platform.INSTAGRAM,
+                            "video_id": "repeat-1",
+                            "url": "https://www.instagram.com/reel/repeat-1/",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    Report.objects.create(
+        user=user,
+        period_start=datetime(2026, 3, 22, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        status="sent",
+        payload={"report_kind": "setup_verification", "sections": []},
+    )
+
+    now = datetime(2026, 3, 24, 12, 0, tzinfo=UTC)
+    repeated_item = competitor.content_items.create(
+        platform=Platform.INSTAGRAM,
+        external_id="repeat-1",
+        url="https://www.instagram.com/reel/repeat-1/",
+        title="Repeated reel",
+        description="desc",
+        published_at=now - timedelta(hours=2),
+        duration_seconds=30,
+        meta={"content_type": "reel"},
+    )
+    fresh_item = competitor.content_items.create(
+        platform=Platform.INSTAGRAM,
+        external_id="fresh-1",
+        url="https://www.instagram.com/reel/fresh-1/",
+        title="Fresh reel",
+        description="desc",
+        published_at=now - timedelta(hours=1),
+        duration_seconds=30,
+        meta={"content_type": "reel"},
+    )
+
+    monkeypatch.setattr(report_pipeline, "_prefetch_provider_data_for_competitors", lambda **kwargs: None)
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", lambda **kwargs: [repeated_item, fresh_item])
+    monkeypatch.setattr(
+        report_pipeline,
+        "compute_competitor_baseline",
+        lambda **kwargs: SimpleNamespace(vph_median=100.0, rph_median=10.0),
+    )
+    monkeypatch.setattr(
+        report_pipeline,
+        "score_items_for_period",
+        lambda **kwargs: [
+            SimpleNamespace(
+                content_item=repeated_item,
+                competitor=competitor,
+                views_end=5000,
+                likes_end=200,
+                comments_end=20,
+                shares_end=5,
+                velocity=250.0,
+                score_type="delta",
+                delta_views=1000,
+                delta_hours=4.0,
+                er_end=0.044,
+                score=4.0,
+            ),
+            SimpleNamespace(
+                content_item=fresh_item,
+                competitor=competitor,
+                views_end=7000,
+                likes_end=300,
+                comments_end=30,
+                shares_end=7,
+                velocity=350.0,
+                score_type="delta",
+                delta_views=1200,
+                delta_hours=4.0,
+                er_end=0.047,
+                score=5.0,
+            ),
+        ],
+    )
+    monkeypatch.setattr(
+        report_pipeline,
+        "build_report_payload",
+        lambda **kwargs: {
+            "sections": [],
+            "scored_external_ids": [item.content_item.external_id for item in kwargs["scored"]],
+        },
+    )
+    monkeypatch.setattr(report_pipeline, "render_report_text", lambda **kwargs: "report")
+
+    preview = build_report_preview(
+        user=user,
+        period_start=now - timedelta(hours=24),
+        period_end=now,
+    )
+
+    assert preview.payload["scored_external_ids"] == ["fresh-1"]

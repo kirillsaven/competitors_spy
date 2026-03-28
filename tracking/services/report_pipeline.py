@@ -61,6 +61,64 @@ class SentReportResult:
 SETUP_REPORT_MAX_COMPETITORS_PER_PLATFORM = 20
 
 
+def _reported_content_key(*, platform: str | None, external_id: str | None, url: str | None = None) -> tuple[str, str] | None:
+    normalized_platform = str(platform or "").strip()
+    normalized_external_id = str(external_id or "").strip()
+    if normalized_platform and normalized_external_id:
+        return normalized_platform, normalized_external_id
+    normalized_url = str(url or "").strip()
+    if normalized_platform and normalized_url:
+        return normalized_platform, normalized_url
+    return None
+
+
+def _load_previously_reported_content_keys(*, user: TgUser) -> set[tuple[str, str]]:
+    keys: set[tuple[str, str]] = set()
+    reports = Report.objects.filter(user=user, status=ReportStatus.SENT).order_by("id")
+    for report in reports:
+        payload = report.payload if isinstance(report.payload, dict) else {}
+        if str(payload.get("report_kind") or "").strip() == "setup_verification":
+            continue
+        for section in payload.get("sections") or []:
+            if not isinstance(section, dict):
+                continue
+            section_platform = str(section.get("platform") or "").strip()
+            for item in section.get("items") or []:
+                if not isinstance(item, dict):
+                    continue
+                key = _reported_content_key(
+                    platform=str(item.get("platform") or section_platform or "").strip(),
+                    external_id=str(item.get("video_id") or item.get("external_id") or "").strip(),
+                    url=str(item.get("url") or "").strip(),
+                )
+                if key is not None:
+                    keys.add(key)
+    return keys
+
+
+def _exclude_previously_reported_items(*, user: TgUser, scored: list[object]) -> list[object]:
+    seen_keys = _load_previously_reported_content_keys(user=user)
+    if not seen_keys:
+        return list(scored)
+    filtered: list[object] = []
+    skipped = 0
+    for item in scored:
+        content_item = getattr(item, "content_item", None)
+        competitor = getattr(item, "competitor", None)
+        key = _reported_content_key(
+            platform=str(getattr(content_item, "platform", None) or getattr(competitor, "platform", None) or "").strip(),
+            external_id=str(getattr(content_item, "external_id", "") or "").strip(),
+            url=str(getattr(content_item, "url", "") or "").strip(),
+        )
+        if key is not None and key in seen_keys:
+            skipped += 1
+            continue
+        filtered.append(item)
+    if skipped:
+        logger.info("Excluded previously reported items for user_id=%s count=%s", user.id, skipped)
+    return filtered
+
+
 def _ensure_provider_fetch_cache(
     *,
     provider_fetch_cache: ProviderFetchCache | None,
@@ -236,6 +294,7 @@ def build_report_preview(
         period_start=period_start,
         period_end=period_end,
     )
+    scored = _exclude_previously_reported_items(user=user, scored=scored)
 
     payload = build_report_payload(
         scored=scored,

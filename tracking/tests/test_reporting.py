@@ -71,6 +71,19 @@ def test_build_report_payload_groups_by_platform_and_keeps_stub_sections():
     assert payload["sections"][2]["items"] == []
 
 
+def test_build_report_payload_caps_items_per_platform_at_ten():
+    scored = [_make_scored_item(platform=Platform.INSTAGRAM, suffix=str(idx)) for idx in range(12)]
+
+    payload = build_report_payload(
+        scored=scored,
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+    )
+
+    instagram_section = next(section for section in payload["sections"] if section["platform"] == Platform.INSTAGRAM)
+    assert len(instagram_section["items"]) == 10
+
+
 def test_render_report_text_preserves_youtube_section_and_stub_lines():
     payload = build_report_payload(
         scored=[_make_scored_item(platform=Platform.YOUTUBE, suffix="1")],
