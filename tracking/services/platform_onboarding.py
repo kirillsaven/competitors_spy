@@ -220,6 +220,8 @@ _SUBJECT_ALIAS_STEMS = {
 _INSTRUCTIONAL_CONTENT_STEMS = {
     "guide",
     "guid",
+    "experiment",
+    "experiments",
     "lesson",
     "vocab",
     "vocabulary",
@@ -1275,7 +1277,7 @@ def _score_candidate(candidate: _DiscoveryCandidate) -> float:
     overlap_bonus = overlap * 2.4
     description_bonus = 2.4 if len(str(candidate.description or "").strip()) >= 24 else 0.0
     cross_platform_bonus = len(candidate.cross_platform_keys) * 4.5
-    verified_bonus = 1.4 if bool(candidate.metadata.get("verified")) else 0.0
+    verified_bonus = 5.0 if bool(candidate.metadata.get("verified")) else 0.0
     popularity_bonus = min(int(candidate.metadata.get("rank_hint") or 0), 5_000_000) / 100_000
     competitor_overlap_bonus = float(candidate.metadata.get("competitor_overlap") or 0) * 1.8
     collectible_count_bonus = min(int(candidate.metadata.get("collectible_count") or 0), 3) * 3.0
