@@ -97,11 +97,28 @@ _UTILITY_JUNK_STEMS = {
     "заяв",
     "человек",
     "contact",
+    "cant",
     "fork",
     "gmail",
+    "gunna",
+    "help",
+    "insid",
     "inside",
+    "keep",
+    "let",
+    "mad",
+    "mention",
     "провод",
+    "private",
+    "remov",
     "risk",
+    "return",
+    "tell",
+    "they",
+    "told",
+    "truth",
+    "watch",
+    "will",
     "врем",
     "лучш",
     "представител",
@@ -899,6 +916,10 @@ def _filter_search_noise_keywords(keywords: list[str]) -> list[str]:
         if len(utility_hits) >= 2 and not useful:
             continue
         if tokens and _stem_token(tokens[0]) in _UTILITY_JUNK_STEMS and not useful:
+            continue
+        small_numbers = [token for token in tokens if token.isdigit() and int(token) <= 50]
+        alpha_tokens = [token for token in tokens if not token.isdigit()]
+        if small_numbers and len(alpha_tokens) <= 1 and not useful:
             continue
         if len(tokens) == 1 and not useful and (stems & (_UTILITY_JUNK_STEMS | _GENERIC_SUBJECT_STEMS)):
             continue

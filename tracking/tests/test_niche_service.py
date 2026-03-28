@@ -613,6 +613,39 @@ def test_infer_niche_keywords_filters_affiliate_boilerplate_from_linked_accounts
     )
 
 
+def test_infer_niche_keywords_filters_clickbait_and_small_number_noise(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: [
+            "They cant keep this private - Samsung S26 Ultra Teardown",
+            "DONT LET YOUR MACBOOK WATCH THIS VIDEO",
+            "I helped 2 strangers",
+            "Removed 30 phones from the wall",
+            "The truth about the new MacBook Neo",
+            "Tech teardown and durability test",
+        ],
+    )
+    seed = SeedResolution(
+        platform=Platform.YOUTUBE,
+        external_id="yt-1",
+        handle="randomtechseed",
+        url="https://www.youtube.com/@randomtechseed",
+        title="Random Tech Seed",
+        description="I review technology from the inside.",
+        uploads_playlist_id="UU1",
+    )
+
+    keywords, _ = niche_service.infer_niche_keywords(seed=seed, competitors=[])
+
+    assert any("teardown" in keyword or "durability" in keyword or "macbook" in keyword for keyword in keywords)
+    assert all(
+        bad not in keyword
+        for keyword in keywords
+        for bad in ("private", "will", "returned", "helped 2", "removed 30", "watch this video")
+    )
+
+
 def test_build_niche_context_text_includes_multi_platform_bundle(monkeypatch):
     monkeypatch.setattr(
         niche_service,
