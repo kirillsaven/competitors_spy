@@ -646,6 +646,34 @@ def test_infer_niche_keywords_filters_clickbait_and_small_number_noise(monkeypat
     )
 
 
+def test_infer_niche_keywords_prefers_medical_topic_over_single_science_mention(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: [
+            'Doctor Reacts To SNL "MAHA" Pitt Sketch',
+            "Doctor Reacts to Family Guy Medical Scenes",
+            "This Counts As Science?!?",
+            "The Biggest Mistake People Make On The Toilet",
+        ],
+    )
+    seed = SeedResolution(
+        platform=Platform.YOUTUBE,
+        external_id="yt-doc",
+        handle="doctormike",
+        url="https://www.youtube.com/@doctormike",
+        title="Doctor Mike",
+        description="Board Certified Family Medicine Doctor making medicine understandable and fun.",
+        uploads_playlist_id="UU1",
+    )
+
+    keywords, _ = niche_service.infer_niche_keywords(seed=seed, competitors=[])
+
+    assert any("doctor" in keyword or "medicine" in keyword or "health" in keyword for keyword in keywords)
+    assert all("engineering projects" != keyword for keyword in keywords)
+    assert all("science experiments" != keyword for keyword in keywords)
+
+
 def test_infer_niche_keywords_uses_filtered_linked_accounts_consistently(monkeypatch):
     seed = SeedResolution(
         platform=Platform.INSTAGRAM,

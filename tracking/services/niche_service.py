@@ -64,13 +64,14 @@ _TOPIC_HINTS: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         ),
         ("english language", "language learning", "english lessons", "spoken english"),
     ),
-    (
-        re.compile(
-            r"\b(engineer|engineering|mechanical|robot|robotics|nasa|science|experiment|physics|chemistry|rover|machine|diy|maker)\b",
-            re.IGNORECASE,
-        ),
-        ("engineering projects", "science experiments", "robotics", "DIY projects", "mechanics"),
-    ),
+)
+_SCIENCE_TOPIC_PATTERN = re.compile(
+    r"\b(engineer|engineering|mechanical|robot|robotics|nasa|science|experiment|physics|chemistry|rover|machine|diy|maker)\b",
+    re.IGNORECASE,
+)
+_MEDICAL_TOPIC_PATTERN = re.compile(
+    r"\b(doctor|doctors|medicine|medical|physician|health|healthcare|family medicine|family doctor|clinic|hospital)\b",
+    re.IGNORECASE,
 )
 _IDENTITY_SAFE_THEME_STEMS = set(_USEFUL_THEME_STEMS) | {"ege", "exam", "егэ", "огэ", "экзам"}
 _EXAM_SUBJECT_RE = re.compile(r"\b(егэ|огэ)\s+по\s+([0-9a-zа-яё-]{3,})", flags=re.IGNORECASE)
@@ -273,6 +274,27 @@ def _derive_topic_phrases(text: str) -> list[str]:
         if "разговорный английский" not in seen:
             seen.add("разговорный английский")
             phrases.append("разговорный английский")
+    science_markers: set[str] = set()
+    science_marker_defs = {
+        "engineering": r"\b(engineer|engineering|mechanical|machine)\b",
+        "robotics": r"\b(robot|robotics|rover)\b",
+        "experiments": r"\b(experiment|experiments|maker|diy)\b",
+        "science": r"\bscience\b",
+        "physics": r"\b(physics|chemistry|nasa)\b",
+    }
+    for label, pattern in science_marker_defs.items():
+        if re.search(pattern, raw, flags=re.IGNORECASE):
+            science_markers.add(label)
+    if len(science_markers) >= 2 or bool(science_markers & {"robotics", "physics"}):
+        for phrase in ("engineering projects", "science experiments", "robotics", "DIY projects", "mechanics"):
+            if phrase.lower() not in seen:
+                seen.add(phrase.lower())
+                phrases.append(phrase)
+    if _MEDICAL_TOPIC_PATTERN.search(raw):
+        for phrase in ("doctor", "family medicine", "health education", "medical education"):
+            if phrase.lower() not in seen:
+                seen.add(phrase.lower())
+                phrases.append(phrase)
     return phrases[:8]
 
 
