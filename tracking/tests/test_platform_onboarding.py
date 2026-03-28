@@ -329,6 +329,115 @@ def test_discover_youtube_search_candidates_uses_extra_queries_when_recall_is_lo
     assert [candidate.external_id for candidate in candidates] == ["yt-1", "yt-2", "yt-3", "yt-4", "yt-5"]
 
 
+def test_collector_aware_instagram_filters_mixed_topic_accounts(monkeypatch):
+    keywords = [
+        "английский язык",
+        "уроки английского",
+        "преподаватели английского",
+        "английский для взрослых",
+    ]
+    relevant = platform_onboarding._DiscoveryCandidate(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-good",
+        handle="english.good",
+        url="https://www.instagram.com/english.good/",
+        display_name="Английский для взрослых",
+        description="Репетитор по английскому онлайн",
+        query_hits={"английский для взрослых"},
+    )
+    mixed = platform_onboarding._DiscoveryCandidate(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-mixed",
+        handle="english.mixed",
+        url="https://www.instagram.com/english.mixed/",
+        display_name="Английский онлайн | для взрослых",
+        description="Препод по английскому",
+        query_hits={"английский для взрослых"},
+    )
+
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_batch_fetch_recent_instagram_reel_texts",
+        lambda **kwargs: {
+            "ig-good": (
+                [
+                    "Разбираем ошибку на уроке английского и учим полезную фразу.",
+                    "Как взрослому начать говорить на английском без зубрежки.",
+                    "Мини-урок английского: 3 фразы для small talk.",
+                ],
+                [1500, 1200, 900],
+                6,
+            ),
+            "ig-mixed": (
+                [
+                    "Новый эпизод подкаста об отношениях уже в профиле.",
+                    "Почему в долгих отношениях пропадает близость.",
+                    "Мой личный влог про семью и поддержку.",
+                    "Я препод по английскому, запись на занятия в шапке профиля.",
+                    "Еще один выпуск подкаста про отношения.",
+                ],
+                [2200, 1800, 900, 4000, 1700],
+                8,
+            ),
+        },
+    )
+
+    validated, reason = platform_onboarding._collector_aware_candidates(
+        platform=Platform.INSTAGRAM,
+        candidates=[relevant, mixed],
+        keywords=keywords,
+        max_candidates=10,
+    )
+
+    assert reason == ""
+    assert [candidate.external_id for candidate in validated] == ["ig-good"]
+    assert mixed.metadata["content_theme_strong_text_matches"] == 1
+
+
+def test_collector_aware_instagram_keeps_exam_accounts_with_consistent_recent_reels(monkeypatch):
+    keywords = [
+        "английский язык",
+        "уроки английского",
+        "IELTS",
+        "TOEFL",
+    ]
+    candidate = platform_onboarding._DiscoveryCandidate(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-exam",
+        handle="exam.english",
+        url="https://www.instagram.com/exam.english/",
+        display_name="Английский для IELTS и TOEFL",
+        description="Преподаватель английского и IELTS",
+        query_hits={"ielts english"},
+    )
+
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_batch_fetch_recent_instagram_reel_texts",
+        lambda **kwargs: {
+            "ig-exam": (
+                [
+                    "Как сдать IELTS на 7.0: 3 ошибки в speaking.",
+                    "TOEFL writing: шаблон эссе и полезные фразы.",
+                    "Разбор эссе IELTS и типовых ошибок на экзамене.",
+                ],
+                [5000, 4200, 3800],
+                5,
+            ),
+        },
+    )
+
+    validated, reason = platform_onboarding._collector_aware_candidates(
+        platform=Platform.INSTAGRAM,
+        candidates=[candidate],
+        keywords=keywords,
+        max_candidates=10,
+    )
+
+    assert reason == ""
+    assert [item.external_id for item in validated] == ["ig-exam"]
+
+
 def test_discover_competitors_for_onboarding_ranks_and_dedupes_candidates(monkeypatch):
     monkeypatch.setattr(
         platform_onboarding,

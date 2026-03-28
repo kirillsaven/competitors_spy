@@ -1182,7 +1182,13 @@ def _theme_profile_passes(*, candidate: _DiscoveryCandidate, keywords: list[str]
     return metrics["matched_phrases"] >= 1 or metrics["specific_overlap"] >= 2
 
 
-def _theme_content_passes(*, candidate: _DiscoveryCandidate, texts: list[str], keywords: list[str]) -> bool:
+def _theme_content_passes(
+    *,
+    platform: str,
+    candidate: _DiscoveryCandidate,
+    texts: list[str],
+    keywords: list[str],
+) -> bool:
     metrics = _theme_agreement_metrics(texts=texts, keywords=keywords)
     format_hits = len(_expand_alias_stems(_theme_token_stems(" ".join(texts))) & _INSTRUCTIONAL_CONTENT_STEMS)
     candidate.metadata["content_theme_score"] = (
@@ -1196,12 +1202,22 @@ def _theme_content_passes(*, candidate: _DiscoveryCandidate, texts: list[str], k
     candidate.metadata["content_theme_matches"] = metrics["matched_phrases"]
     candidate.metadata["content_theme_anchor_overlap"] = metrics["anchor_overlap"]
     candidate.metadata["content_theme_specific_overlap"] = metrics["specific_overlap"]
+    candidate.metadata["content_theme_strong_text_matches"] = metrics["strong_text_matches"]
+    candidate.metadata["content_theme_strong_anchor_matches"] = metrics["strong_anchor_matches"]
     candidate.metadata["content_format_hits"] = format_hits
     if metrics["anchor_overlap"] <= 0 or metrics["strong_anchor_matches"] <= 0:
         return (
             float(candidate.metadata.get("profile_theme_score") or 0) >= 10
             and int(candidate.metadata.get("recent_collectible_count") or 0) >= _DISCOVERY_MIN_RECENT_SHORTS
             and format_hits >= 2
+        )
+    if platform == Platform.INSTAGRAM:
+        if metrics["strong_text_matches"] >= 2:
+            return True
+        return (
+            metrics["matched_phrases"] >= 2
+            and metrics["strong_anchor_matches"] >= 2
+            and format_hits >= 1
         )
     return (
         (metrics["matched_phrases"] >= 1 and metrics["strong_text_matches"] >= 1)
@@ -2185,7 +2201,12 @@ def _collector_aware_candidates(
                 max_views=max(views) if views else 0,
                 recent_count=recent_count,
             )
-            if not _theme_content_passes(candidate=candidate, texts=texts, keywords=keywords):
+            if not _theme_content_passes(
+                platform=platform,
+                candidate=candidate,
+                texts=texts,
+                keywords=keywords,
+            ):
                 failed_offtopic += 1
                 continue
             validated.append(candidate)
