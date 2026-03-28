@@ -409,7 +409,19 @@ def create_and_send_report(
         status=ReportStatus.CREATED,
         payload=preview.payload,
     )
-    telegram_result = send_message(chat_id=int(user.tg_chat_id), text=preview.text)
+    try:
+        message_results = [
+            send_message(chat_id=int(user.tg_chat_id), text=chunk)
+            for chunk in split_telegram_text(text=preview.text)
+        ]
+    except Exception:
+        report.status = ReportStatus.FAILED
+        report.save(update_fields=["status"])
+        raise
+    telegram_result = {
+        "message_id": message_results[0]["message_id"],
+        "message_ids": [result["message_id"] for result in message_results],
+    }
 
     report.status = ReportStatus.SENT
     report.sent_at = timezone.now()
@@ -439,7 +451,15 @@ def create_and_send_setup_verification_report(
         status=ReportStatus.CREATED,
         payload=preview.payload,
     )
-    message_results = [send_message(chat_id=int(user.tg_chat_id), text=chunk) for chunk in split_telegram_text(text=preview.text)]
+    try:
+        message_results = [
+            send_message(chat_id=int(user.tg_chat_id), text=chunk)
+            for chunk in split_telegram_text(text=preview.text)
+        ]
+    except Exception:
+        report.status = ReportStatus.FAILED
+        report.save(update_fields=["status"])
+        raise
     telegram_result = {
         "message_id": message_results[0]["message_id"],
         "message_ids": [result["message_id"] for result in message_results],

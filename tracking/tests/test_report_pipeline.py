@@ -14,6 +14,7 @@ from tracking.services.report_pipeline import (
     assert_required_platform_sections,
     build_setup_verification_preview,
     build_report_preview,
+    create_and_send_report,
     create_and_send_setup_verification_report,
 )
 
@@ -116,6 +117,55 @@ def test_create_and_send_setup_verification_report_splits_messages(db, monkeypat
 
     assert len(sent) > 1
     assert result.telegram_result["message_ids"] == list(range(1, len(sent) + 1))
+
+
+def test_create_and_send_report_splits_messages_and_marks_sent(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=111, tg_chat_id=111, timezone_str="UTC")
+    preview = ReportPreview(
+        payload={"sections": []},
+        text="Обычный отчет\n\n" + ("x" * 5000),
+        section_counts={},
+    )
+    monkeypatch.setattr(report_pipeline, "build_report_preview", lambda **kwargs: preview)
+    sent = []
+    monkeypatch.setattr(report_pipeline, "send_message", lambda *, chat_id, text: sent.append(text) or {"message_id": len(sent)})
+
+    result = create_and_send_report(
+        user=user,
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+    )
+
+    result.report.refresh_from_db()
+    assert len(sent) > 1
+    assert result.report.status == "sent"
+    assert result.telegram_result["message_ids"] == list(range(1, len(sent) + 1))
+
+
+def test_create_and_send_report_marks_failed_when_telegram_send_errors(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=112, tg_chat_id=112, timezone_str="UTC")
+    preview = ReportPreview(
+        payload={"sections": []},
+        text="Обычный отчет",
+        section_counts={},
+    )
+    monkeypatch.setattr(report_pipeline, "build_report_preview", lambda **kwargs: preview)
+
+    def fail_send_message(**kwargs):
+        raise RuntimeError("telegram failed")
+
+    monkeypatch.setattr(report_pipeline, "send_message", fail_send_message)
+
+    with pytest.raises(RuntimeError, match="telegram failed"):
+        create_and_send_report(
+            user=user,
+            period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+            period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        )
+
+    report = Report.objects.latest("id")
+    assert report.user_id == user.id
+    assert report.status == "failed"
 
 
 def test_build_setup_verification_preview_prefetches_ig_and_tt_provider_payloads(db, monkeypatch):
