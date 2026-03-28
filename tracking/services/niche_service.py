@@ -704,7 +704,10 @@ def _candidate_subject_terms(
 
     for account in _ordered_accounts(seed=seed, linked_accounts=linked_accounts):
         account_title = _normalize_token(account.title or "")
-        for source_text in (str(account.title or ""), str(account.description or "")):
+        for source_text in (
+            str(account.title or ""),
+            _sanitize_keyword_source_text(str(account.description or "")),
+        ):
             for match in re.finditer(r"\b([0-9a-zа-яё-]{3,})\s*(\d{1,2})\b", source_text, flags=re.IGNORECASE):
                 token = _normalize_token(match.group(1))
                 number = match.group(2)
@@ -758,7 +761,7 @@ def _candidate_subject_terms(
                 if "2" in source_digits and not any(ch.isdigit() for ch in norm):
                     add(f"{norm} 2", expandable=False)
 
-        for raw in _ACCOUNT_TOKEN_RE.findall(str(account.description or "")):
+        for raw in _ACCOUNT_TOKEN_RE.findall(_sanitize_keyword_source_text(str(account.description or ""))):
             norm = _normalize_token(raw)
             if len(norm) < 3 or norm.isdigit():
                 continue
