@@ -105,21 +105,6 @@ def _generate_and_send_report(
         kwargs["before_send"] = before_send
     return create_and_send_report(**kwargs).report
 
-
-def _setup_schedule_grace() -> timedelta:
-    return timedelta(minutes=max(1, int(getattr(settings, "SETUP_SCHEDULE_GRACE_MINUTES", 15))))
-
-
-def _recent_setup_verification_exists(*, user: TgUser, now: datetime) -> bool:
-    cutoff = now - _setup_schedule_grace()
-    return Report.objects.filter(
-        user=user,
-        status=ReportStatus.SENT,
-        sent_at__gte=cutoff,
-        payload__report_kind="setup_verification",
-    ).exists()
-
-
 def _safe_send_user_message(*, user: TgUser, text: str) -> None:
     if not user.tg_chat_id:
         logger.warning("Cannot send Telegram status: missing tg_chat_id (user_id=%s)", user.id)
@@ -289,16 +274,6 @@ def run_user_report(self, user_id: int, due_at_iso: str = "", schedule_config_ve
             return
         if schedule.is_running:
             logger.info("Skipping scheduled report: already running (user_id=%s)", user_id)
-            return
-        if _recent_setup_verification_exists(user=user, now=now):
-            logger.info("Skipping scheduled report right after setup verification (user_id=%s)", user_id)
-            schedule.next_run_at = compute_next_run_at(
-                user.timezone_str,
-                list(schedule.times or []),
-                now,
-                min_delay=_setup_schedule_grace(),
-            )
-            schedule.save(update_fields=["next_run_at", "updated_at"])
             return
         if due_at is not None:
             tolerance = timedelta(minutes=max(1, due_tolerance_min))
@@ -531,7 +506,6 @@ def run_user_report_now(
             user.timezone_str,
             list(schedule.times or []),
             now,
-            min_delay=_setup_schedule_grace() if trigger == "setup" else None,
         )
         schedule.save(update_fields=["is_running", "running_started_at", "next_run_at", "updated_at"])
 
@@ -578,7 +552,6 @@ def run_user_report_now(
                 user.timezone_str,
                 list(schedule.times or []),
                 period_end,
-                min_delay=_setup_schedule_grace() if trigger == "setup" else None,
             )
             schedule.is_running = False
             schedule.running_started_at = None
@@ -624,7 +597,6 @@ def run_user_report_now(
                     user.timezone_str,
                     list(schedule.times or []),
                     timezone.now(),
-                    min_delay=_setup_schedule_grace() if trigger == "setup" else None,
                 )
                 schedule.save(update_fields=["is_running", "running_started_at", "next_run_at", "updated_at"])
         except Exception:

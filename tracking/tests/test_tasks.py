@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
 from django.utils import timezone
 
 from tracking import tasks
-from tracking.models import JobRun, JobStatus, Schedule, TgUser
+from tracking.models import JobRun, JobStatus, Report, ReportStatus, Schedule, TgUser
 
 
 def _make_user_with_schedule(*, tg_user_id: int = 1) -> tuple[TgUser, Schedule]:
@@ -253,3 +253,40 @@ def test_run_user_report_does_not_retry_non_retryable_provider_limit_error(monke
     assert job.payload["retry_planned"] is False
     assert job.payload["non_retryable_error"] is True
     assert schedule.is_running is False
+
+
+@pytest.mark.django_db
+def test_run_user_report_now_setup_keeps_first_user_selected_slot(monkeypatch):
+    user = TgUser.objects.create(
+        tg_user_id=9008,
+        tg_chat_id=9008,
+        timezone_str="UTC+07:00",
+    )
+    next_due = datetime(2026, 3, 28, 5, 36, tzinfo=UTC)
+    now = datetime(2026, 3, 28, 5, 32, 45, tzinfo=UTC)
+    schedule = Schedule.objects.create(
+        user=user,
+        is_enabled=True,
+        times=["12:36", "20:00"],
+        next_run_at=next_due,
+        last_run_at=datetime(2026, 3, 27, 15, 0, 2, tzinfo=UTC),
+    )
+
+    monkeypatch.setattr(tasks.timezone, "now", lambda: now)
+    monkeypatch.setattr(
+        tasks,
+        "_generate_and_send_report",
+        lambda **kwargs: Report.objects.create(
+            user=user,
+            period_start=kwargs["period_start"],
+            period_end=kwargs["period_end"],
+            status=ReportStatus.CREATED,
+            payload={"report_kind": "setup_verification"},
+        ),
+    )
+    monkeypatch.setattr(tasks.notify_report_still_running, "apply_async", lambda *args, **kwargs: None)
+
+    tasks.run_user_report_now.run(user.id, trigger="setup", schedule_config_version=schedule.config_version)
+
+    schedule.refresh_from_db()
+    assert schedule.next_run_at == next_due

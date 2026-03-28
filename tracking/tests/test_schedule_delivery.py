@@ -93,3 +93,47 @@ def test_run_user_report_skips_stale_enqueued_job_after_schedule_reconfigure(mon
     assert called == []
     assert schedule.is_running is False
     assert schedule.last_run_at is None
+
+
+@pytest.mark.django_db
+def test_run_user_report_after_setup_verification_keeps_near_term_due_slot(monkeypatch: pytest.MonkeyPatch) -> None:
+    user = TgUser.objects.create(tg_user_id=404, tg_chat_id=404, timezone_str="UTC+07:00")
+    due_at = datetime(2026, 3, 28, 5, 36, tzinfo=UTC)
+    now = datetime(2026, 3, 28, 5, 36, 45, tzinfo=UTC)
+    Schedule.objects.create(
+        user=user,
+        is_enabled=True,
+        times=["12:36", "20:00"],
+        next_run_at=due_at,
+        last_run_at=datetime(2026, 3, 28, 5, 32, 45, tzinfo=UTC),
+    )
+    Report.objects.create(
+        user=user,
+        period_start=datetime(2026, 3, 27, 15, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 28, 5, 32, 45, tzinfo=UTC),
+        status=ReportStatus.SENT,
+        sent_at=datetime(2026, 3, 28, 5, 32, 53, tzinfo=UTC),
+        payload={"report_kind": "setup_verification"},
+    )
+
+    monkeypatch.setattr(task_module.timezone, "now", lambda: now)
+    called: list[tuple[datetime, datetime]] = []
+    monkeypatch.setattr(
+        task_module,
+        "_generate_and_send_report",
+        lambda **kwargs: called.append((kwargs["period_start"], kwargs["period_end"]))
+        or Report.objects.create(
+            user=user,
+            period_start=kwargs["period_start"],
+            period_end=kwargs["period_end"],
+            status=ReportStatus.CREATED,
+            payload={},
+        ),
+    )
+
+    task_module.run_user_report.run(user.id, due_at.isoformat(), schedule_config_version=1)
+
+    schedule = Schedule.objects.get(user=user)
+    assert called == [(datetime(2026, 3, 28, 5, 32, 45, tzinfo=UTC), now)]
+    assert schedule.last_run_at == now
+    assert schedule.next_run_at == datetime(2026, 3, 28, 13, 0, tzinfo=UTC)
