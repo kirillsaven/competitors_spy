@@ -1215,9 +1215,12 @@ def _theme_content_passes(
         if metrics["strong_text_matches"] >= 2:
             return True
         return (
-            metrics["matched_phrases"] >= 2
+            (metrics["matched_phrases"] >= 2 or metrics["specific_overlap"] >= 4)
             and metrics["strong_anchor_matches"] >= 2
-            and format_hits >= 1
+            and (
+                format_hits >= 1
+                or float(candidate.metadata.get("profile_theme_score") or 0) >= 18
+            )
         )
     return (
         (metrics["matched_phrases"] >= 1 and metrics["strong_text_matches"] >= 1)
