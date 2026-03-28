@@ -220,6 +220,7 @@ _SUBJECT_ALIAS_STEMS = {
     "dota2": {"dota", "дота", "дота2"},
 }
 _ENGLISH_SUBJECT_STEMS = {"английск", "english"}
+_ENGLISH_AFFINITY_STEMS = _ENGLISH_SUBJECT_STEMS | {"ielts", "toefl", "celta", "delta", "cae", "cpe", "esl", "tefl"}
 _ENGLISH_CONFLICT_STEMS = {
     "deutsch",
     "german",
@@ -1214,6 +1215,11 @@ def _has_subject_conflict(*, texts: list[str], keywords: list[str]) -> bool:
     return bool(stems & _ENGLISH_CONFLICT_STEMS) and not bool(stems & _ENGLISH_SUBJECT_STEMS)
 
 
+def _has_english_affinity_signal(*, texts: list[str]) -> bool:
+    stems = _expand_alias_stems(_theme_token_stems(" ".join(texts)))
+    return bool(stems & _ENGLISH_AFFINITY_STEMS)
+
+
 def _theme_profile_passes(*, candidate: _DiscoveryCandidate, keywords: list[str]) -> bool:
     texts = [
         str(candidate.display_name or "").strip(),
@@ -1221,6 +1227,8 @@ def _theme_profile_passes(*, candidate: _DiscoveryCandidate, keywords: list[str]
         str(candidate.handle or "").strip(),
     ]
     if _has_subject_conflict(texts=texts, keywords=keywords):
+        return False
+    if _is_english_teaching_keywords(keywords) and not _has_english_affinity_signal(texts=texts):
         return False
     metrics = _theme_agreement_metrics(texts=texts, keywords=keywords)
     candidate.metadata["profile_theme_score"] = (

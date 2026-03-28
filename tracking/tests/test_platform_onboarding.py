@@ -527,6 +527,23 @@ def test_collector_aware_instagram_filters_other_language_accounts_for_english_n
     assert "по теме" in reason
 
 
+def test_theme_profile_passes_requires_english_affinity_for_english_niche():
+    candidate = platform_onboarding._DiscoveryCandidate(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-math",
+        handle="olga.math_repetitor",
+        url="https://www.instagram.com/olga.math_repetitor/",
+        display_name="Репетитор по математике",
+        description="Интерактивы и планы уроков",
+        query_hits={"планы уроков"},
+    )
+
+    assert not platform_onboarding._theme_profile_passes(
+        candidate=candidate,
+        keywords=["английский язык", "планы уроков", "преподаватели английского"],
+    )
+
+
 def test_discover_competitors_for_onboarding_ranks_and_dedupes_candidates(monkeypatch):
     monkeypatch.setattr(
         platform_onboarding,
