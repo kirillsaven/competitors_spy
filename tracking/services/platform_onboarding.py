@@ -218,6 +218,7 @@ _SUBJECT_ALIAS_STEMS = {
     "dota2": {"dota", "дота", "дота2"},
 }
 _INSTRUCTIONAL_CONTENT_STEMS = {
+    "experi",
     "guide",
     "guid",
     "experiment",
