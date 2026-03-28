@@ -1645,6 +1645,29 @@ def test_search_instagram_candidates_raw_expands_related_profiles(monkeypatch):
     assert related.metadata["source"] == "related_profile"
 
 
+def test_expand_instagram_related_candidates_falls_back_on_profile_quota_error(monkeypatch):
+    candidates = [
+        platform_onboarding._DiscoveryCandidate(
+            platform=Platform.INSTAGRAM,
+            external_id="ig-1",
+            handle="teacher_hub",
+            url="https://www.instagram.com/teacher_hub/",
+            display_name="Teacher Hub",
+            description="English teacher",
+            query_hits={"english tutors"},
+        )
+    ]
+
+    def fake_fetch_instagram_profiles_cached(**kwargs):
+        raise platform_onboarding.InstagramApiError("Monthly usage hard limit exceeded")
+
+    monkeypatch.setattr(platform_onboarding, "fetch_instagram_profiles_cached", fake_fetch_instagram_profiles_cached)
+
+    expanded = platform_onboarding._expand_instagram_related_candidates(candidates=candidates)
+
+    assert expanded == candidates
+
+
 def test_discover_competitors_for_onboarding_validates_multiple_ig_tt_candidates(monkeypatch):
     recent_instagram_ts = (datetime.now(UTC) - timedelta(days=1)).isoformat().replace("+00:00", "Z")
     recent_tiktok_ts = (datetime.now(UTC) - timedelta(days=2)).isoformat().replace("+00:00", "Z")

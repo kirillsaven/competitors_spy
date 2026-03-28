@@ -2635,11 +2635,14 @@ def _expand_instagram_related_candidates(
     )
     expansion_candidates = ranked[:_INSTAGRAM_RELATED_EXPANSION_PROFILES]
     lookups = [str(candidate.url or candidate.handle or candidate.external_id or "").strip() for candidate in expansion_candidates]
-    profiles = fetch_instagram_profiles_cached(
-        inputs=lookups,
-        context=context,
-        purpose="candidate_validation",
-    )
+    try:
+        profiles = fetch_instagram_profiles_cached(
+            inputs=lookups,
+            context=context,
+            purpose="candidate_validation",
+        )
+    except (PlatformOnboardingError, InstagramApiError, RuntimeError):
+        return list(candidates)
     merged: dict[str, _DiscoveryCandidate] = {candidate.external_id: candidate for candidate in candidates}
     for candidate, lookup in zip(expansion_candidates, lookups):
         profile = _find_instagram_profile_for_lookup(profiles, lookup)
