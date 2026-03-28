@@ -241,7 +241,11 @@ def _trim_keywords(keywords: list[str], limit: int = 6) -> list[str]:
 
 def _prioritize_keywords(*, primary: list[str], topic_phrases: list[str], secondary: list[str] | None = None) -> list[str]:
     secondary = list(secondary or [])
-    combined = list(primary[:2]) + list(topic_phrases) + list(primary[2:]) + secondary
+    leading_primary = list(primary[:3])
+    trailing_primary = list(primary[3:])
+    early_topic = list(topic_phrases[:2])
+    late_topic = list(topic_phrases[2:])
+    combined = leading_primary + early_topic + trailing_primary + late_topic + secondary
     return _trim_keywords(combined, limit=8)
 
 
@@ -1140,14 +1144,14 @@ def infer_niche_keywords(
             logger.warning("YouTube keyword inference failed for %s:%s: %s", seed.platform, seed.external_id, exc)
             youtube_keywords = []
         auto_keywords = _merge_keyword_lists(
-            topic_phrases,
-            youtube_keywords,
             auto_keywords,
             supported_source_phrases,
+            topic_phrases,
+            youtube_keywords,
             max_keywords=8,
         )
     else:
-        auto_keywords = _merge_keyword_lists(topic_phrases, auto_keywords, supported_source_phrases, max_keywords=8)
+        auto_keywords = _merge_keyword_lists(auto_keywords, supported_source_phrases, topic_phrases, max_keywords=8)
     auto_keywords = _merge_keyword_lists(game_topic_keywords, auto_keywords, max_keywords=8)
     auto_keywords = _prioritize_keywords(primary=auto_keywords, topic_phrases=topic_phrases)
     if is_niche_keywords_poor(keywords=auto_keywords, seed=seed):
