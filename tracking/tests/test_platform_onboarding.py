@@ -146,10 +146,14 @@ def test_discover_instagram_competitors_performs_real_query_search(monkeypatch):
                 {"id": "ig-3", "username": "teachernotes", "full_name": "Teacher Notes"},
             ]
 
+        def fetch_profiles(self, *, inputs):
+            return []
+
         def close(self):
             return None
 
     monkeypatch.setattr(platform_onboarding, "_get_instagram_client", lambda: FakeClient())
+    monkeypatch.setattr(platform_onboarding, "_expand_instagram_related_candidates", lambda **kwargs: kwargs["candidates"])
 
     candidates = platform_onboarding.discover_instagram_competitors(
         keywords=["english teachers", "teacher groups"],
@@ -1632,23 +1636,37 @@ def test_search_instagram_candidates_raw_expands_related_profiles(monkeypatch):
     )
 
     def fake_fetch_instagram_profiles_cached(*, inputs, context=None, purpose=None, context_id=None):
-        assert inputs == ["https://www.instagram.com/teacher_hub/"]
-        return [
-            {
-                "id": "ig-1",
-                "username": "teacher_hub",
-                "url": "https://www.instagram.com/teacher_hub/",
-                "biography": "English teachers and lesson ideas",
-                "relatedProfiles": [
+        items = []
+        for lookup in inputs:
+            handle = lookup.rstrip("/").split("/")[-1]
+            if handle == "teacher_hub":
+                items.append(
+                    {
+                        "id": "ig-1",
+                        "username": "teacher_hub",
+                        "url": "https://www.instagram.com/teacher_hub/",
+                        "biography": "English teachers and lesson ideas",
+                        "relatedProfiles": [
+                            {
+                                "id": "ig-2",
+                                "username": "lesson_lab",
+                                "full_name": "Lesson Lab",
+                                "is_verified": True,
+                            }
+                        ],
+                    }
+                )
+            elif handle == "lesson_lab":
+                items.append(
                     {
                         "id": "ig-2",
                         "username": "lesson_lab",
-                        "full_name": "Lesson Lab",
-                        "is_verified": True,
+                        "url": "https://www.instagram.com/lesson_lab/",
+                        "biography": "Lesson ideas",
+                        "relatedProfiles": [],
                     }
-                ],
-            }
-        ]
+                )
+        return items
 
     monkeypatch.setattr(platform_onboarding, "fetch_instagram_profiles_cached", fake_fetch_instagram_profiles_cached)
 
@@ -1707,6 +1725,99 @@ def test_search_instagram_candidates_raw_uses_seed_related_profiles(monkeypatch)
 
     assert [candidate.external_id for candidate in candidates] == ["ig-2"]
     assert candidates[0].query_hits == {"seed_related"}
+
+
+def test_search_instagram_candidates_raw_uses_full_search_budget(monkeypatch):
+    calls: list[int] = []
+
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_discovery_queries",
+        lambda **kwargs: ["tech review"],
+    )
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_seed_instagram_related_candidates",
+        lambda **kwargs: [],
+    )
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_expand_instagram_related_candidates",
+        lambda **kwargs: kwargs["candidates"],
+    )
+
+    def fake_cached_instagram_search_results(*, query, limit, context=None, purpose=None, context_id=None):
+        calls.append(limit)
+        return [
+            {"id": "ig-1", "username": "creator_one", "full_name": "Creator One"},
+            {"id": "ig-2", "username": "creator_two", "full_name": "Creator Two"},
+        ]
+
+    monkeypatch.setattr(platform_onboarding, "_cached_instagram_search_results", fake_cached_instagram_search_results)
+
+    candidates = platform_onboarding._search_instagram_candidates_raw(
+        keywords=["tech review"],
+        competitors=[],
+        seed_accounts=[],
+        max_candidates=20,
+    )
+
+    assert calls == [platform_onboarding._DISCOVERY_RESULT_BUDGET[Platform.INSTAGRAM]]
+    assert [candidate.external_id for candidate in candidates] == ["ig-1", "ig-2"]
+
+
+def test_expand_instagram_related_candidates_walks_second_graph_hop(monkeypatch):
+    candidates = [
+        platform_onboarding._DiscoveryCandidate(
+            platform=Platform.INSTAGRAM,
+            external_id="ig-seed-related",
+            handle="seed_related_one",
+            url="https://www.instagram.com/seed_related_one/",
+            display_name="Seed Related",
+            description="tech creator",
+            query_hits={"seed_related"},
+            metadata={"source": "related_profile", "graph_depth": 1, "graph_hits": 1},
+        )
+    ]
+
+    def fake_fetch_instagram_profiles_cached(*, inputs, context=None, purpose=None, context_id=None):
+        items = []
+        for lookup in inputs:
+            handle = lookup.rstrip("/").split("/")[-1]
+            if handle == "seed_related_one":
+                items.append(
+                    {
+                        "id": "ig-seed-related",
+                        "username": "seed_related_one",
+                        "url": "https://www.instagram.com/seed_related_one/",
+                        "biography": "tech creator",
+                        "relatedProfiles": [
+                            {"id": "ig-hop-1", "username": "creator_hop_1", "full_name": "Creator Hop 1"},
+                        ],
+                    }
+                )
+            elif handle == "creator_hop_1":
+                items.append(
+                    {
+                        "id": "ig-hop-1",
+                        "username": "creator_hop_1",
+                        "url": "https://www.instagram.com/creator_hop_1/",
+                        "biography": "more tech",
+                        "relatedProfiles": [
+                            {"id": "ig-hop-2", "username": "creator_hop_2", "full_name": "Creator Hop 2"},
+                        ],
+                    }
+                )
+        return items
+
+    monkeypatch.setattr(platform_onboarding, "fetch_instagram_profiles_cached", fake_fetch_instagram_profiles_cached)
+
+    expanded = platform_onboarding._expand_instagram_related_candidates(candidates=candidates)
+
+    by_id = {candidate.external_id: candidate for candidate in expanded}
+    assert "ig-hop-1" in by_id
+    assert "ig-hop-2" in by_id
+    assert by_id["ig-hop-2"].metadata["graph_depth"] == 2
 
 
 def test_expand_instagram_related_candidates_falls_back_on_profile_quota_error(monkeypatch):
@@ -1908,6 +2019,66 @@ def test_instagram_candidate_with_single_recent_reel_can_pass_validation(monkeyp
 
     assert reason == ""
     assert [item.external_id for item in validated] == ["ig-1"]
+
+
+def test_instagram_graph_sourced_creator_candidates_can_pass_with_broad_theme(monkeypatch):
+    candidates = [
+        platform_onboarding._DiscoveryCandidate(
+            platform=Platform.INSTAGRAM,
+            external_id="ig-1",
+            handle="unboxtherapy",
+            url="https://www.instagram.com/unboxtherapy/",
+            display_name="Unbox Therapy",
+            description="Where products get naked.",
+            query_hits={"seed_related", "tech review"},
+            metadata={"source": "related_profile", "graph_depth": 1, "graph_hits": 2},
+        ),
+        platform_onboarding._DiscoveryCandidate(
+            platform=Platform.INSTAGRAM,
+            external_id="ig-spam",
+            handle="_samsung__galaxy_ultra_s26",
+            url="https://www.instagram.com/_samsung__galaxy_ultra_s26/",
+            display_name="Samsung Galaxy Ultra S26",
+            description="",
+            query_hits={"samsung galaxy s26 ultra", "tech review"},
+            metadata={},
+        ),
+    ]
+
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_batch_fetch_recent_instagram_reel_texts",
+        lambda **kwargs: {
+            "ig-1": (
+                [
+                    "Early look at the new DJI 360 drone",
+                    "This laptop does it all",
+                    "Understand almost any language with these smart glasses",
+                ],
+                [200000, 150000, 125000],
+                12,
+            ),
+            "ig-spam": (
+                [
+                    "Samsung Galaxy S26 Ultra",
+                    "Samsung Galaxy S26 Ultra camera",
+                ],
+                [1200, 900],
+                2,
+            ),
+        },
+    )
+
+    validated, reason = platform_onboarding._collector_aware_candidates(
+        platform=Platform.INSTAGRAM,
+        candidates=candidates,
+        keywords=["samsung galaxy s26 ultra", "tech review", "macbook neo", "pro review"],
+        max_candidates=20,
+        context=None,
+    )
+
+    assert reason == ""
+    assert [candidate.external_id for candidate in validated] == ["ig-1"]
 
 
 def test_tiktok_search_refetches_when_cached_pool_is_too_small_for_higher_limit(monkeypatch):

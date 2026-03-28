@@ -146,7 +146,7 @@ _DISCOVERY_INITIAL_QUERY_BUDGET = {
 }
 _DISCOVERY_RESULT_BUDGET = {
     Platform.YOUTUBE: 50,
-    Platform.INSTAGRAM: 20,
+    Platform.INSTAGRAM: 50,
     Platform.TIKTOK: 20,
 }
 _DISCOVERY_EARLY_STOP_CANDIDATES = {
@@ -156,12 +156,12 @@ _DISCOVERY_EARLY_STOP_CANDIDATES = {
 }
 _DISCOVERY_VALIDATION_BUDGET = {
     Platform.YOUTUBE: 40,
-    Platform.INSTAGRAM: 25,
+    Platform.INSTAGRAM: 40,
     Platform.TIKTOK: 25,
 }
 _DISCOVERY_VALIDATION_MAX_SCAN = {
     Platform.YOUTUBE: 140,
-    Platform.INSTAGRAM: 100,
+    Platform.INSTAGRAM: 160,
     Platform.TIKTOK: 80,
 }
 _DISCOVERY_VALIDATION_ITEMS = 5
@@ -176,6 +176,7 @@ _DISCOVERY_YOUTUBE_UPLOAD_SCAN_LIMIT = 30
 _YOUTUBE_LOW_RECALL_RESCUE_THRESHOLD = 12
 _INSTAGRAM_RELATED_EXPANSION_PROFILES = 20
 _INSTAGRAM_RELATED_PER_PROFILE = 12
+_INSTAGRAM_GRAPH_EXPANSION_DEPTH = 2
 _GENERIC_DISCOVERY_STEMS = {
     "coach",
     "course",
@@ -400,9 +401,21 @@ def _merge_discovery_candidates(*candidate_sets: list[_DiscoveryCandidate]) -> l
             if existing is None:
                 merged[key] = candidate
                 continue
+            existing_graph_hits = int(existing.metadata.get("graph_hits") or 0)
+            candidate_graph_hits = int(candidate.metadata.get("graph_hits") or 0)
+            existing_graph_depth = int(existing.metadata.get("graph_depth") or 0)
+            candidate_graph_depth = int(candidate.metadata.get("graph_depth") or 0)
             existing.query_hits.update(candidate.query_hits)
             existing.cross_platform_keys.update(candidate.cross_platform_keys)
             existing.metadata.update(candidate.metadata)
+            if existing_graph_hits or candidate_graph_hits:
+                existing.metadata["graph_hits"] = existing_graph_hits + candidate_graph_hits
+            if candidate_graph_depth:
+                existing.metadata["graph_depth"] = (
+                    min(existing_graph_depth, candidate_graph_depth)
+                    if existing_graph_depth
+                    else candidate_graph_depth
+                )
             if not existing.display_name and candidate.display_name:
                 existing.display_name = candidate.display_name
             if not existing.description and candidate.description:
@@ -1321,9 +1334,16 @@ def _theme_profile_passes(*, candidate: _DiscoveryCandidate, keywords: list[str]
     candidate.metadata["profile_theme_matches"] = metrics["matched_phrases"]
     candidate.metadata["profile_theme_anchor_overlap"] = metrics["anchor_overlap"]
     candidate.metadata["profile_theme_specific_overlap"] = metrics["specific_overlap"]
-    if metrics["anchor_overlap"] <= 0:
-        return False
-    return metrics["matched_phrases"] >= 1 or metrics["specific_overlap"] >= 2
+    if metrics["anchor_overlap"] > 0 and (metrics["matched_phrases"] >= 1 or metrics["specific_overlap"] >= 2):
+        return True
+    graph_score = _instagram_graph_score(candidate)
+    if graph_score >= 6:
+        return (
+            metrics["anchor_overlap"] >= 1
+            or float(candidate.metadata.get("profile_theme_score") or 0) >= 4
+            or (bool(candidate.metadata.get("verified")) and len(str(candidate.description or "").strip()) >= 12)
+        )
+    return False
 
 
 def _theme_content_passes(
@@ -1334,6 +1354,7 @@ def _theme_content_passes(
     keywords: list[str],
 ) -> bool:
     metrics = _theme_agreement_metrics(texts=texts, keywords=keywords)
+    graph_score = _instagram_graph_score(candidate) if platform == Platform.INSTAGRAM else 0
     format_hits = len(_expand_alias_stems(_theme_token_stems(" ".join(texts))) & _INSTRUCTIONAL_CONTENT_STEMS)
     candidate.metadata["content_theme_score"] = (
         metrics["matched_phrases"] * 4
@@ -1352,6 +1373,8 @@ def _theme_content_passes(
     if _has_subject_conflict(texts=texts, keywords=keywords):
         return False
     if metrics["anchor_overlap"] <= 0 or metrics["strong_anchor_matches"] <= 0:
+        if platform == Platform.INSTAGRAM and graph_score >= 9 and int(candidate.metadata.get("recent_collectible_count") or 0) >= 3:
+            return True
         return (
             float(candidate.metadata.get("profile_theme_score") or 0) >= 10
             and int(candidate.metadata.get("recent_collectible_count") or 0) >= _DISCOVERY_MIN_RECENT_SHORTS
@@ -1380,6 +1403,31 @@ def _theme_content_passes(
             return True
         if _is_english_teaching_keywords(keywords):
             return format_hits >= 1 and metrics["strong_anchor_matches"] >= 2
+        if graph_score >= 9 and int(candidate.metadata.get("recent_collectible_count") or 0) >= 3:
+            return True
+        if graph_score >= 7:
+            return (
+                int(candidate.metadata.get("recent_collectible_count") or 0) >= 1
+                and (
+                    metrics["strong_anchor_matches"] >= 1
+                    or metrics["matched_phrases"] >= 1
+                    or metrics["specific_overlap"] >= 2
+                    or float(candidate.metadata.get("profile_theme_score") or 0) >= 6
+                    or (
+                        bool(candidate.metadata.get("verified"))
+                        and int(candidate.metadata.get("recent_collectible_count") or 0) >= 2
+                    )
+                )
+            )
+        if graph_score >= 5:
+            return (
+                int(candidate.metadata.get("recent_collectible_count") or 0) >= 2
+                and (
+                    metrics["anchor_overlap"] >= 1
+                    or float(candidate.metadata.get("profile_theme_score") or 0) >= 4
+                    or bool(candidate.metadata.get("verified"))
+                )
+            )
         return (
             (metrics["matched_phrases"] >= 2 or metrics["specific_overlap"] >= 4)
             and metrics["strong_anchor_matches"] >= 2
@@ -1403,6 +1451,43 @@ def _candidate_search_overlap(candidate: _DiscoveryCandidate) -> int:
     return overlap
 
 
+def _instagram_graph_score(candidate: _DiscoveryCandidate) -> int:
+    if candidate.platform != Platform.INSTAGRAM:
+        return 0
+    source = str(candidate.metadata.get("source") or "").strip().lower()
+    depth = max(0, int(candidate.metadata.get("graph_depth") or 0))
+    hits = max(0, int(candidate.metadata.get("graph_hits") or 0))
+    score = min(hits, 3)
+    if "seed_related" in candidate.query_hits:
+        score += 4
+    if source == "related_profile":
+        score += 2
+    if depth > 0:
+        score += max(0, 3 - min(depth, 3))
+    if bool(candidate.metadata.get("verified")):
+        score += 1
+    return score
+
+
+def _instagram_keyword_stuffing_penalty(candidate: _DiscoveryCandidate) -> float:
+    if candidate.platform != Platform.INSTAGRAM or _instagram_graph_score(candidate) > 0:
+        return 0.0
+    if bool(candidate.metadata.get("verified")) or len(str(candidate.description or "").strip()) >= 20:
+        return 0.0
+    handle_stems = _theme_token_stems(candidate.handle)
+    display_stems = _theme_token_stems(candidate.display_name)
+    query_stems: set[str] = set()
+    for query in candidate.query_hits:
+        query_stems |= _theme_token_stems(query)
+    overlap = len((handle_stems | display_stems) & query_stems)
+    noisy_handle = "_" in str(candidate.handle or "") or any(ch.isdigit() for ch in str(candidate.handle or ""))
+    if overlap >= 3 and noisy_handle:
+        return 18.0
+    if overlap >= 4:
+        return 14.0
+    return 0.0
+
+
 def _score_candidate(candidate: _DiscoveryCandidate) -> float:
     overlap = _candidate_search_overlap(candidate)
     query_repeat_bonus = len(candidate.query_hits) * 8.0
@@ -1417,6 +1502,8 @@ def _score_candidate(candidate: _DiscoveryCandidate) -> float:
     collectible_views_bonus = min(int(candidate.metadata.get("collectible_views") or 0), 2_000_000) / 50_000
     profile_theme_bonus = float(candidate.metadata.get("profile_theme_score") or 0) * 2.0
     content_theme_bonus = float(candidate.metadata.get("content_theme_score") or 0) * 2.4
+    graph_bonus = _instagram_graph_score(candidate) * 4.5
+    stuffing_penalty = _instagram_keyword_stuffing_penalty(candidate)
     return (
         query_repeat_bonus
         + overlap_bonus
@@ -1430,6 +1517,8 @@ def _score_candidate(candidate: _DiscoveryCandidate) -> float:
         + collectible_views_bonus
         + profile_theme_bonus
         + content_theme_bonus
+        + graph_bonus
+        - stuffing_penalty
     )
 
 
@@ -2763,6 +2852,8 @@ def _build_instagram_related_candidate(raw: dict[str, Any], *, queries: set[str]
         metadata={
             "verified": bool(raw.get("is_verified") or raw.get("isVerified")),
             "source": "related_profile",
+            "graph_depth": 1,
+            "graph_hits": 1,
         },
     )
 
@@ -2774,49 +2865,63 @@ def _expand_instagram_related_candidates(
 ) -> list[_DiscoveryCandidate]:
     if not candidates:
         return []
-    ranked = sorted(
-        candidates,
-        key=lambda item: (-_score_candidate(item), -len(item.query_hits), item.sort_tiebreak),
-    )
-    expansion_candidates = ranked[:_INSTAGRAM_RELATED_EXPANSION_PROFILES]
-    lookups = [str(candidate.url or candidate.handle or candidate.external_id or "").strip() for candidate in expansion_candidates]
-    try:
-        profiles = fetch_instagram_profiles_cached(
-            inputs=lookups,
-            context=context,
-            purpose="candidate_validation",
-        )
-    except (PlatformOnboardingError, InstagramApiError, RuntimeError):
-        return list(candidates)
     merged: dict[str, _DiscoveryCandidate] = {candidate.external_id: candidate for candidate in candidates}
-    for candidate, lookup in zip(expansion_candidates, lookups):
-        profile = _find_instagram_profile_for_lookup(profiles, lookup)
-        if not profile:
-            continue
-        biography = str(profile.get("biography") or "").strip()
-        if biography and not str(candidate.description or "").strip():
-            candidate.description = biography
-        related_items = profile.get("relatedProfiles") or []
-        if not isinstance(related_items, list):
-            continue
-        for raw_related in related_items[:_INSTAGRAM_RELATED_PER_PROFILE]:
-            if not isinstance(raw_related, dict):
+    expanded_ids: set[str] = set()
+    frontier = list(candidates)
+    for depth in range(1, _INSTAGRAM_GRAPH_EXPANSION_DEPTH + 1):
+        ranked = sorted(
+            [candidate for candidate in frontier if candidate.external_id not in expanded_ids],
+            key=lambda item: (-_score_candidate(item), -len(item.query_hits), item.sort_tiebreak),
+        )
+        expansion_candidates = ranked[:_INSTAGRAM_RELATED_EXPANSION_PROFILES]
+        if not expansion_candidates:
+            break
+        expanded_ids.update(candidate.external_id for candidate in expansion_candidates)
+        lookups = [str(candidate.url or candidate.handle or candidate.external_id or "").strip() for candidate in expansion_candidates]
+        try:
+            profiles = fetch_instagram_profiles_cached(
+                inputs=lookups,
+                context=context,
+                purpose="candidate_validation",
+            )
+        except (PlatformOnboardingError, InstagramApiError, RuntimeError):
+            break
+        next_frontier: list[_DiscoveryCandidate] = []
+        for candidate, lookup in zip(expansion_candidates, lookups):
+            profile = _find_instagram_profile_for_lookup(profiles, lookup)
+            if not profile:
                 continue
-            related = _build_instagram_related_candidate(raw_related, queries=candidate.query_hits)
-            if not related:
+            biography = str(profile.get("biography") or "").strip()
+            if biography and not str(candidate.description or "").strip():
+                candidate.description = biography
+            related_items = profile.get("relatedProfiles") or []
+            if not isinstance(related_items, list):
                 continue
-            existing = merged.get(related.external_id)
-            if existing is None:
-                merged[related.external_id] = related
-                continue
-            existing.query_hits.update(related.query_hits)
-            existing.metadata.update(related.metadata)
-            if not existing.display_name and related.display_name:
-                existing.display_name = related.display_name
-            if not existing.handle and related.handle:
-                existing.handle = related.handle
-            if not existing.url and related.url:
-                existing.url = related.url
+            for raw_related in related_items[:_INSTAGRAM_RELATED_PER_PROFILE]:
+                if not isinstance(raw_related, dict):
+                    continue
+                related = _build_instagram_related_candidate(raw_related, queries=candidate.query_hits)
+                if not related:
+                    continue
+                related.metadata["graph_depth"] = max(1, depth)
+                related.metadata["graph_hits"] = 1
+                existing = merged.get(related.external_id)
+                if existing is None:
+                    merged[related.external_id] = related
+                    next_frontier.append(related)
+                    continue
+                existing.query_hits.update(related.query_hits)
+                existing.metadata.update({k: v for k, v in related.metadata.items() if k not in {"graph_hits", "graph_depth"}})
+                existing.metadata["graph_hits"] = int(existing.metadata.get("graph_hits") or 0) + 1
+                current_depth = int(existing.metadata.get("graph_depth") or 0)
+                existing.metadata["graph_depth"] = min(current_depth, depth) if current_depth else depth
+                if not existing.display_name and related.display_name:
+                    existing.display_name = related.display_name
+                if not existing.handle and related.handle:
+                    existing.handle = related.handle
+                if not existing.url and related.url:
+                    existing.url = related.url
+        frontier = next_frontier
     return list(merged.values())
 
 
@@ -2866,12 +2971,17 @@ def _seed_instagram_related_candidates(
             candidate = _build_instagram_related_candidate(raw_related, queries={"seed_related"})
             if not candidate:
                 continue
+            candidate.metadata["graph_depth"] = 1
+            candidate.metadata["graph_hits"] = 1
             existing = out.get(candidate.external_id)
             if existing is None:
                 out[candidate.external_id] = candidate
                 continue
             existing.query_hits.update(candidate.query_hits)
-            existing.metadata.update(candidate.metadata)
+            existing.metadata.update({k: v for k, v in candidate.metadata.items() if k not in {"graph_hits", "graph_depth"}})
+            existing.metadata["graph_hits"] = int(existing.metadata.get("graph_hits") or 0) + 1
+            current_depth = int(existing.metadata.get("graph_depth") or 0)
+            existing.metadata["graph_depth"] = min(current_depth, 1) if current_depth else 1
     return list(out.values())
 
 
@@ -2903,7 +3013,7 @@ def _search_instagram_candidates_raw(
         )
     if not queries:
         raise PlatformOnboardingError("No Instagram search queries could be built from niche keywords")
-    result_limit = min(max_candidates, _DISCOVERY_RESULT_BUDGET[Platform.INSTAGRAM])
+    result_limit = max(max_candidates, _DISCOVERY_RESULT_BUDGET[Platform.INSTAGRAM])
     for index, query in enumerate(queries):
         for raw in _cached_instagram_search_results(
             query=query,
