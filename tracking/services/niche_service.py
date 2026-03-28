@@ -82,6 +82,13 @@ _TEACHER_RE = re.compile(r"\b(репетитор[0-9a-zа-яё-]*|препода
 _GUIDE_RE = re.compile(r"\b(гайд[0-9a-zа-яё-]*|guide[s]?|разбор[0-9a-zа-яё-]*|патч[0-9a-zа-яё-]*|meta|мет[ао][0-9a-zа-яё-]*)", flags=re.IGNORECASE)
 _ACCOUNT_TOKEN_RE = re.compile(r"[0-9a-zа-яё]+", flags=re.IGNORECASE)
 _UTILITY_JUNK_STEMS = {
+    "comment",
+    "consider",
+    "creator",
+    "follow",
+    "free",
+    "join",
+    "link",
     "найд",
     "ссылк",
     "профил",
@@ -95,6 +102,10 @@ _UTILITY_JUNK_STEMS = {
     "мир",
     "пут",
     "путь",
+    "send",
+    "signup",
+    "subscrib",
+    "workshop",
     "топ",
 }
 _SOURCE_PHRASE_SPLIT_RE = re.compile(r"[\n\r.!?;:,()\[\]{}|]+")
@@ -252,6 +263,40 @@ def _account_theme_texts(
     ]
     texts.extend(_safe_recent_seed_content_texts(seed=account, n=8, context=context))
     return [text for text in texts if text]
+
+
+def _same_handle_profile_hint_sources(
+    *,
+    seed: SeedResolution,
+    linked_accounts: list[SeedResolution] | None,
+) -> list[KeywordSource]:
+    seed_handle = str(seed.handle or "").strip().lower()
+    if not seed_handle:
+        return []
+    out: list[KeywordSource] = []
+    seen: set[tuple[str, str]] = set()
+    for account in _ordered_accounts(seed=seed, linked_accounts=linked_accounts)[1:]:
+        account_handle = str(account.handle or "").strip().lower()
+        if not account_handle or account_handle != seed_handle:
+            continue
+        source_id = _account_key(account)
+        if account.title:
+            _append_keyword_source(
+                out,
+                text=account.title,
+                source_id=source_id,
+                source_type="description",
+                seen=seen,
+            )
+        if account.description:
+            _append_keyword_source(
+                out,
+                text=account.description,
+                source_id=source_id,
+                source_type="description",
+                seen=seen,
+            )
+    return out
 
 
 def _filter_keyword_inference_linked_accounts(
@@ -782,7 +827,12 @@ def _filter_search_noise_keywords(keywords: list[str]) -> list[str]:
         if not stems:
             continue
         useful = stems & _IDENTITY_SAFE_THEME_STEMS
+        utility_hits = stems & _UTILITY_JUNK_STEMS
         if stems & _UTILITY_JUNK_STEMS and not useful and not any(token.isdigit() for token in tokens):
+            continue
+        if len(utility_hits) >= 2 and not useful:
+            continue
+        if tokens and _stem_token(tokens[0]) in _UTILITY_JUNK_STEMS and not useful:
             continue
         if len(tokens) == 1 and not useful and (stems & (_UTILITY_JUNK_STEMS | _GENERIC_SUBJECT_STEMS)):
             continue
@@ -932,6 +982,7 @@ def infer_niche_keywords(
         linked_accounts=filtered_linked_accounts,
         context=context,
     )
+    keyword_sources.extend(_same_handle_profile_hint_sources(seed=seed, linked_accounts=linked_accounts))
     blocked_terms = build_keyword_blocked_terms(
         seed=seed,
         linked_accounts=linked_accounts,
@@ -985,8 +1036,10 @@ def infer_niche_keywords(
     auto_keywords = _prioritize_keywords(primary=auto_keywords, topic_phrases=topic_phrases)
     if is_niche_keywords_poor(keywords=auto_keywords, seed=seed):
         auto_keywords = _merge_keyword_lists(supported_source_phrases, auto_keywords, max_keywords=8)
+    auto_keywords = _filter_search_noise_keywords(auto_keywords)
     auto_keywords = _drop_generic_singletons_with_richer_phrases(auto_keywords)[:8]
     if len(auto_keywords) < 5 or is_niche_keywords_poor(keywords=auto_keywords, seed=seed):
         auto_keywords = _merge_keyword_lists(auto_keywords, supported_source_phrases, max_keywords=8)
+        auto_keywords = _filter_search_noise_keywords(auto_keywords)
         auto_keywords = _drop_generic_singletons_with_richer_phrases(auto_keywords)[:8]
     return auto_keywords, "auto"

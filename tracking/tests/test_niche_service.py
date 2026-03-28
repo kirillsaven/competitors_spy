@@ -509,6 +509,48 @@ def test_infer_niche_keywords_ignores_offtopic_linked_accounts(monkeypatch):
     assert all("victoria" not in keyword and "waterfall" not in keyword and "saudi" not in keyword for keyword in keywords)
 
 
+def test_infer_niche_keywords_filters_cta_noise_and_keeps_profile_topic_hints(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: [
+            "If that sounds interesting, consider subscribing",
+            "Comment BOOKS and I'll send you the list",
+            "The psychology of making money",
+            "My AI strategy for staying relevant",
+        ],
+    )
+    seed = SeedResolution(
+        platform=Platform.YOUTUBE,
+        external_id="yt-productivity",
+        handle="creatorlab",
+        url="https://www.youtube.com/@creatorlab",
+        title="Creator Lab",
+        description="Doctor turned entrepreneur sharing evidence based productivity strategies",
+        uploads_playlist_id="UU1",
+    )
+    linked_accounts = [
+        SeedResolution(
+            platform=Platform.INSTAGRAM,
+            external_id="ig-productivity",
+            handle="creatorlab",
+            url="https://www.instagram.com/creatorlab/",
+            title="Creator Lab",
+            description="Evidence based productivity and creator business systems",
+            uploads_playlist_id=None,
+        )
+    ]
+
+    keywords, _ = niche_service.infer_niche_keywords(
+        seed=seed,
+        competitors=[],
+        linked_accounts=linked_accounts,
+    )
+
+    assert any("productivity" in keyword or "evidence based" in keyword for keyword in keywords)
+    assert all("subscrib" not in keyword and "comment" not in keyword and "send" not in keyword for keyword in keywords)
+
+
 def test_build_niche_context_text_includes_multi_platform_bundle(monkeypatch):
     monkeypatch.setattr(
         niche_service,
