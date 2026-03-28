@@ -457,6 +457,58 @@ def test_infer_niche_keywords_adds_diverse_supported_source_phrases_for_generic_
     ) >= 2
 
 
+def test_infer_niche_keywords_ignores_offtopic_linked_accounts(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: {
+            Platform.YOUTUBE: [
+                "Global macro investing for beginners",
+                "Stock market outlook and portfolio strategy",
+                "Macro analysis of fed and inflation",
+            ],
+            Platform.INSTAGRAM: [
+                "Victoria falls travel guide",
+                "Saudi Arabia hotel review",
+                "Best waterfalls in africa",
+            ],
+        }.get(seed.platform, []),
+    )
+    seed = SeedResolution(
+        platform=Platform.YOUTUBE,
+        external_id="yt-finance",
+        handle="macrovision",
+        url="https://www.youtube.com/@macrovision",
+        title="Macro Vision",
+        description="Global macro investor and stock market strategist",
+        uploads_playlist_id="UU1",
+    )
+    linked_accounts = [
+        SeedResolution(
+            platform=Platform.INSTAGRAM,
+            external_id="ig-offtopic",
+            handle="macrovision",
+            url="https://www.instagram.com/macrovision/",
+            title="Macro Vision Travel",
+            description="Travel, waterfalls and resorts",
+            uploads_playlist_id=None,
+        )
+    ]
+
+    keywords, _ = niche_service.infer_niche_keywords(
+        seed=seed,
+        competitors=[],
+        linked_accounts=linked_accounts,
+    )
+
+    assert any("macro" in keyword for keyword in keywords)
+    assert any(
+        any(marker in keyword for marker in ("stock", "portfolio", "strategy", "inflation"))
+        for keyword in keywords
+    )
+    assert all("victoria" not in keyword and "waterfall" not in keyword and "saudi" not in keyword for keyword in keywords)
+
+
 def test_build_niche_context_text_includes_multi_platform_bundle(monkeypatch):
     monkeypatch.setattr(
         niche_service,

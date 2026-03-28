@@ -221,6 +221,63 @@ def _ordered_accounts(*, seed: SeedResolution, linked_accounts: list[SeedResolut
     return accounts
 
 
+def _text_theme_stems(texts: list[str]) -> set[str]:
+    stems: set[str] = set()
+    for text in texts:
+        for raw in _ACCOUNT_TOKEN_RE.findall(str(text or "")):
+            norm = _normalize_token(raw)
+            if (
+                len(norm) < 3
+                or norm in _STOPWORDS_EN
+                or norm in _STOPWORDS_RU
+                or norm in _STRUCTURAL_JUNK
+                or norm in _LOW_INFORMATION
+            ):
+                continue
+            stem = _stem_token(norm)
+            if not stem or stem in _UTILITY_JUNK_STEMS:
+                continue
+            stems.add(stem)
+    return stems
+
+
+def _account_theme_texts(
+    *,
+    account: SeedResolution,
+    context: SetupRunContext | None = None,
+) -> list[str]:
+    texts = [
+        str(account.title or "").strip(),
+        str(account.description or "").strip(),
+    ]
+    texts.extend(_safe_recent_seed_content_texts(seed=account, n=8, context=context))
+    return [text for text in texts if text]
+
+
+def _filter_keyword_inference_linked_accounts(
+    *,
+    seed: SeedResolution,
+    linked_accounts: list[SeedResolution] | None,
+    context: SetupRunContext | None = None,
+) -> list[SeedResolution]:
+    ordered = _ordered_accounts(seed=seed, linked_accounts=linked_accounts)
+    if len(ordered) <= 1:
+        return [account for account in ordered[1:]]
+    seed_stems = _text_theme_stems(_account_theme_texts(account=seed, context=context))
+    if len(seed_stems) < 3:
+        return [account for account in ordered[1:]]
+
+    kept: list[SeedResolution] = []
+    for account in ordered[1:]:
+        account_stems = _text_theme_stems(_account_theme_texts(account=account, context=context))
+        if not account_stems:
+            continue
+        overlap = len(seed_stems & account_stems)
+        if overlap >= 2:
+            kept.append(account)
+    return kept
+
+
 def _append_unique(parts: list[str], value: str, seen: set[str]) -> None:
     text = str(value or "").strip()
     if not text:
@@ -856,10 +913,15 @@ def infer_niche_keywords(
     """
     Returns: (keywords, source) where source is always "auto".
     """
+    filtered_linked_accounts = _filter_keyword_inference_linked_accounts(
+        seed=seed,
+        linked_accounts=linked_accounts,
+        context=context,
+    )
     fallback_text = build_keyword_source_text(
         seed=seed,
         competitors=competitors,
-        linked_accounts=linked_accounts,
+        linked_accounts=filtered_linked_accounts,
         context=context,
     )
     topic_phrases = _derive_topic_phrases(fallback_text)
@@ -867,7 +929,7 @@ def infer_niche_keywords(
     keyword_sources = build_keyword_sources(
         seed=seed,
         competitors=competitors,
-        linked_accounts=linked_accounts,
+        linked_accounts=filtered_linked_accounts,
         context=context,
     )
     blocked_terms = build_keyword_blocked_terms(
@@ -893,7 +955,7 @@ def infer_niche_keywords(
         max_keywords=8,
     )
     title_keywords = extract_keywords(
-        _build_title_keyword_sources(seed=seed, linked_accounts=linked_accounts),
+        _build_title_keyword_sources(seed=seed, linked_accounts=filtered_linked_accounts),
         max_keywords=3,
         blocked_terms=blocked_terms,
     )
