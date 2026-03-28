@@ -1060,6 +1060,24 @@ def _theme_phrase_stems(keywords: list[str]) -> list[tuple[set[str], set[str]]]:
     return phrases
 
 
+def _keyword_substring_stems(*, text: str, keywords: list[str]) -> set[str]:
+    normalized_text = re.sub(r"[^0-9a-zа-яё]+", "", _normalize_token(text))
+    if len(normalized_text) < 6:
+        return set()
+    stems: set[str] = set()
+    for query in _dedupe_keyword_queries(keywords, max_queries=8):
+        for token in _TOKEN_RE.findall(str(query or "")):
+            norm = _normalize_token(token)
+            if len(norm) < 3 or norm in _GENERIC_QUERY_TOKENS:
+                continue
+            collapsed = re.sub(r"[^0-9a-zа-яё]+", "", norm)
+            if len(collapsed) < 3:
+                continue
+            if collapsed in normalized_text:
+                stems.add(_stem_token(norm))
+    return stems
+
+
 def _is_identity_like_query(
     query: str,
     *,
@@ -1125,7 +1143,13 @@ def _theme_agreement_metrics(*, texts: list[str], keywords: list[str]) -> dict[s
             "strong_text_matches": 0,
         }
 
-    text_stem_sets = [_expand_alias_stems(_theme_token_stems(text)) for text in texts if str(text or "").strip()]
+    text_stem_sets = []
+    for text in texts:
+        value = str(text or "").strip()
+        if not value:
+            continue
+        stems = _theme_token_stems(value) | _keyword_substring_stems(text=value, keywords=keywords)
+        text_stem_sets.append(_expand_alias_stems(stems))
     union_stems: set[str] = set()
     for stems in text_stem_sets:
         union_stems |= stems

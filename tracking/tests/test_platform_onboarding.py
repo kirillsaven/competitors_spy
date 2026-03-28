@@ -438,6 +438,51 @@ def test_collector_aware_instagram_keeps_exam_accounts_with_consistent_recent_re
     assert [item.external_id for item in validated] == ["ig-exam"]
 
 
+def test_collector_aware_instagram_recovers_compound_hashtag_science_accounts(monkeypatch):
+    keywords = [
+        "engineering projects",
+        "science experiments",
+        "DIY projects",
+        "robotics",
+    ]
+    candidate = platform_onboarding._DiscoveryCandidate(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-science",
+        handle="thedadlab",
+        url="https://www.instagram.com/thedadlab/",
+        display_name="Science Experiments for Kids",
+        description="DIY science projects and experiments",
+        query_hits={"science experiments"},
+        metadata={"verified": True},
+    )
+
+    monkeypatch.setattr(
+        platform_onboarding,
+        "_batch_fetch_recent_instagram_reel_texts",
+        lambda **kwargs: {
+            "ig-science": (
+                [
+                    "No teacups were harmed in the making of this video #scienceexperiments #scienceisfun",
+                    "Wait, why does paper open itself when it gets wet? A wow experiment for kids.",
+                    "Save this DIY project for later.",
+                ],
+                [12000, 9000, 7500],
+                5,
+            ),
+        },
+    )
+
+    validated, reason = platform_onboarding._collector_aware_candidates(
+        platform=Platform.INSTAGRAM,
+        candidates=[candidate],
+        keywords=keywords,
+        max_candidates=10,
+    )
+
+    assert reason == ""
+    assert [item.external_id for item in validated] == ["ig-science"]
+
+
 def test_discover_competitors_for_onboarding_ranks_and_dedupes_candidates(monkeypatch):
     monkeypatch.setattr(
         platform_onboarding,
