@@ -166,6 +166,7 @@ _DISCOVERY_VALIDATION_MAX_SCAN = {
 }
 _DISCOVERY_VALIDATION_ITEMS = 5
 _DISCOVERY_MIN_RECENT_SHORTS = 2
+_COLLECTIBLE_CACHE_VERSION = "uploads-v2"
 _DISCOVERY_MIN_RECENT_ITEMS_BY_PLATFORM = {
     Platform.YOUTUBE: 2,
     Platform.INSTAGRAM: 1,
@@ -450,7 +451,7 @@ def _profile_cache_key(platform: str, lookup: str) -> str:
 
 def _recent_cache_key(platform: str, external_id: str, handle: str | None, n: int) -> str:
     identity = str(handle or external_id or "").strip().lower()
-    return f"recent::{platform}::{identity}::{max(1, int(n))}"
+    return f"recent::{_COLLECTIBLE_CACHE_VERSION}::{platform}::{identity}::{max(1, int(n))}"
 
 
 def _search_cache_key(platform: str, query: str) -> str:
@@ -1375,6 +1376,27 @@ def _theme_content_passes(
     if metrics["anchor_overlap"] <= 0 or metrics["strong_anchor_matches"] <= 0:
         if platform == Platform.INSTAGRAM and graph_score >= 9 and int(candidate.metadata.get("recent_collectible_count") or 0) >= 3:
             return True
+        if platform == Platform.YOUTUBE:
+            return (
+                int(candidate.metadata.get("recent_collectible_count") or 0) >= _DISCOVERY_MIN_RECENT_ITEMS_BY_PLATFORM.get(
+                    Platform.YOUTUBE,
+                    _DISCOVERY_MIN_RECENT_SHORTS,
+                )
+                and (
+                    (
+                        float(candidate.metadata.get("profile_theme_score") or 0) >= 6
+                        and (
+                            metrics["specific_overlap"] >= 2
+                            or metrics["matched_phrases"] >= 1
+                        )
+                    )
+                    or (
+                        _is_english_teaching_keywords(keywords)
+                        and float(candidate.metadata.get("profile_theme_score") or 0) >= 18
+                        and format_hits >= 2
+                    )
+                )
+            )
         return (
             float(candidate.metadata.get("profile_theme_score") or 0) >= 10
             and int(candidate.metadata.get("recent_collectible_count") or 0) >= _DISCOVERY_MIN_RECENT_SHORTS
@@ -1440,6 +1462,22 @@ def _theme_content_passes(
         (metrics["matched_phrases"] >= 1 and metrics["strong_text_matches"] >= 1)
         or metrics["specific_overlap"] >= 3
         or metrics["strong_text_matches"] >= 2
+        or (
+            float(candidate.metadata.get("profile_theme_score") or 0) >= 6
+            and (
+                metrics["specific_overlap"] >= 2
+                or metrics["matched_phrases"] >= 1
+            )
+        )
+        or (
+            metrics["anchor_overlap"] >= 1
+            and metrics["strong_anchor_matches"] >= 1
+            and (
+                metrics["specific_overlap"] >= 2
+                or float(candidate.metadata.get("profile_theme_score") or 0) >= 6
+                or format_hits >= 1
+            )
+        )
     )
 
 
@@ -2030,11 +2068,11 @@ def _fetch_recent_youtube_short_texts(
     n: int,
     context: SetupRunContext | None = None,
 ) -> list[str]:
-    texts, _views, _recent_count = _fetch_recent_youtube_short_signals(candidate=candidate, n=n, context=context)
+    texts, _views, _recent_count = _fetch_recent_youtube_upload_signals(candidate=candidate, n=n, context=context)
     return texts
 
 
-def _fetch_recent_youtube_short_signals(
+def _fetch_recent_youtube_upload_signals(
     *,
     candidate: _DiscoveryCandidate,
     n: int,
@@ -2107,7 +2145,7 @@ def _fetch_recent_youtube_short_signals(
                 )
             video_items = client.videos_list(
                 ids=video_ids[: max(_DISCOVERY_YOUTUBE_UPLOAD_SCAN_LIMIT, n * 5)],
-                part="snippet,contentDetails",
+                part="snippet,contentDetails,statistics",
             )
         except YouTubeApiError:
             return _store_cached_collectible_signals(
@@ -2120,17 +2158,17 @@ def _fetch_recent_youtube_short_signals(
                 recent_count=0,
                 context=context,
             )
-        short_details = sorted(
+        upload_details = sorted(
             [
                 detail
                 for detail in video_items_to_details(video_items)
-                if detail.duration_seconds is not None and detail.duration_seconds <= 60
+                if str(detail.title or "").strip()
             ],
             key=lambda item: item.published_at,
             reverse=True,
         )
-        recent_count = _recent_collectible_count(short_details)
-        top_details = short_details[:n]
+        recent_count = _recent_collectible_count(upload_details)
+        top_details = upload_details[:n]
         texts = [
             str(detail.title or "").strip()
             for detail in top_details
@@ -2149,6 +2187,15 @@ def _fetch_recent_youtube_short_signals(
         )
     finally:
         client.close()
+
+
+def _fetch_recent_youtube_short_signals(
+    *,
+    candidate: _DiscoveryCandidate,
+    n: int,
+    context: SetupRunContext | None = None,
+) -> tuple[list[str], list[int], int]:
+    return _fetch_recent_youtube_upload_signals(candidate=candidate, n=n, context=context)
 
 
 def _fetch_recent_instagram_reel_texts(
@@ -2535,12 +2582,12 @@ def _collector_aware_candidates(
 
     if failed_low_activity >= max(failed_no_content, failed_offtopic):
         if platform == Platform.YOUTUBE:
-            return [], "поиск выполнен, но топ-кандидаты не прошли фильтр активности: меньше 2 recent Shorts за 60 дней."
+            return [], "поиск выполнен, но топ-кандидаты не прошли фильтр активности: меньше 2 recent видео за 60 дней."
         if platform == Platform.INSTAGRAM:
             return [], "поиск выполнен, но топ-кандидаты не прошли фильтр активности: нет recent Reels за 60 дней."
         return [], "поиск выполнен, но топ-кандидаты не прошли фильтр активности: меньше 2 recent TikTok-видео за 60 дней."
     if platform == Platform.YOUTUBE:
-        return [], "поиск выполнен, но топ-кандидаты не прошли проверку recent Shorts по теме."
+        return [], "поиск выполнен, но топ-кандидаты не прошли проверку recent видео по теме."
     if platform == Platform.INSTAGRAM:
         return [], "поиск выполнен, но топ-кандидаты не прошли проверку reels по теме."
     return [], "поиск выполнен, но топ-кандидаты не прошли проверку recent TikTok-видео по теме."

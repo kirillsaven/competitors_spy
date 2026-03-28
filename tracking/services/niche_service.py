@@ -130,6 +130,9 @@ _UTILITY_JUNK_STEMS = {
     "subscrib",
     "workshop",
     "топ",
+    "котор",
+    "люб",
+    "мира",
 }
 _SOURCE_PHRASE_SPLIT_RE = re.compile(r"[\n\r.!?;:,()\[\]{}|]+")
 _BOILERPLATE_SOURCE_PATTERNS: tuple[re.Pattern[str], ...] = (
@@ -1072,10 +1075,10 @@ def infer_niche_keywords(
         linked_accounts=filtered_linked_accounts,
         context=context,
     )
-    keyword_sources.extend(_same_handle_profile_hint_sources(seed=seed, linked_accounts=linked_accounts))
+    keyword_sources.extend(_same_handle_profile_hint_sources(seed=seed, linked_accounts=filtered_linked_accounts))
     blocked_terms = build_keyword_blocked_terms(
         seed=seed,
-        linked_accounts=linked_accounts,
+        linked_accounts=filtered_linked_accounts,
         keyword_sources=keyword_sources,
     )
     auto_keywords = extract_keywords(
@@ -1088,7 +1091,7 @@ def infer_niche_keywords(
     auto_keywords = _merge_keyword_lists(
         _supplement_search_utility_keywords(
             seed=seed,
-            linked_accounts=linked_accounts,
+            linked_accounts=filtered_linked_accounts,
             keywords=auto_keywords,
             keyword_sources=keyword_sources,
         ),
@@ -1133,4 +1136,6 @@ def infer_niche_keywords(
         auto_keywords = _merge_keyword_lists(auto_keywords, compact_source_phrases, supported_source_phrases, max_keywords=8)
         auto_keywords = _filter_search_noise_keywords(auto_keywords)
         auto_keywords = _drop_generic_singletons_with_richer_phrases(auto_keywords)[:8]
+    if game_topic_keywords:
+        auto_keywords = _merge_keyword_lists(game_topic_keywords, auto_keywords, max_keywords=8)
     return auto_keywords, "auto"

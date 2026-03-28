@@ -1045,7 +1045,7 @@ def test_dota_and_dota2_aliases_match_in_theme_metrics():
     assert metrics["specific_overlap"] >= 1
 
 
-def test_candidate_survives_only_if_recent_short_form_content_matches_niche(monkeypatch):
+def test_candidate_survives_only_if_recent_uploads_match_niche(monkeypatch):
     candidate = platform_onboarding._DiscoveryCandidate(
         platform=Platform.YOUTUBE,
         external_id="yt-1",
@@ -1057,10 +1057,10 @@ def test_candidate_survives_only_if_recent_short_form_content_matches_niche(monk
         metadata={"rank_hint": 1000},
     )
 
-    def fake_recent_youtube_short_signals(*, candidate, n, context=None):
+    def fake_recent_youtube_upload_signals(*, candidate, n, context=None):
         return ["history exam tips", "егэ по истории"], [5000, 4200], 3
 
-    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_signals", fake_recent_youtube_short_signals)
+    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_upload_signals", fake_recent_youtube_upload_signals)
 
     validated, reason = platform_onboarding._collector_aware_candidates(
         platform=Platform.YOUTUBE,
@@ -1071,10 +1071,10 @@ def test_candidate_survives_only_if_recent_short_form_content_matches_niche(monk
     )
 
     assert validated == []
-    assert "recent Shorts по теме" in reason
+    assert "recent видео по теме" in reason
 
 
-def test_candidate_is_dropped_if_it_has_less_than_two_recent_shorts(monkeypatch):
+def test_candidate_is_dropped_if_it_has_less_than_two_recent_uploads(monkeypatch):
     candidate = platform_onboarding._DiscoveryCandidate(
         platform=Platform.YOUTUBE,
         external_id="yt-1",
@@ -1086,10 +1086,10 @@ def test_candidate_is_dropped_if_it_has_less_than_two_recent_shorts(monkeypatch)
         metadata={"rank_hint": 1000},
     )
 
-    def fake_recent_youtube_short_signals(*, candidate, n, context=None):
+    def fake_recent_youtube_upload_signals(*, candidate, n, context=None):
         return ["english teacher lesson plans"], [5000], 1
 
-    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_signals", fake_recent_youtube_short_signals)
+    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_upload_signals", fake_recent_youtube_upload_signals)
 
     validated, reason = platform_onboarding._collector_aware_candidates(
         platform=Platform.YOUTUBE,
@@ -1100,10 +1100,10 @@ def test_candidate_is_dropped_if_it_has_less_than_two_recent_shorts(monkeypatch)
     )
 
     assert validated == []
-    assert "меньше 2 recent Shorts" in reason
+    assert "меньше 2 recent видео" in reason
 
 
-def test_candidate_with_english_profile_and_instructional_recent_shorts_survives(monkeypatch):
+def test_candidate_with_english_profile_and_instructional_recent_uploads_survives(monkeypatch):
     candidate = platform_onboarding._DiscoveryCandidate(
         platform=Platform.YOUTUBE,
         external_id="yt-english-club",
@@ -1115,14 +1115,14 @@ def test_candidate_with_english_profile_and_instructional_recent_shorts_survives
         metadata={"rank_hint": 8000},
     )
 
-    def fake_recent_youtube_short_signals(*, candidate, n, context=None):
+    def fake_recent_youtube_upload_signals(*, candidate, n, context=None):
         return [
             "Предлоги IN AT ON",
             "Фразы на каждый день",
             "Запоминаем выражения с by",
         ], [14000, 9000, 8500], 3
 
-    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_signals", fake_recent_youtube_short_signals)
+    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_upload_signals", fake_recent_youtube_upload_signals)
 
     validated, reason = platform_onboarding._collector_aware_candidates(
         platform=Platform.YOUTUBE,
@@ -1136,7 +1136,7 @@ def test_candidate_with_english_profile_and_instructional_recent_shorts_survives
     assert reason == ""
 
 
-def test_candidate_with_strong_profile_but_offtopic_recent_shorts_is_still_dropped(monkeypatch):
+def test_candidate_with_strong_profile_but_offtopic_recent_uploads_is_still_dropped(monkeypatch):
     candidate = platform_onboarding._DiscoveryCandidate(
         platform=Platform.YOUTUBE,
         external_id="yt-skyeng",
@@ -1148,14 +1148,14 @@ def test_candidate_with_strong_profile_but_offtopic_recent_shorts_is_still_dropp
         metadata={"rank_hint": 10000},
     )
 
-    def fake_recent_youtube_short_signals(*, candidate, n, context=None):
+    def fake_recent_youtube_upload_signals(*, candidate, n, context=None):
         return [
             "Кто лучше ухаживает? Русские или французы?",
             "Ред флаги на свиданиях в Италии и Франции",
             "Как ухаживают итальянцы",
         ], [80000, 50000, 30000], 3
 
-    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_short_signals", fake_recent_youtube_short_signals)
+    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_upload_signals", fake_recent_youtube_upload_signals)
 
     validated, reason = platform_onboarding._collector_aware_candidates(
         platform=Platform.YOUTUBE,
@@ -1166,7 +1166,40 @@ def test_candidate_with_strong_profile_but_offtopic_recent_shorts_is_still_dropp
     )
 
     assert validated == []
-    assert "recent Shorts по теме" in reason
+    assert "recent видео по теме" in reason
+
+
+def test_youtube_candidate_with_long_form_recent_uploads_survives(monkeypatch):
+    candidate = platform_onboarding._DiscoveryCandidate(
+        platform=Platform.YOUTUBE,
+        external_id="yt-veritasium-like",
+        handle="science-lab",
+        url="https://www.youtube.com/@science-lab",
+        display_name="Science Lab",
+        description="Science experiments and engineering explainers",
+        query_hits={"science experiments", "engineering projects"},
+        metadata={"rank_hint": 250000},
+    )
+
+    def fake_recent_youtube_upload_signals(*, candidate, n, context=None):
+        return [
+            "Why rockets spin: engineering explained",
+            "The science of chaotic pendulums",
+            "We built a robot that solves mazes",
+        ], [420000, 380000, 295000], 3
+
+    monkeypatch.setattr(platform_onboarding, "_fetch_recent_youtube_upload_signals", fake_recent_youtube_upload_signals)
+
+    validated, reason = platform_onboarding._collector_aware_candidates(
+        platform=Platform.YOUTUBE,
+        candidates=[candidate],
+        keywords=["science experiments", "engineering projects", "robotics"],
+        max_candidates=20,
+        context=None,
+    )
+
+    assert reason == ""
+    assert [item.external_id for item in validated] == ["yt-veritasium-like"]
 
 
 def test_collector_validation_batch_spreads_across_query_buckets():

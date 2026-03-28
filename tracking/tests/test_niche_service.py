@@ -646,6 +646,69 @@ def test_infer_niche_keywords_filters_clickbait_and_small_number_noise(monkeypat
     )
 
 
+def test_infer_niche_keywords_uses_filtered_linked_accounts_consistently(monkeypatch):
+    seed = SeedResolution(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-1",
+        handle="creatorlab",
+        url="https://www.instagram.com/creatorlab/",
+        title="Creator Lab",
+        description="Productivity systems for creators",
+        uploads_playlist_id=None,
+    )
+    linked = [
+        SeedResolution(
+            platform=Platform.YOUTUBE,
+            external_id="yt-1",
+            handle="creatorlab",
+            url="https://www.youtube.com/@creatorlab",
+            title="Creator Lab",
+            description="Offtopic boilerplate that should never leak",
+            uploads_playlist_id="UU1",
+        )
+    ]
+    seen: dict[str, list[SeedResolution] | None] = {}
+
+    monkeypatch.setattr(niche_service, "_filter_keyword_inference_linked_accounts", lambda **kwargs: [])
+    monkeypatch.setattr(niche_service, "build_keyword_source_text", lambda **kwargs: "productivity systems")
+    monkeypatch.setattr(niche_service, "build_keyword_sources", lambda **kwargs: [])
+    monkeypatch.setattr(
+        niche_service,
+        "_same_handle_profile_hint_sources",
+        lambda **kwargs: seen.setdefault("same_handle", kwargs["linked_accounts"]) or [],
+    )
+    monkeypatch.setattr(
+        niche_service,
+        "build_keyword_blocked_terms",
+        lambda **kwargs: seen.setdefault("blocked_terms", kwargs["linked_accounts"]) or set(),
+    )
+    monkeypatch.setattr(niche_service, "extract_keywords", lambda *args, **kwargs: ["productivity systems"])
+    monkeypatch.setattr(
+        niche_service,
+        "_supplement_search_utility_keywords",
+        lambda **kwargs: seen.setdefault("utility", kwargs["linked_accounts"]) or [],
+    )
+    monkeypatch.setattr(niche_service, "_build_title_keyword_sources", lambda **kwargs: [])
+    monkeypatch.setattr(niche_service, "_derive_supported_source_phrases", lambda **kwargs: [])
+    monkeypatch.setattr(niche_service, "_derive_topic_phrases", lambda *args, **kwargs: [])
+    monkeypatch.setattr(niche_service, "_derive_game_topic_keywords", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        niche_service,
+        "_merge_keyword_lists",
+        lambda *lists, max_keywords=8: list(lists[0])[:max_keywords] if lists else [],
+    )
+    monkeypatch.setattr(niche_service, "_prioritize_keywords", lambda **kwargs: kwargs["primary"])
+    monkeypatch.setattr(niche_service, "_filter_search_noise_keywords", lambda keywords: keywords)
+    monkeypatch.setattr(niche_service, "_drop_generic_singletons_with_richer_phrases", lambda keywords: keywords)
+    monkeypatch.setattr(niche_service, "is_niche_keywords_poor", lambda **kwargs: False)
+
+    niche_service.infer_niche_keywords(seed=seed, competitors=[], linked_accounts=linked)
+
+    assert seen["same_handle"] == []
+    assert seen["blocked_terms"] == []
+    assert seen["utility"] == []
+
+
 def test_build_niche_context_text_includes_multi_platform_bundle(monkeypatch):
     monkeypatch.setattr(
         niche_service,
