@@ -144,11 +144,13 @@ def score_items_for_period(
     scored: list[ScoredItem] = []
     min_delta_views = int(getattr(settings, "MIN_DELTA_VIEWS", 500))
     min_views_end = int(getattr(settings, "MIN_VIEWS_END", 1000))
+    short_window_fallback_hours = float(getattr(settings, "REPORT_SHORT_WINDOW_FALLBACK_HOURS", 6.0) or 6.0)
     # Hard floor to avoid noisy "viral" picks on very short periods (e.g. a few minutes).
     # The main threshold is scaled by period length below.
     min_delta_floor = 20
     max_age_days = int(getattr(settings, "REPORT_MAX_ITEM_AGE_DAYS", 14))
     min_published_at = period_end - timedelta(days=max_age_days)
+    period_hours = max((period_end - period_start).total_seconds() / 3600.0, 0.0)
 
     for item in items:
         if item.published_at < min_published_at:
@@ -192,10 +194,11 @@ def score_items_for_period(
                 delta_hours = dh
                 # Scale the "minimal meaningful delta" by period length. MIN_DELTA_VIEWS is treated as a 24h threshold.
                 effective_min_delta = max(int(min_delta_views * (dh / 24.0)), min_delta_floor)
-                if dv < effective_min_delta:
+                if dv < effective_min_delta and period_hours > short_window_fallback_hours:
                     continue
-                velocity = float(dv) / dh
-                score_type = "delta"
+                if dv >= effective_min_delta:
+                    velocity = float(dv) / dh
+                    score_type = "delta"
 
         if velocity is None:
             # Warm-up fallback: avoid tiny videos where vph is too noisy.

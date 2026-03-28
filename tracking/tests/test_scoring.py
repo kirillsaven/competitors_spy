@@ -140,3 +140,43 @@ def test_score_items_for_period_filters_low_total_views_even_with_delta(settings
     )
 
     assert scored == []
+
+
+@pytest.mark.django_db
+def test_score_items_for_period_uses_current_vph_fallback_for_short_first_window(settings) -> None:
+    settings.MIN_VIEWS_END = 1000
+    settings.MIN_DELTA_VIEWS = 500
+    settings.REPORT_SHORT_WINDOW_FALLBACK_HOURS = 6
+    user = TgUser.objects.create(tg_user_id=4, tg_chat_id=4, timezone_str="UTC+00:00")
+    comp = Competitor.objects.create(platform=Platform.INSTAGRAM, external_id="IG100", display_name="IG Warmup", meta={})
+    UserCompetitor.objects.create(user=user, competitor=comp, added_by="manual", is_active=True)
+
+    published_at = datetime(2026, 3, 27, 10, 0, tzinfo=UTC)
+    item = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.INSTAGRAM,
+        external_id="reel-1",
+        url="https://www.instagram.com/reel/reel-1/",
+        title="Warmup reel",
+        description="",
+        published_at=published_at,
+        duration_seconds=30,
+        meta={"content_type": "reel"},
+    )
+    period_start = datetime(2026, 3, 28, 13, 35, 42, tzinfo=UTC)
+    period_end = datetime(2026, 3, 28, 13, 38, 11, tzinfo=UTC)
+    MetricSnapshot.objects.create(content_item=item, captured_at=period_start, views=2200, likes=120, comments=8, extra={})
+    MetricSnapshot.objects.create(content_item=item, captured_at=period_end, views=2200, likes=120, comments=8, extra={})
+
+    baseline = BaselineMetrics(vph_median=20.0, vph_iqr=5.0, er_median=0.02, er_iqr=0.01, n=10, rph_median=1.0, rph_iqr=0.5)
+    scored = score_items_for_period(
+        items=[item],
+        competitor_by_item_id={item.id: comp},
+        baseline_by_competitor_id={comp.id: baseline},
+        period_start=period_start,
+        period_end=period_end,
+    )
+
+    assert len(scored) == 1
+    assert scored[0].score_type == "current_vph"
+    assert scored[0].delta_views == 0
