@@ -7,7 +7,6 @@ from asgiref.sync import async_to_sync, sync_to_async
 
 from botapp.handlers import competitors
 from botapp.state import CompetitorManagementStates
-from tracking.adapters.base import SeedResolution
 from tracking.models import Competitor, Platform, Schedule, TgUser, UserCompetitor
 from tracking.services import report_pipeline
 
@@ -15,15 +14,27 @@ from tracking.services import report_pipeline
 class DummyState:
     def __init__(self) -> None:
         self.state = None
+        self.data: dict = {}
 
     async def set_state(self, value) -> None:
         self.state = value
+
+    async def update_data(self, **kwargs) -> None:
+        self.data.update(kwargs)
+
+    async def get_data(self) -> dict:
+        return dict(self.data)
+
+    async def clear(self) -> None:
+        self.state = None
+        self.data = {}
 
 
 class DummyMessage:
     def __init__(self, *, user_id: int, text: str = "") -> None:
         self.text = text
         self.answers: list[str] = []
+        self.reply_markups = []
         self.chat = SimpleNamespace(id=user_id)
         self.from_user = SimpleNamespace(
             id=user_id,
@@ -35,7 +46,27 @@ class DummyMessage:
 
     async def answer(self, text: str, reply_markup=None):
         self.answers.append(text)
-        return SimpleNamespace(chat=self.chat, message_id=len(self.answers))
+        self.reply_markups.append(reply_markup)
+        return self
+
+    async def edit_text(self, text: str, reply_markup=None):
+        self.answers.append(text)
+        self.reply_markups.append(reply_markup)
+        return self
+
+    async def edit_reply_markup(self, reply_markup=None):
+        self.reply_markups.append(reply_markup)
+        return self
+
+
+class DummyCallbackQuery:
+    def __init__(self, *, data: str, message: DummyMessage) -> None:
+        self.data = data
+        self.message = message
+        self.answers: list[tuple[str | None, bool]] = []
+
+    async def answer(self, text: str | None = None, show_alert: bool = False):
+        self.answers.append((text, show_alert))
 
 
 async def _db_call(func, *args, **kwargs):
@@ -78,12 +109,12 @@ def test_competitors_command_groups_active_competitors(monkeypatch):
     assert "1. MrBeast (@mrbeast)" in message.answers[-1]
     assert "TikTok (0):" in message.answers[-1]
     assert "Instagram (1):" in message.answers[-1]
-    assert "/competitors_add - добавить вручную" in message.answers[-1]
-    assert "/competitors_remove - убрать из списка" in message.answers[-1]
+    assert "/competitors_add - выбрать из списка и добавить" in message.answers[-1]
+    assert "/competitors_remove - выбрать из списка и убрать" in message.answers[-1]
 
 
 @pytest.mark.django_db
-def test_competitors_add_reactivates_idempotently(monkeypatch):
+def test_competitors_add_reactivates_from_picker(monkeypatch):
     user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=21, tg_chat_id=21)
     async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
     competitor_obj = async_to_sync(sync_to_async(Competitor.objects.create, thread_sensitive=True))(
@@ -103,26 +134,33 @@ def test_competitors_add_reactivates_idempotently(monkeypatch):
     monkeypatch.setattr(competitors, "db_run", _db_run)
     monkeypatch.setattr(
         competitors,
-        "resolve_exact_seed",
-        lambda raw_input: SeedResolution(
-            platform=Platform.YOUTUBE,
-            external_id="yt-creator",
-            handle="creator",
-            url="https://www.youtube.com/@creator",
-            title="Creator",
-            description="Channel",
-            uploads_playlist_id="UU123",
+        "_load_add_candidates_for_user",
+        lambda **kwargs: (
+            [
+                {
+                    "platform": Platform.YOUTUBE,
+                    "external_id": "yt-creator",
+                    "handle": "creator",
+                    "url": "https://www.youtube.com/@creator",
+                    "display_name": "Creator",
+                    "added_by": "manual",
+                    "meta": {},
+                }
+            ],
+            [],
         ),
     )
 
     state = DummyState()
-    command_message = DummyMessage(user_id=21)
-    async_to_sync(competitors.cmd_competitors_add)(command_message, state)
+    message = DummyMessage(user_id=21)
+    async_to_sync(competitors.cmd_competitors_add)(message, state)
 
-    assert state.state == CompetitorManagementStates.WAIT_COMPETITORS_ADD_INPUT
+    assert state.state == CompetitorManagementStates.PICK_COMPETITORS_ADD
 
-    input_message = DummyMessage(user_id=21, text="@creator\n@creator")
-    async_to_sync(competitors.on_competitors_add_input)(input_message, state)
+    toggle = DummyCallbackQuery(data="compadd_toggle:0", message=message)
+    async_to_sync(competitors.on_add_toggle)(toggle, state)
+    done = DummyCallbackQuery(data="compadd_done", message=message)
+    async_to_sync(competitors.on_add_done)(done, state)
 
     link = async_to_sync(sync_to_async(UserCompetitor.objects.get, thread_sensitive=True))(user=user, competitor=competitor_obj)
     link_count = async_to_sync(sync_to_async(UserCompetitor.objects.filter(user=user, competitor=competitor_obj).count, thread_sensitive=True))()
@@ -130,10 +168,10 @@ def test_competitors_add_reactivates_idempotently(monkeypatch):
     assert state.state is None
     assert link.is_active is True
     assert link_count == 1
-    assert "Добавлено: 1" in input_message.answers[-1]
-    assert "Пропущено: 1" in input_message.answers[-1]
-    assert "Ошибки: 0" in input_message.answers[-1]
-    assert "YouTube: 1" in input_message.answers[-1]
+    assert "Добавлено: 1" in message.answers[-1]
+    assert "Пропущено: 0" in message.answers[-1]
+    assert "Ошибки: 0" in message.answers[-1]
+    assert "YouTube: 1" in message.answers[-1]
 
 
 @pytest.mark.django_db
@@ -163,28 +201,17 @@ def test_competitors_remove_deactivates_only_user_link_and_updates_report_active
 
     monkeypatch.setattr(competitors, "db_call", _db_call)
     monkeypatch.setattr(competitors, "db_run", _db_run)
-    monkeypatch.setattr(
-        competitors,
-        "resolve_exact_seed",
-        lambda raw_input: SeedResolution(
-            platform=Platform.YOUTUBE,
-            external_id="yt-keep",
-            handle="creator",
-            url="https://www.youtube.com/@creator",
-            title="Creator",
-            description="Channel",
-            uploads_playlist_id="UU999",
-        ),
-    )
 
     state = DummyState()
-    command_message = DummyMessage(user_id=31)
-    async_to_sync(competitors.cmd_competitors_remove)(command_message, state)
+    message = DummyMessage(user_id=31)
+    async_to_sync(competitors.cmd_competitors_remove)(message, state)
 
-    assert state.state == CompetitorManagementStates.WAIT_COMPETITORS_REMOVE_INPUT
+    assert state.state == CompetitorManagementStates.PICK_COMPETITORS_REMOVE
 
-    input_message = DummyMessage(user_id=31, text="https://www.youtube.com/@creator")
-    async_to_sync(competitors.on_competitors_remove_input)(input_message, state)
+    toggle = DummyCallbackQuery(data=f"comprem_toggle:{youtube.id}", message=message)
+    async_to_sync(competitors.on_remove_toggle)(toggle, state)
+    done = DummyCallbackQuery(data="comprem_done", message=message)
+    async_to_sync(competitors.on_remove_done)(done, state)
 
     user_link = async_to_sync(sync_to_async(UserCompetitor.objects.get, thread_sensitive=True))(user=user, competitor=youtube)
     other_link = async_to_sync(sync_to_async(UserCompetitor.objects.get, thread_sensitive=True))(user=other_user, competitor=youtube)
@@ -195,7 +222,7 @@ def test_competitors_remove_deactivates_only_user_link_and_updates_report_active
     assert other_link.is_active is True
     assert Competitor.objects.filter(id=youtube.id).exists()
     assert [(item.platform, item.external_id) for item in remaining] == [(Platform.INSTAGRAM, "ig-keep")]
-    assert "Удалено: 1" in input_message.answers[-1]
-    assert "Пропущено: 0" in input_message.answers[-1]
-    assert "YouTube: 0" in input_message.answers[-1]
-    assert "Instagram: 1" in input_message.answers[-1]
+    assert "Удалено: 1" in message.answers[-1]
+    assert "Пропущено: 0" in message.answers[-1]
+    assert "YouTube: 0" in message.answers[-1]
+    assert "Instagram: 1" in message.answers[-1]

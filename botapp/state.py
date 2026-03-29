@@ -26,8 +26,12 @@ class SetupStates(StatesGroup):
 class CompetitorManagementStates(StatesGroup):
     WAIT_COMPETITORS_ADD_INPUT = State()
     WAIT_COMPETITORS_REMOVE_INPUT = State()
+    PICK_COMPETITORS_ADD = State()
+    PICK_COMPETITORS_REMOVE = State()
 
 
 class StopwordManagementStates(StatesGroup):
     WAIT_STOPWORDS_ADD_INPUT = State()
     WAIT_STOPWORDS_REMOVE_INPUT = State()
+    PICK_STOPWORDS_ADD = State()
+    PICK_STOPWORDS_REMOVE = State()
