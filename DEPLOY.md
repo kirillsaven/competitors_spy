@@ -64,6 +64,11 @@ Recommended hardening vars for a reverse-proxied HTTPS setup:
 - `DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS=1`
 - `DJANGO_SECURE_HSTS_PRELOAD=1`
 
+Current first-deploy HTTP baseline:
+- Keep `DJANGO_SECURE_SSL_REDIRECT=0`, `DJANGO_SESSION_COOKIE_SECURE=0`, `DJANGO_CSRF_COOKIE_SECURE=0`, and `DJANGO_SECURE_HSTS_SECONDS=0` until real HTTPS termination exists.
+- Set `DJANGO_SILENCED_SYSTEM_CHECKS=security.W004,security.W008,security.W012,security.W016` so `check --deploy` does not fail on HTTPS-only warnings that are intentionally deferred on this baseline.
+- Do not silence `security.W009`; fix it by setting a strong production-only `DJANGO_SECRET_KEY`.
+
 ## Production start and update commands
 First start from the server checkout:
 
