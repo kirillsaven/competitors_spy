@@ -247,3 +247,91 @@ def kb_prune_competitors(
     )
     _add_back_button(b)
     return b.as_markup()
+
+
+def kb_manage_competitors(
+    *,
+    competitor_rows: list[tuple[int, str, str | None]],
+    selected_ids: set[int],
+    page: int,
+    page_size: int,
+    toggle_prefix: str,
+    page_prefix: str,
+    all_callback: str,
+    done_callback: str,
+    done_text: str,
+) -> InlineKeyboardMarkup:
+    total = len(competitor_rows)
+    b = InlineKeyboardBuilder()
+    if total == 0:
+        b.add(InlineKeyboardButton(text=done_text, callback_data=done_callback))
+        _add_back_button(b)
+        return b.as_markup()
+
+    start = page * page_size
+    end = min(total, start + page_size)
+    link_buttons: list[InlineKeyboardButton] = []
+
+    for visible_idx, (cid, name, url) in enumerate(competitor_rows[start:end], start=1):
+        mark = "✅" if cid in selected_ids else "⬜"
+        b.row(InlineKeyboardButton(text=f"{mark} {visible_idx}. {name}"[:64], callback_data=f"{toggle_prefix}:{cid}"))
+        safe_url = _safe_http_url(url)
+        if safe_url:
+            link_buttons.append(InlineKeyboardButton(text=f"{visible_idx}↗", url=safe_url))
+
+    for idx in range(0, len(link_buttons), 4):
+        b.row(*link_buttons[idx : idx + 4])
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="←", callback_data=f"{page_prefix}:{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"{page+1}/{(total + page_size - 1)//page_size}", callback_data="noop"))
+    if end < total:
+        nav.append(InlineKeyboardButton(text="→", callback_data=f"{page_prefix}:{page+1}"))
+    b.row(*nav)
+    b.row(
+        InlineKeyboardButton(text="Выбрать все", callback_data=all_callback),
+        InlineKeyboardButton(text=done_text, callback_data=done_callback),
+    )
+    _add_back_button(b)
+    return b.as_markup()
+
+
+def kb_manage_stopwords(
+    *,
+    stopwords: list[str],
+    selected_ids: set[int],
+    page: int,
+    page_size: int,
+    toggle_prefix: str,
+    page_prefix: str,
+    all_callback: str,
+    done_callback: str,
+    done_text: str,
+) -> InlineKeyboardMarkup:
+    total = len(stopwords)
+    b = InlineKeyboardBuilder()
+    if total == 0:
+        b.add(InlineKeyboardButton(text=done_text, callback_data=done_callback))
+        _add_back_button(b)
+        return b.as_markup()
+
+    start = page * page_size
+    end = min(total, start + page_size)
+    for idx, word in enumerate(stopwords[start:end], start=start):
+        mark = "✅" if idx in selected_ids else "⬜"
+        b.row(InlineKeyboardButton(text=f"{mark} {word}"[:64], callback_data=f"{toggle_prefix}:{idx}"))
+
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="←", callback_data=f"{page_prefix}:{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"{page+1}/{(total + page_size - 1)//page_size}", callback_data="noop"))
+    if end < total:
+        nav.append(InlineKeyboardButton(text="→", callback_data=f"{page_prefix}:{page+1}"))
+    b.row(*nav)
+    b.row(
+        InlineKeyboardButton(text="Выбрать все", callback_data=all_callback),
+        InlineKeyboardButton(text=done_text, callback_data=done_callback),
+    )
+    _add_back_button(b)
+    return b.as_markup()

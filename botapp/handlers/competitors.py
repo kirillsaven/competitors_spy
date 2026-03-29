@@ -2,30 +2,43 @@ from __future__ import annotations
 
 import asyncio
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 from django.conf import settings
 
 from botapp.db import db_call, db_run
+from botapp.keyboards import GLOBAL_BACK_CALLBACK, kb_manage_competitors
 from botapp.state import CompetitorManagementStates
 from botapp.user_sync import upsert_tg_user
 from tracking.adapters.base import SeedResolution
-from tracking.models import AddedBy, Schedule, TgUser, UserCompetitor
+from tracking.models import (
+    AddedBy,
+    Platform,
+    Schedule,
+    SeedProfile,
+    SeedStatus,
+    TgUser,
+    UserCompetitor,
+    UserLinkedAccount,
+)
 from tracking.services.competitor_service import (
     PLATFORM_LABELS,
     PLATFORM_ORDER,
     deactivate_user_competitors,
-    find_active_competitor_link_match,
     get_active_user_competitor_counts,
     list_active_user_competitor_links,
     list_active_user_competitor_links_grouped,
     upsert_competitor,
 )
-from tracking.services.seed_resolver import SeedResolveError, resolve_exact_seed
+from tracking.services.platform_onboarding import discover_competitors_for_onboarding
+from tracking.services.seed_resolver import resolve_exact_seed
+from tracking.services.setup_runtime import SetupRunContext
 
 router = Router()
+
+_PAGE_SIZE = 8
 
 
 def _format_competitor_name(link: UserCompetitor) -> str:
@@ -54,11 +67,242 @@ def _is_setup_complete(*, user: TgUser) -> bool:
     return Schedule.objects.filter(user=user).exists()
 
 
-def _active_link_by_key(*, active_links: list[UserCompetitor]) -> dict[tuple[str, str], UserCompetitor]:
-    return {
-        (str(link.competitor.platform or ""), str(link.competitor.external_id or "")): link
-        for link in active_links
-    }
+def _competitor_display_name(candidate: dict) -> str:
+    platform = str(candidate.get("platform") or "").strip()
+    label = {
+        Platform.YOUTUBE: "YT",
+        Platform.TIKTOK: "TT",
+        Platform.INSTAGRAM: "IG",
+    }.get(platform, platform.upper() or "?")
+    name = str(candidate.get("display_name") or candidate.get("handle") or candidate.get("external_id") or "").strip()
+    handle = str(candidate.get("handle") or "").strip().lstrip("@")
+    if handle:
+        return f"[{label}] {name} (@{handle})"
+    return f"[{label}] {name}"
+
+
+def _active_link_rows(*, user: TgUser) -> list[dict]:
+    rows: list[dict] = []
+    for link in list_active_user_competitor_links(user=user):
+        rows.append(
+            {
+                "competitor_id": int(link.competitor_id),
+                "platform": str(link.competitor.platform or ""),
+                "display_name": _format_competitor_name(link),
+                "url": str(link.competitor.url or "").strip() or None,
+            }
+        )
+    return rows
+
+
+def _seed_resolution_from_linked_account(account: UserLinkedAccount) -> SeedResolution | None:
+    external_id = str(account.external_id or "").strip()
+    if not external_id:
+        return None
+    meta = account.meta if isinstance(account.meta, dict) else {}
+    return SeedResolution(
+        platform=account.platform,
+        external_id=external_id,
+        handle=str(account.handle or "").strip() or None,
+        url=str(account.url or "").strip(),
+        title=str(account.display_name or account.handle or external_id).strip(),
+        description=str(meta.get("description") or "").strip() or None,
+        uploads_playlist_id=str(meta.get("uploads_playlist_id") or "").strip() or None,
+    )
+
+
+def _seed_resolution_from_user_link(link: UserCompetitor) -> SeedResolution | None:
+    competitor = link.competitor
+    external_id = str(competitor.external_id or "").strip()
+    if not external_id:
+        return None
+    meta = competitor.meta if isinstance(competitor.meta, dict) else {}
+    return SeedResolution(
+        platform=competitor.platform,
+        external_id=external_id,
+        handle=str(competitor.handle or "").strip() or None,
+        url=str(competitor.url or "").strip(),
+        title=str(competitor.display_name or competitor.handle or external_id).strip(),
+        description=str(meta.get("description") or "").strip() or None,
+        uploads_playlist_id=str(meta.get("uploads_playlist_id") or "").strip() or None,
+    )
+
+
+def _load_add_candidates_for_user(*, user: TgUser) -> tuple[list[dict], list[str]]:
+    seed_profile = (
+        SeedProfile.objects.filter(user=user, status=SeedStatus.RESOLVED)
+        .order_by("-id")
+        .first()
+    )
+    if seed_profile is None:
+        raise RuntimeError("Не нашел сохраненный setup. Сначала заново заверши /setup.")
+    seed_input = str(seed_profile.canonical_url or seed_profile.raw_input or "").strip()
+    if not seed_input:
+        raise RuntimeError("В setup не сохранился исходный профиль. Запусти /setup заново.")
+    keywords = [str(item).strip() for item in (seed_profile.niche_keywords or []) if str(item).strip()]
+    if not keywords:
+        raise RuntimeError("Не нашел ключевые слова ниши. Запусти /setup заново.")
+
+    context = SetupRunContext()
+    seed = resolve_exact_seed(seed_input, context=context)
+    if seed is None:
+        raise RuntimeError("Не смог заново подтвердить seed-профиль для подбора конкурентов.")
+
+    linked_accounts = [
+        seed_resolution
+        for seed_resolution in (
+            _seed_resolution_from_linked_account(account)
+            for account in UserLinkedAccount.objects.filter(user=user).order_by("id")
+        )
+        if seed_resolution is not None
+    ]
+    active_competitors = [
+        seed_resolution
+        for seed_resolution in (
+            _seed_resolution_from_user_link(link)
+            for link in list_active_user_competitor_links(user=user)
+        )
+        if seed_resolution is not None
+    ]
+    active_keys = {(item.platform, item.external_id) for item in active_competitors}
+
+    outcome = discover_competitors_for_onboarding(
+        keywords=keywords,
+        seed=seed,
+        competitors=active_competitors,
+        linked_accounts=linked_accounts,
+        max_youtube_search_calls=int(getattr(settings, "YT_MAX_SEARCH_CALLS_PER_SETUP", 5) or 5),
+        max_candidates_per_platform=int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20) or 20),
+        context=context,
+    )
+    candidates: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for candidate in outcome.candidates:
+        key = (candidate.platform, candidate.external_id)
+        if key in active_keys or key in seen:
+            continue
+        seen.add(key)
+        candidates.append(
+            {
+                "platform": candidate.platform,
+                "external_id": candidate.external_id,
+                "handle": candidate.handle,
+                "url": candidate.url,
+                "display_name": candidate.display_name,
+                "added_by": AddedBy.AUTO,
+                "meta": {},
+            }
+        )
+    return candidates, list(outcome.notes or [])
+
+
+def _build_picker_text(
+    *,
+    action_label: str,
+    selected_total: int,
+    counts: dict[str, int],
+    notes: list[str] | None = None,
+) -> str:
+    lines = [
+        action_label,
+        f"Выбрано: {selected_total}",
+        *_counts_lines(counts),
+    ]
+    extra = [str(item).strip() for item in (notes or []) if str(item).strip()]
+    if extra:
+        lines.append("")
+        lines.extend(extra[:5])
+    lines.append("Когда готово, нажми «Готово».")
+    return "\n".join(lines)
+
+
+async def _render_add_picker(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    candidates = list(data.get("competitor_add_candidates") or [])
+    selected_ids = {int(item) for item in (data.get("competitor_add_selected_ids") or [])}
+    page = int(data.get("competitor_add_page") or 0)
+    notes = [str(item) for item in (data.get("competitor_add_notes") or []) if str(item).strip()]
+    counts = {platform: 0 for platform in PLATFORM_ORDER}
+    for idx, candidate in enumerate(candidates):
+        if idx not in selected_ids:
+            continue
+        platform = str(candidate.get("platform") or "")
+        if platform:
+            counts[platform] = counts.get(platform, 0) + 1
+    rows = [
+        (idx, _competitor_display_name(candidate), str(candidate.get("url") or "").strip() or None)
+        for idx, candidate in enumerate(candidates)
+    ]
+    text = _build_picker_text(
+        action_label="Нашел кандидатов для добавления. Выбирай профили кнопками ниже.",
+        selected_total=len(selected_ids),
+        counts=counts,
+        notes=notes,
+    )
+    kb = kb_manage_competitors(
+        competitor_rows=rows,
+        selected_ids=selected_ids,
+        page=page,
+        page_size=_PAGE_SIZE,
+        toggle_prefix="compadd_toggle",
+        page_prefix="compadd_page",
+        all_callback="compadd_all",
+        done_callback="compadd_done",
+        done_text="Добавить",
+    )
+    try:
+        await message.edit_text(text, reply_markup=kb)
+    except Exception:
+        try:
+            await message.edit_reply_markup(reply_markup=kb)
+        except Exception:
+            return
+
+
+async def _render_remove_picker(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    rows = list(data.get("competitor_remove_rows") or [])
+    selected_ids = {int(item) for item in (data.get("competitor_remove_selected_ids") or [])}
+    page = int(data.get("competitor_remove_page") or 0)
+    counts = {platform: 0 for platform in PLATFORM_ORDER}
+    for row in rows:
+        if int(row.get("competitor_id") or 0) not in selected_ids:
+            continue
+        platform = str(row.get("platform") or "")
+        if platform:
+            counts[platform] = counts.get(platform, 0) + 1
+    kb_rows = [
+        (
+            int(row.get("competitor_id") or 0),
+            str(row.get("display_name") or "").strip(),
+            str(row.get("url") or "").strip() or None,
+        )
+        for row in rows
+        if int(row.get("competitor_id") or 0) > 0
+    ]
+    text = _build_picker_text(
+        action_label="Выбери конкурентов, которых нужно убрать из активного списка.",
+        selected_total=len(selected_ids),
+        counts=counts,
+    )
+    kb = kb_manage_competitors(
+        competitor_rows=kb_rows,
+        selected_ids=selected_ids,
+        page=page,
+        page_size=_PAGE_SIZE,
+        toggle_prefix="comprem_toggle",
+        page_prefix="comprem_page",
+        all_callback="comprem_all",
+        done_callback="comprem_done",
+        done_text="Убрать",
+    )
+    try:
+        await message.edit_text(text, reply_markup=kb)
+    except Exception:
+        try:
+            await message.edit_reply_markup(reply_markup=kb)
+        except Exception:
+            return
 
 
 @router.message(Command("competitors"))
@@ -90,8 +334,8 @@ async def cmd_competitors(message: Message) -> None:
         for index, link in enumerate(links, start=1):
             lines.append(f"{index}. {_format_competitor_name(link)}")
     lines.append("")
-    lines.append("/competitors_add - добавить вручную")
-    lines.append("/competitors_remove - убрать из списка")
+    lines.append("/competitors_add - выбрать из списка и добавить")
+    lines.append("/competitors_remove - выбрать из списка и убрать")
     await message.answer("\n".join(lines))
 
 
@@ -113,11 +357,31 @@ async def cmd_competitors_add(message: Message, state: FSMContext) -> None:
         await message.answer("Сначала заверши /setup.")
         return
 
-    await state.set_state(CompetitorManagementStates.WAIT_COMPETITORS_ADD_INPUT)
-    await message.answer(
-        "Пришли ссылки, хендлы или никнеймы по одному в строке.\n"
-        "Я добавлю найденные профили в активный список."
+    loading_message = await message.answer("Ищу кандидатов для добавления...")
+    try:
+        candidates, notes = await asyncio.to_thread(_load_add_candidates_for_user, user=user)
+    except Exception as exc:
+        await state.clear()
+        await loading_message.edit_text(f"Не смог подготовить список кандидатов: {exc}")
+        return
+    if not candidates:
+        await state.clear()
+        details = "\n".join(notes[:5])
+        text = "Не нашел новых кандидатов для добавления."
+        if details:
+            text = f"{text}\n\n{details}"
+        await loading_message.edit_text(text)
+        return
+
+    await state.update_data(
+        user_id=user.id,
+        competitor_add_candidates=candidates,
+        competitor_add_selected_ids=[],
+        competitor_add_page=0,
+        competitor_add_notes=notes,
     )
+    await state.set_state(CompetitorManagementStates.PICK_COMPETITORS_ADD)
+    await _render_add_picker(loading_message, state)
 
 
 @router.message(Command("competitors_remove"))
@@ -138,130 +402,215 @@ async def cmd_competitors_remove(message: Message, state: FSMContext) -> None:
         await message.answer("Сначала заверши /setup.")
         return
 
-    await state.set_state(CompetitorManagementStates.WAIT_COMPETITORS_REMOVE_INPUT)
-    await message.answer(
-        "Пришли ссылки, хендлы или никнеймы по одному в строке.\n"
-        "Я выключу их только из твоего активного списка."
-    )
-
-
-@router.message(CompetitorManagementStates.WAIT_COMPETITORS_ADD_INPUT)
-async def on_competitors_add_input(message: Message, state: FSMContext) -> None:
-    raw = (message.text or "").strip()
-    if not raw or not message.from_user:
-        await message.answer("Пришли хотя бы одну ссылку или хендл, по одному в строке.")
+    rows = await db_run(lambda: _active_link_rows(user=user))
+    if not rows:
+        await state.clear()
+        await message.answer("Активных конкурентов для удаления сейчас нет.")
         return
 
-    user, _ = await db_call(
-        upsert_tg_user,
-        telegram_user_id=message.from_user.id,
-        chat_id=message.chat.id,
-        username=message.from_user.username,
-        first_name=message.from_user.first_name,
-        last_name=message.from_user.last_name,
-        language_code=message.from_user.language_code,
+    picker = await message.answer("Готовлю список активных конкурентов...")
+    await state.update_data(
+        user_id=user.id,
+        competitor_remove_rows=rows,
+        competitor_remove_selected_ids=[],
+        competitor_remove_page=0,
     )
+    await state.set_state(CompetitorManagementStates.PICK_COMPETITORS_REMOVE)
+    await _render_remove_picker(picker, state)
+
+
+@router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_ADD, F.data == "noop")
+@router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_REMOVE, F.data == "noop")
+async def on_noop(cb: CallbackQuery) -> None:
+    await cb.answer()
+
+
+@router.callback_query(
+    CompetitorManagementStates.PICK_COMPETITORS_ADD,
+    F.data == GLOBAL_BACK_CALLBACK,
+)
+@router.callback_query(
+    CompetitorManagementStates.PICK_COMPETITORS_REMOVE,
+    F.data == GLOBAL_BACK_CALLBACK,
+)
+async def on_back(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    await state.clear()
+    if cb.message:
+        await cb.message.answer("Ок, ничего не менял.")
+
+
+@router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_ADD, F.data.startswith("compadd_page:"))
+async def on_add_page(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    if not cb.message:
+        return
+    try:
+        page = int(str(cb.data).split(":", 1)[1])
+    except Exception:
+        return
+    await state.update_data(competitor_add_page=max(0, page))
+    await _render_add_picker(cb.message, state)
+
+
+@router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_ADD, F.data.startswith("compadd_toggle:"))
+async def on_add_toggle(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    if not cb.message:
+        return
+    try:
+        idx = int(str(cb.data).split(":", 1)[1])
+    except Exception:
+        return
+    data = await state.get_data()
+    selected = {int(item) for item in (data.get("competitor_add_selected_ids") or [])}
+    if idx in selected:
+        selected.remove(idx)
+    else:
+        selected.add(idx)
+    await state.update_data(competitor_add_selected_ids=sorted(selected))
+    await _render_add_picker(cb.message, state)
+
+
+@router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_ADD, F.data == "compadd_all")
+async def on_add_all(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    if not cb.message:
+        return
+    data = await state.get_data()
+    candidates = list(data.get("competitor_add_candidates") or [])
+    await state.update_data(competitor_add_selected_ids=list(range(len(candidates))))
+    await _render_add_picker(cb.message, state)
+
+
+@router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_ADD, F.data == "compadd_done")
+async def on_add_done(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    if not cb.message:
+        return
+    data = await state.get_data()
+    selected_ids = {int(item) for item in (data.get("competitor_add_selected_ids") or [])}
+    candidates = list(data.get("competitor_add_candidates") or [])
+    if not selected_ids:
+        await cb.answer("Сначала выбери хотя бы одного конкурента.", show_alert=True)
+        return
+
+    user = await db_call(TgUser.objects.get, id=data["user_id"])
     counts = await db_run(lambda: get_active_user_competitor_counts(user=user))
-    active_keys = {
-        (str(link.competitor.platform or ""), str(link.competitor.external_id or ""))
-        for link in await db_run(lambda: list_active_user_competitor_links(user=user))
-    }
-    limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
     added = 0
     skipped = 0
     errors: list[str] = []
+    limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
 
-    for line in [item.strip() for item in raw.splitlines() if item.strip()]:
-        try:
-            seed = await asyncio.to_thread(resolve_exact_seed, line)
-        except SeedResolveError as exc:
-            errors.append(f"{line}: {exc}")
+    for idx in sorted(selected_ids):
+        if idx < 0 or idx >= len(candidates):
             continue
-        except Exception as exc:
-            errors.append(f"{line}: {exc}")
+        candidate = candidates[idx]
+        platform = str(candidate.get("platform") or "")
+        if counts.get(platform, 0) >= limit:
+            errors.append(f"{candidate.get('display_name') or candidate.get('external_id')}: достигнут лимит для {PLATFORM_LABELS.get(platform, platform)} ({limit})")
             continue
-        if not seed:
-            errors.append(f"{line}: профиль не подтвержден")
-            continue
-
-        key = (seed.platform, seed.external_id)
-        if key in active_keys:
-            skipped += 1
-            continue
-        if counts.get(seed.platform, 0) >= limit:
-            errors.append(f"{line}: достигнут лимит для {PLATFORM_LABELS.get(seed.platform, seed.platform)} ({limit})")
-            continue
-
         await db_call(
             upsert_competitor,
             user=user,
-            platform=seed.platform,
-            external_id=seed.external_id,
-            handle=seed.handle,
-            url=seed.url,
-            display_name=seed.title,
-            added_by=AddedBy.MANUAL,
-            meta=_seed_meta(seed),
+            platform=platform,
+            external_id=str(candidate.get("external_id") or ""),
+            handle=candidate.get("handle"),
+            url=str(candidate.get("url") or ""),
+            display_name=candidate.get("display_name"),
+            added_by=str(candidate.get("added_by") or AddedBy.AUTO),
+            meta=candidate.get("meta") if isinstance(candidate.get("meta"), dict) else None,
         )
-        active_keys.add(key)
-        counts[seed.platform] = counts.get(seed.platform, 0) + 1
+        counts[platform] = counts.get(platform, 0) + 1
         added += 1
 
-    await state.set_state(None)
-    await message.answer(_build_add_remove_summary(action="Добавлено", changed=added, skipped=skipped, errors=errors, counts=counts))
+    skipped = len(selected_ids) - added - len(errors)
+    await state.clear()
+    await cb.message.answer(
+        _build_add_remove_summary(
+            action="Добавлено",
+            changed=added,
+            skipped=max(0, skipped),
+            errors=errors,
+            counts=counts,
+        )
+    )
 
 
-@router.message(CompetitorManagementStates.WAIT_COMPETITORS_REMOVE_INPUT)
-async def on_competitors_remove_input(message: Message, state: FSMContext) -> None:
-    raw = (message.text or "").strip()
-    if not raw or not message.from_user:
-        await message.answer("Пришли хотя бы одну ссылку или хендл, по одному в строке.")
+@router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_REMOVE, F.data.startswith("comprem_page:"))
+async def on_remove_page(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    if not cb.message:
+        return
+    try:
+        page = int(str(cb.data).split(":", 1)[1])
+    except Exception:
+        return
+    await state.update_data(competitor_remove_page=max(0, page))
+    await _render_remove_picker(cb.message, state)
+
+
+@router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_REMOVE, F.data.startswith("comprem_toggle:"))
+async def on_remove_toggle(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    if not cb.message:
+        return
+    try:
+        competitor_id = int(str(cb.data).split(":", 1)[1])
+    except Exception:
+        return
+    data = await state.get_data()
+    selected = {int(item) for item in (data.get("competitor_remove_selected_ids") or [])}
+    if competitor_id in selected:
+        selected.remove(competitor_id)
+    else:
+        selected.add(competitor_id)
+    await state.update_data(competitor_remove_selected_ids=sorted(selected))
+    await _render_remove_picker(cb.message, state)
+
+
+@router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_REMOVE, F.data == "comprem_all")
+async def on_remove_all(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    if not cb.message:
+        return
+    data = await state.get_data()
+    rows = list(data.get("competitor_remove_rows") or [])
+    selected = [int(row.get("competitor_id") or 0) for row in rows if int(row.get("competitor_id") or 0) > 0]
+    await state.update_data(competitor_remove_selected_ids=selected)
+    await _render_remove_picker(cb.message, state)
+
+
+@router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_REMOVE, F.data == "comprem_done")
+async def on_remove_done(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    if not cb.message:
+        return
+    data = await state.get_data()
+    selected_ids = {int(item) for item in (data.get("competitor_remove_selected_ids") or [])}
+    if not selected_ids:
+        await cb.answer("Сначала выбери хотя бы одного конкурента.", show_alert=True)
         return
 
-    user, _ = await db_call(
-        upsert_tg_user,
-        telegram_user_id=message.from_user.id,
-        chat_id=message.chat.id,
-        username=message.from_user.username,
-        first_name=message.from_user.first_name,
-        last_name=message.from_user.last_name,
-        language_code=message.from_user.language_code,
-    )
-    active_links = await db_run(lambda: list_active_user_competitor_links(user=user))
-    active_by_key = _active_link_by_key(active_links=active_links)
-    removed_ids: list[int] = []
-    removed = 0
-    skipped = 0
-    errors: list[str] = []
-
-    for line in [item.strip() for item in raw.splitlines() if item.strip()]:
-        match = find_active_competitor_link_match(active_links=list(active_by_key.values()), raw_input=line)
-        if match is None:
-            try:
-                seed = await asyncio.to_thread(resolve_exact_seed, line)
-            except SeedResolveError as exc:
-                errors.append(f"{line}: {exc}")
-                continue
-            except Exception as exc:
-                errors.append(f"{line}: {exc}")
-                continue
-            if not seed:
-                skipped += 1
-                continue
-            match = active_by_key.pop((seed.platform, seed.external_id), None)
-            if match is None:
-                skipped += 1
-                continue
-        else:
-            active_by_key.pop((match.competitor.platform, match.competitor.external_id), None)
-
-        removed_ids.append(match.competitor_id)
-        removed += 1
-
-    await db_run(lambda: deactivate_user_competitors(user=user, competitor_ids=removed_ids))
+    user = await db_call(TgUser.objects.get, id=data["user_id"])
+    removed = await db_run(lambda: deactivate_user_competitors(user=user, competitor_ids=sorted(selected_ids)))
     counts = await db_run(lambda: get_active_user_competitor_counts(user=user))
-    await state.set_state(None)
-    await message.answer(_build_add_remove_summary(action="Удалено", changed=removed, skipped=skipped, errors=errors, counts=counts))
+    await state.clear()
+    await cb.message.answer(
+        _build_add_remove_summary(
+            action="Удалено",
+            changed=removed,
+            skipped=max(0, len(selected_ids) - removed),
+            errors=[],
+            counts=counts,
+        )
+    )
+
+
+@router.message(CompetitorManagementStates.PICK_COMPETITORS_ADD)
+@router.message(CompetitorManagementStates.PICK_COMPETITORS_REMOVE)
+async def on_picker_text(message: Message) -> None:
+    await message.answer("Выбери профили кнопками ниже.")
 
 
 def _build_add_remove_summary(
