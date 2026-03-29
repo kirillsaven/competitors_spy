@@ -66,7 +66,7 @@ def test_refresh_competitor_dispatches_by_platform(monkeypatch):
     }
 
 
-def test_refresh_youtube_competitor_keeps_shorts_only(db, monkeypatch):
+def test_refresh_youtube_competitor_keeps_shorts_and_long_videos(db, monkeypatch):
     competitor = Competitor.objects.create(
         platform=Platform.YOUTUBE,
         external_id="UCshorts123",
@@ -118,15 +118,18 @@ def test_refresh_youtube_competitor_keeps_shorts_only(db, monkeypatch):
         captured_at=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
     )
 
-    assert [item.external_id for item in items] == ["short-1"]
-    content_item = ContentItem.objects.get(platform=Platform.YOUTUBE, external_id="short-1")
-    snapshot = MetricSnapshot.objects.get(content_item=content_item)
-    assert content_item.meta["content_type"] == "short"
-    assert snapshot.views == 1200
-    assert not ContentItem.objects.filter(platform=Platform.YOUTUBE, external_id="long-1").exists()
+    assert [item.external_id for item in items] == ["short-1", "long-1"]
+    short_item = ContentItem.objects.get(platform=Platform.YOUTUBE, external_id="short-1")
+    long_item = ContentItem.objects.get(platform=Platform.YOUTUBE, external_id="long-1")
+    short_snapshot = MetricSnapshot.objects.get(content_item=short_item)
+    long_snapshot = MetricSnapshot.objects.get(content_item=long_item)
+    assert short_item.meta["content_type"] == "short"
+    assert long_item.meta["content_type"] == "video"
+    assert short_snapshot.views == 1200
+    assert long_snapshot.views == 8200
 
 
-def test_refresh_youtube_competitor_raises_when_no_recent_shorts_exist(db, monkeypatch):
+def test_refresh_youtube_competitor_keeps_long_videos_when_no_recent_shorts_exist(db, monkeypatch):
     competitor = Competitor.objects.create(
         platform=Platform.YOUTUBE,
         external_id="UClong123",
@@ -157,9 +160,39 @@ def test_refresh_youtube_competitor_raises_when_no_recent_shorts_exist(db, monke
 
     monkeypatch.setattr(collector, "_get_youtube_client", lambda: FakeClient())
 
+    items = collector.refresh_youtube_competitor(
+        competitor=competitor,
+        mode="incremental",
+        captured_at=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+    )
+
+    assert [item.external_id for item in items] == ["long-1"]
+    content_item = ContentItem.objects.get(platform=Platform.YOUTUBE, external_id="long-1")
+    snapshot = MetricSnapshot.objects.get(content_item=content_item)
+    assert content_item.meta["content_type"] == "video"
+    assert snapshot.views == 8200
+
+
+def test_refresh_youtube_competitor_raises_when_no_recent_uploads_have_usable_metrics(db, monkeypatch):
+    competitor = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="UCempty123",
+        handle="empty-channel",
+        meta={"uploads_playlist_id": "UUempty123"},
+    )
+
+    class FakeClient:
+        def playlist_items(self, *, playlist_id, max_results):
+            return []
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(collector, "_get_youtube_client", lambda: FakeClient())
+
     with pytest.raises(
         collector.CollectorError,
-        match="YouTube channel returned no recent Shorts with usable metrics: channel_id=UClong123",
+        match="YouTube channel returned no recent uploads with usable metrics: channel_id=UCempty123",
     ):
         collector.refresh_youtube_competitor(
             competitor=competitor,
