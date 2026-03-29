@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from asgiref.sync import async_to_sync, sync_to_async
 
-from botapp.handlers import competitors
+from botapp.handlers import common, competitors
 from botapp.state import CompetitorManagementStates
 from tracking.adapters.base import SeedResolution
 from tracking.models import Competitor, Platform, Schedule, TgUser, UserCompetitor
@@ -79,6 +79,21 @@ async def _db_run(func, *args, **kwargs):
 
 
 @pytest.mark.django_db
+def test_start_and_help_commands_describe_manual_add_and_suggestions(monkeypatch):
+    monkeypatch.setattr(common, "db_call", _db_call)
+
+    start_message = DummyMessage(user_id=9)
+    async_to_sync(common.cmd_start)(start_message)
+    assert "/competitors_add - добавить конкурентов вручную" in start_message.answers[-1]
+    assert "/competitors_suggest - предложить кандидатов" in start_message.answers[-1]
+
+    help_message = DummyMessage(user_id=9)
+    async_to_sync(common.cmd_help)(help_message)
+    assert "/competitors_add - добавить конкурентов вручную" in help_message.answers[-1]
+    assert "/competitors_suggest - показать кандидатов для добавления" in help_message.answers[-1]
+
+
+@pytest.mark.django_db
 def test_competitors_command_groups_active_competitors(monkeypatch):
     user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=11, tg_chat_id=11)
     async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
@@ -110,12 +125,13 @@ def test_competitors_command_groups_active_competitors(monkeypatch):
     assert "1. MrBeast (@mrbeast)" in message.answers[-1]
     assert "TikTok (0):" in message.answers[-1]
     assert "Instagram (1):" in message.answers[-1]
-    assert "/competitors_add - выбрать из списка и добавить" in message.answers[-1]
+    assert "/competitors_add - добавить вручную по ссылке или хэндлу" in message.answers[-1]
+    assert "/competitors_suggest - выбрать из списка и добавить" in message.answers[-1]
     assert "/competitors_remove - выбрать из списка и убрать" in message.answers[-1]
 
 
 @pytest.mark.django_db
-def test_competitors_add_reactivates_from_picker(monkeypatch):
+def test_competitors_suggest_reactivates_from_picker(monkeypatch):
     user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=21, tg_chat_id=21)
     async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
     competitor_obj = async_to_sync(sync_to_async(Competitor.objects.create, thread_sensitive=True))(
@@ -154,7 +170,7 @@ def test_competitors_add_reactivates_from_picker(monkeypatch):
 
     state = DummyState()
     message = DummyMessage(user_id=21)
-    async_to_sync(competitors.cmd_competitors_add)(message, state)
+    async_to_sync(competitors.cmd_competitors_suggest)(message, state)
 
     assert state.state == CompetitorManagementStates.PICK_COMPETITORS_ADD
 
@@ -176,7 +192,7 @@ def test_competitors_add_reactivates_from_picker(monkeypatch):
 
 
 @pytest.mark.django_db
-def test_competitor_add_manual_enters_wait_state(monkeypatch):
+def test_competitors_add_enters_manual_wait_state(monkeypatch):
     user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=22, tg_chat_id=22)
     async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
 
@@ -185,6 +201,22 @@ def test_competitor_add_manual_enters_wait_state(monkeypatch):
 
     state = DummyState()
     message = DummyMessage(user_id=22)
+    async_to_sync(competitors.cmd_competitors_add)(message, state)
+
+    assert state.state == CompetitorManagementStates.WAIT_COMPETITORS_ADD_INPUT
+    assert "Отправь ссылки или хэндлы конкурентов" in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_competitor_add_manual_alias_enters_wait_state(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=25, tg_chat_id=25)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+
+    state = DummyState()
+    message = DummyMessage(user_id=25)
     async_to_sync(competitors.cmd_competitor_add_manual)(message, state)
 
     assert state.state == CompetitorManagementStates.WAIT_COMPETITORS_ADD_INPUT

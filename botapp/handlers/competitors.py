@@ -347,14 +347,14 @@ async def cmd_competitors(message: Message) -> None:
         for index, link in enumerate(links, start=1):
             lines.append(f"{index}. {_format_competitor_name(link)}")
     lines.append("")
-    lines.append("/competitors_add - выбрать из списка и добавить")
-    lines.append("/competitor_add - добавить вручную по ссылке или хэндлу")
+    lines.append("/competitors_add - добавить вручную по ссылке или хэндлу")
+    lines.append("/competitors_suggest - выбрать из списка и добавить")
     lines.append("/competitors_remove - выбрать из списка и убрать")
     await message.answer("\n".join(lines))
 
 
-@router.message(Command("competitors_add"))
-async def cmd_competitors_add(message: Message, state: FSMContext) -> None:
+@router.message(Command("competitors_suggest"))
+async def cmd_competitors_suggest(message: Message, state: FSMContext) -> None:
     if not message.from_user:
         return
     user, _ = await db_call(
@@ -398,8 +398,9 @@ async def cmd_competitors_add(message: Message, state: FSMContext) -> None:
     await _render_add_picker(loading_message, state)
 
 
+@router.message(Command("competitors_add"))
 @router.message(Command("competitor_add"))
-async def cmd_competitor_add_manual(message: Message, state: FSMContext) -> None:
+async def cmd_competitors_add(message: Message, state: FSMContext) -> None:
     if not message.from_user:
         return
     user, _ = await db_call(
@@ -419,6 +420,9 @@ async def cmd_competitor_add_manual(message: Message, state: FSMContext) -> None
     await state.update_data(user_id=user.id)
     await state.set_state(CompetitorManagementStates.WAIT_COMPETITORS_ADD_INPUT)
     await message.answer(_manual_add_prompt_text())
+
+
+cmd_competitor_add_manual = cmd_competitors_add
 
 
 @router.message(Command("competitors_remove"))
