@@ -33,6 +33,7 @@ from tracking.services.competitor_service import (
     upsert_competitor,
 )
 from tracking.services.platform_onboarding import discover_competitors_for_onboarding
+from tracking.services.platform_onboarding import youtube_profile_recent_shorts_gate_status
 from tracking.services.seed_resolver import resolve_exact_seed
 from tracking.services.setup_runtime import SetupRunContext
 
@@ -216,6 +217,18 @@ def _build_picker_text(
     return "\n".join(lines)
 
 
+def _manual_add_prompt_text() -> str:
+    return (
+        "Отправь ссылки или хэндлы конкурентов, по одному на строку.\n"
+        "Поддерживаются YouTube, TikTok и Instagram.\n"
+        "Для YouTube добавлю только канал, который проходит правило: минимум 2 Shorts за последние 60 дней."
+    )
+
+
+def _manual_add_inputs(raw_text: str) -> list[str]:
+    return [line.strip() for line in str(raw_text or "").splitlines() if line.strip()]
+
+
 async def _render_add_picker(message: Message, state: FSMContext) -> None:
     data = await state.get_data()
     candidates = list(data.get("competitor_add_candidates") or [])
@@ -335,6 +348,7 @@ async def cmd_competitors(message: Message) -> None:
             lines.append(f"{index}. {_format_competitor_name(link)}")
     lines.append("")
     lines.append("/competitors_add - выбрать из списка и добавить")
+    lines.append("/competitor_add - добавить вручную по ссылке или хэндлу")
     lines.append("/competitors_remove - выбрать из списка и убрать")
     await message.answer("\n".join(lines))
 
@@ -382,6 +396,29 @@ async def cmd_competitors_add(message: Message, state: FSMContext) -> None:
     )
     await state.set_state(CompetitorManagementStates.PICK_COMPETITORS_ADD)
     await _render_add_picker(loading_message, state)
+
+
+@router.message(Command("competitor_add"))
+async def cmd_competitor_add_manual(message: Message, state: FSMContext) -> None:
+    if not message.from_user:
+        return
+    user, _ = await db_call(
+        upsert_tg_user,
+        telegram_user_id=message.from_user.id,
+        chat_id=message.chat.id,
+        username=message.from_user.username,
+        first_name=message.from_user.first_name,
+        last_name=message.from_user.last_name,
+        language_code=message.from_user.language_code,
+    )
+    setup_complete = await db_run(lambda: _is_setup_complete(user=user))
+    if not setup_complete:
+        await message.answer("Сначала заверши /setup.")
+        return
+    await state.clear()
+    await state.update_data(user_id=user.id)
+    await state.set_state(CompetitorManagementStates.WAIT_COMPETITORS_ADD_INPUT)
+    await message.answer(_manual_add_prompt_text())
 
 
 @router.message(Command("competitors_remove"))
@@ -611,6 +648,77 @@ async def on_remove_done(cb: CallbackQuery, state: FSMContext) -> None:
 @router.message(CompetitorManagementStates.PICK_COMPETITORS_REMOVE)
 async def on_picker_text(message: Message) -> None:
     await message.answer("Выбери профили кнопками ниже.")
+
+
+@router.message(CompetitorManagementStates.WAIT_COMPETITORS_ADD_INPUT)
+async def on_competitor_add_manual_input(message: Message, state: FSMContext) -> None:
+    data = await state.get_data()
+    user = await db_call(TgUser.objects.get, id=data["user_id"])
+    raw_inputs = _manual_add_inputs(message.text or "")
+    if not raw_inputs:
+        await message.answer("Не увидел ни одной ссылки или хэндла. Отправь хотя бы один профиль.")
+        return
+
+    counts = await db_run(lambda: get_active_user_competitor_counts(user=user))
+    limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
+    added = 0
+    errors: list[str] = []
+    context = SetupRunContext()
+
+    for raw_input in raw_inputs:
+        try:
+            seed = await asyncio.to_thread(resolve_exact_seed, raw_input, context)
+        except Exception as exc:
+            errors.append(f"{raw_input}: не смог подтвердить профиль ({exc})")
+            continue
+        if seed is None:
+            errors.append(f"{raw_input}: не смог подтвердить профиль")
+            continue
+        if counts.get(seed.platform, 0) >= limit:
+            errors.append(
+                f"{seed.title or seed.external_id}: достигнут лимит для {PLATFORM_LABELS.get(seed.platform, seed.platform)} ({limit})"
+            )
+            continue
+        if seed.platform == Platform.YOUTUBE:
+            passes_gate, recent_count = await asyncio.to_thread(
+                youtube_profile_recent_shorts_gate_status,
+                external_id=seed.external_id,
+                handle=seed.handle,
+                url=seed.url,
+                display_name=seed.title,
+                context=context,
+            )
+            if not passes_gate:
+                errors.append(
+                    f"{seed.title or seed.external_id}: YouTube-канал не прошел фильтр активности "
+                    f"(shorts за 60 дней: {recent_count}, нужно минимум 2)"
+                )
+                continue
+        await db_call(
+            upsert_competitor,
+            user=user,
+            platform=seed.platform,
+            external_id=seed.external_id,
+            handle=seed.handle,
+            url=seed.url,
+            display_name=seed.title,
+            added_by=AddedBy.MANUAL,
+            meta=_seed_meta(seed),
+        )
+        counts[seed.platform] = counts.get(seed.platform, 0) + 1
+        added += 1
+
+    skipped = max(0, len(raw_inputs) - added - len(errors))
+    await state.clear()
+    await message.answer(
+        _build_add_remove_summary(
+            action="Добавлено вручную",
+            changed=added,
+            skipped=skipped,
+            errors=errors,
+            counts=counts,
+        )
+    )
 
 
 def _build_add_remove_summary(

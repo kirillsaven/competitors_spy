@@ -7,6 +7,7 @@ from asgiref.sync import async_to_sync, sync_to_async
 
 from botapp.handlers import competitors
 from botapp.state import CompetitorManagementStates
+from tracking.adapters.base import SeedResolution
 from tracking.models import Competitor, Platform, Schedule, TgUser, UserCompetitor
 from tracking.services import report_pipeline
 
@@ -172,6 +173,98 @@ def test_competitors_add_reactivates_from_picker(monkeypatch):
     assert "Пропущено: 0" in message.answers[-1]
     assert "Ошибки: 0" in message.answers[-1]
     assert "YouTube: 1" in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_competitor_add_manual_enters_wait_state(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=22, tg_chat_id=22)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+
+    state = DummyState()
+    message = DummyMessage(user_id=22)
+    async_to_sync(competitors.cmd_competitor_add_manual)(message, state)
+
+    assert state.state == CompetitorManagementStates.WAIT_COMPETITORS_ADD_INPUT
+    assert "Отправь ссылки или хэндлы конкурентов" in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_competitor_add_manual_adds_valid_resolved_seed(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=23, tg_chat_id=23)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+    monkeypatch.setattr(
+        competitors,
+        "resolve_exact_seed",
+        lambda raw_input, context=None: SeedResolution(
+            platform=Platform.YOUTUBE,
+            external_id="yt-manual",
+            handle="manual_creator",
+            url="https://www.youtube.com/@manual_creator",
+            title="Manual Creator",
+            description="desc",
+            uploads_playlist_id="UUmanual",
+        ),
+    )
+    monkeypatch.setattr(competitors, "youtube_profile_recent_shorts_gate_status", lambda **kwargs: (True, 3))
+
+    state = DummyState()
+    async_to_sync(state.update_data)(user_id=user.id)
+    async_to_sync(state.set_state)(CompetitorManagementStates.WAIT_COMPETITORS_ADD_INPUT)
+    message = DummyMessage(user_id=23, text="https://www.youtube.com/@manual_creator")
+
+    async_to_sync(competitors.on_competitor_add_manual_input)(message, state)
+
+    link = async_to_sync(sync_to_async(UserCompetitor.objects.select_related("competitor").get, thread_sensitive=True))(user=user)
+    assert state.state is None
+    assert link.added_by == "manual"
+    assert link.competitor.external_id == "yt-manual"
+    assert link.competitor.meta["uploads_playlist_id"] == "UUmanual"
+    assert "Добавлено вручную: 1" in message.answers[-1]
+    assert "Ошибки: 0" in message.answers[-1]
+    assert "YouTube: 1" in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_competitor_add_manual_rejects_youtube_without_recent_shorts(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=24, tg_chat_id=24)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+    monkeypatch.setattr(
+        competitors,
+        "resolve_exact_seed",
+        lambda raw_input, context=None: SeedResolution(
+            platform=Platform.YOUTUBE,
+            external_id="yt-reject",
+            handle="reject_creator",
+            url="https://www.youtube.com/@reject_creator",
+            title="Reject Creator",
+            description="desc",
+            uploads_playlist_id="UUreject",
+        ),
+    )
+    monkeypatch.setattr(competitors, "youtube_profile_recent_shorts_gate_status", lambda **kwargs: (False, 1))
+
+    state = DummyState()
+    async_to_sync(state.update_data)(user_id=user.id)
+    async_to_sync(state.set_state)(CompetitorManagementStates.WAIT_COMPETITORS_ADD_INPUT)
+    message = DummyMessage(user_id=24, text="@reject_creator")
+
+    async_to_sync(competitors.on_competitor_add_manual_input)(message, state)
+
+    count = async_to_sync(sync_to_async(UserCompetitor.objects.filter(user=user).count, thread_sensitive=True))()
+    assert state.state is None
+    assert count == 0
+    assert "Добавлено вручную: 0" in message.answers[-1]
+    assert "Ошибки: 1" in message.answers[-1]
+    assert "shorts за 60 дней: 1" in message.answers[-1]
 
 
 @pytest.mark.django_db
