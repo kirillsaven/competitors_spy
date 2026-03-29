@@ -65,6 +65,7 @@ class TgUser(models.Model):
     tg_language_code = models.CharField(max_length=32, blank=True, default="")
     timezone_str = models.CharField(max_length=64, default=_default_timezone_str)
     tz_source = models.CharField(max_length=16, choices=TzSource.choices, default=TzSource.DEFAULT)
+    report_stopwords = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

@@ -538,3 +538,161 @@ def test_build_report_preview_excludes_items_already_shown_in_regular_reports(db
     )
 
     assert preview.payload["scored_external_ids"] == ["fresh-1"]
+
+
+def test_build_report_preview_excludes_stopword_matches_only_for_that_user(db, monkeypatch):
+    user_blocked = TgUser.objects.create(tg_user_id=16, tg_chat_id=16, timezone_str="UTC", report_stopwords=["spoiler"])
+    user_plain = TgUser.objects.create(tg_user_id=17, tg_chat_id=17, timezone_str="UTC")
+    competitor = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="yt-stopword",
+        handle="creator",
+        url="https://www.youtube.com/@creator",
+        display_name="Creator",
+    )
+    UserCompetitor.objects.create(user=user_blocked, competitor=competitor, is_active=True)
+    UserCompetitor.objects.create(user=user_plain, competitor=competitor, is_active=True)
+    item = competitor.content_items.create(
+        platform=Platform.YOUTUBE,
+        external_id="stopword-item",
+        url="https://www.youtube.com/watch?v=stopword-item",
+        title="Major Spoiler video",
+        description="desc",
+        published_at=datetime(2026, 3, 24, 11, 0, tzinfo=UTC),
+        duration_seconds=30,
+        meta={"content_type": "short"},
+    )
+
+    scored_item = SimpleNamespace(
+        content_item=item,
+        competitor=competitor,
+        views_end=5000,
+        likes_end=100,
+        comments_end=10,
+        shares_end=1,
+        velocity=250.0,
+        score_type="delta",
+        delta_views=1000,
+        delta_hours=4.0,
+        er_end=0.022,
+        score=3.0,
+    )
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", lambda **kwargs: [item])
+    monkeypatch.setattr(report_pipeline, "compute_competitor_baseline", lambda **kwargs: SimpleNamespace(vph_median=1.0, rph_median=1.0))
+    monkeypatch.setattr(report_pipeline, "score_items_for_period", lambda **kwargs: [scored_item])
+    monkeypatch.setattr(
+        report_pipeline,
+        "build_report_payload",
+        lambda **kwargs: {
+            "sections": [],
+            "scored_external_ids": [entry.content_item.external_id for entry in kwargs["scored"]],
+        },
+    )
+    monkeypatch.setattr(report_pipeline, "render_report_text", lambda **kwargs: "report")
+
+    blocked_preview = build_report_preview(
+        user=user_blocked,
+        period_start=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 12, 0, tzinfo=UTC),
+    )
+    plain_preview = build_report_preview(
+        user=user_plain,
+        period_start=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 12, 0, tzinfo=UTC),
+    )
+
+    assert blocked_preview.payload["scored_external_ids"] == []
+    assert plain_preview.payload["scored_external_ids"] == ["stopword-item"]
+
+
+def test_build_setup_verification_preview_uses_latest_visible_item_when_newest_is_blocked(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=18, tg_chat_id=18, timezone_str="UTC", report_stopwords=["spoiler"])
+    competitor = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="yt-setup-stopword",
+        handle="creator",
+        url="https://www.youtube.com/@creator",
+        display_name="Creator",
+    )
+    UserCompetitor.objects.create(user=user, competitor=competitor, is_active=True)
+    now = datetime(2026, 3, 24, 12, 0, tzinfo=UTC)
+
+    def fake_refresh(*, competitor, mode, captured_at, provider_fetch_cache=None):
+        visible = competitor.content_items.create(
+            platform=competitor.platform,
+            external_id="visible-item",
+            url="https://www.youtube.com/watch?v=visible-item",
+            title="Visible short",
+            description="desc",
+            published_at=now - timedelta(hours=3),
+            duration_seconds=30,
+            meta={"content_type": "short"},
+        )
+        blocked = competitor.content_items.create(
+            platform=competitor.platform,
+            external_id="blocked-item",
+            url="https://www.youtube.com/watch?v=blocked-item",
+            title="Big spoiler short",
+            description="desc",
+            published_at=now - timedelta(hours=1),
+            duration_seconds=30,
+            meta={"content_type": "short"},
+        )
+        for item, views in ((visible, 1000), (blocked, 2000)):
+            MetricSnapshot.objects.create(
+                content_item=item,
+                captured_at=now,
+                views=views,
+                likes=100,
+                comments=10,
+                shares=5,
+            )
+        return [visible, blocked]
+
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", fake_refresh)
+
+    preview = build_setup_verification_preview(user=user, period_end=now)
+
+    first_entry = preview.payload["sections"][0]["entries"][0]
+    assert first_entry["latest_item"]["title"] == "Visible short"
+
+
+def test_build_setup_verification_preview_reports_when_all_short_items_are_hidden_by_stopwords(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=19, tg_chat_id=19, timezone_str="UTC", report_stopwords=["spoiler"])
+    competitor = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="yt-setup-hidden",
+        handle="creator",
+        url="https://www.youtube.com/@creator",
+        display_name="Creator",
+    )
+    UserCompetitor.objects.create(user=user, competitor=competitor, is_active=True)
+    now = datetime(2026, 3, 24, 12, 0, tzinfo=UTC)
+
+    def fake_refresh(*, competitor, mode, captured_at, provider_fetch_cache=None):
+        item = competitor.content_items.create(
+            platform=competitor.platform,
+            external_id="blocked-only-item",
+            url="https://www.youtube.com/watch?v=blocked-only-item",
+            title="Only spoiler short",
+            description="desc",
+            published_at=now - timedelta(hours=1),
+            duration_seconds=30,
+            meta={"content_type": "short"},
+        )
+        MetricSnapshot.objects.create(
+            content_item=item,
+            captured_at=now,
+            views=2000,
+            likes=100,
+            comments=10,
+            shares=5,
+        )
+        return [item]
+
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", fake_refresh)
+
+    preview = build_setup_verification_preview(user=user, period_end=now)
+
+    first_entry = preview.payload["sections"][0]["entries"][0]
+    assert first_entry["reason"] == "все подходящие короткие видео скрыты стоп-словами пользователя"

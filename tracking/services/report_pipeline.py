@@ -29,6 +29,11 @@ from tracking.services.platform_onboarding import (
     fetch_tiktok_profile_feeds_cached,
 )
 from tracking.services.provider_runtime import ProviderFetchCache
+from tracking.services.report_filters import (
+    filter_content_items_for_stopwords,
+    filter_scored_items_for_stopwords,
+    get_user_report_stopwords,
+)
 from tracking.services.reporting import (
     build_report_payload,
     build_setup_verification_payload,
@@ -256,6 +261,7 @@ def build_report_preview(
     provider_fetch_cache: ProviderFetchCache | None = None,
 ) -> ReportPreview:
     competitors = get_active_competitors(user=user)
+    user_stopwords = get_user_report_stopwords(user=user)
     provider_fetch_cache = _ensure_provider_fetch_cache(
         provider_fetch_cache=provider_fetch_cache,
         purpose="report_collection",
@@ -309,6 +315,7 @@ def build_report_preview(
         period_end=period_end,
     )
     scored = _exclude_previously_reported_items(user=user, scored=scored)
+    scored = filter_scored_items_for_stopwords(scored=scored, stopwords=user_stopwords)
 
     payload = build_report_payload(
         scored=scored,
@@ -331,6 +338,7 @@ def build_setup_verification_preview(
     provider_fetch_cache: ProviderFetchCache | None = None,
 ) -> ReportPreview:
     competitors = get_active_competitors(user=user)
+    user_stopwords = get_user_report_stopwords(user=user)
     provider_fetch_cache = _ensure_provider_fetch_cache(
         provider_fetch_cache=provider_fetch_cache,
         purpose="setup_verification",
@@ -354,7 +362,11 @@ def build_setup_verification_preview(
                 captured_at=period_end,
                 provider_fetch_cache=provider_fetch_cache,
             )
-            entry = _build_setup_competitor_entry(competitor=competitor, refreshed_items=refreshed_items)
+            entry = _build_setup_competitor_entry(
+                competitor=competitor,
+                refreshed_items=refreshed_items,
+                user_stopwords=user_stopwords,
+            )
         except Exception as exc:
             entry = _build_failed_setup_competitor_entry(competitor=competitor, reason=str(exc))
         section_entries[competitor.platform].append(entry)
@@ -484,12 +496,23 @@ def _build_failed_setup_competitor_entry(*, competitor: Competitor, reason: str)
     }
 
 
-def _build_setup_competitor_entry(*, competitor: Competitor, refreshed_items: list[ContentItem]) -> dict[str, Any]:
+def _build_setup_competitor_entry(
+    *,
+    competitor: Competitor,
+    refreshed_items: list[ContentItem],
+    user_stopwords: list[str],
+) -> dict[str, Any]:
     eligible_items = [item for item in refreshed_items if _is_setup_short_form_item(item)]
     if not eligible_items:
         return _build_failed_setup_competitor_entry(
             competitor=competitor,
             reason="нет подходящих коротких видео для базовой проверки",
+        )
+    visible_items = filter_content_items_for_stopwords(items=eligible_items, stopwords=user_stopwords)
+    if not visible_items:
+        return _build_failed_setup_competitor_entry(
+            competitor=competitor,
+            reason="все подходящие короткие видео скрыты стоп-словами пользователя",
         )
 
     baseline = _compute_setup_baseline_metrics(competitor=competitor, fallback_items=eligible_items)
@@ -499,7 +522,7 @@ def _build_setup_competitor_entry(*, competitor: Competitor, refreshed_items: li
             reason="не хватило метрик для базовой проверки",
         )
 
-    latest_item = max(eligible_items, key=lambda item: item.published_at)
+    latest_item = max(visible_items, key=lambda item: item.published_at)
     latest_snapshot = MetricSnapshot.objects.filter(content_item=latest_item).order_by("-captured_at").first()
     if latest_snapshot is None:
         return _build_failed_setup_competitor_entry(

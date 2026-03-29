@@ -31,6 +31,7 @@ async def cmd_start(message: Message) -> None:
         "/competitors - список конкурентов\n"
         "/competitors_add - добавить конкурентов\n"
         "/competitors_remove - убрать конкурентов\n"
+        "/stopwords - стоп-слова отчета\n"
         "/schedule - изменить расписание\n"
         "/report - отчет сейчас\n"
         "/help - помощь\n"
@@ -47,5 +48,8 @@ async def cmd_help(message: Message) -> None:
         "/competitors - показать активный список\n"
         "/competitors_add - добавить конкурентов вручную\n"
         "/competitors_remove - убрать конкурентов из активного списка\n"
+        "/stopwords - показать стоп-слова отчета\n"
+        "/stopwords_add - добавить стоп-слова\n"
+        "/stopwords_remove - удалить стоп-слова\n"
         "/report - запросить отчет прямо сейчас\n"
     )
