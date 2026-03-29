@@ -8,10 +8,17 @@ from django.conf import settings
 
 from common.stats import iqr, median
 
-from tracking.models import Competitor, CompetitorBaseline, ContentItem, MetricSnapshot
+from tracking.models import Competitor, CompetitorBaseline, ContentItem, MetricSnapshot, Platform
 
 
 EPS = 1e-6
+
+
+def _is_youtube_short_item(item: ContentItem) -> bool:
+    if item.platform != Platform.YOUTUBE:
+        return False
+    meta = item.meta if isinstance(item.meta, dict) else {}
+    return str(meta.get("content_type") or "").strip().lower() == "short"
 
 
 @dataclass(frozen=True)
@@ -51,6 +58,8 @@ def compute_competitor_baseline(*, competitor: Competitor, now: datetime) -> Bas
         .order_by("-published_at")
         .all()[:n_items]
     )
+    if competitor.platform == Platform.YOUTUBE:
+        items = [item for item in items if _is_youtube_short_item(item)]
 
     vph_values: list[float] = []
     er_values: list[float] = []
@@ -153,6 +162,8 @@ def score_items_for_period(
     period_hours = max((period_end - period_start).total_seconds() / 3600.0, 0.0)
 
     for item in items:
+        if item.platform == Platform.YOUTUBE and not _is_youtube_short_item(item):
+            continue
         if item.published_at < min_published_at:
             continue
         competitor = competitor_by_item_id.get(item.id)

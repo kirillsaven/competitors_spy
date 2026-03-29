@@ -60,6 +60,7 @@ from tracking.services.platform_onboarding import (
     PlatformOnboardingError,
     build_search_ready_keywords,
     discover_competitors_for_onboarding,
+    youtube_profile_recent_shorts_gate_status,
 )
 from tracking.services.seed_resolver import (
     SeedResolveAmbiguity,
@@ -1382,6 +1383,22 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
             candidates_by_id[key] = d
 
     for s in comp_seeds:
+        if s.platform == Platform.YOUTUBE:
+            passes_gate = await asyncio.to_thread(
+                youtube_profile_recent_shorts_gate_status,
+                external_id=s.external_id,
+                handle=s.handle,
+                url=s.url,
+                display_name=s.title,
+                context=runtime,
+            )
+            is_valid, recent_count = passes_gate
+            if not is_valid:
+                discovery_notes.append(
+                    f"YouTube manual candidate skipped: {_candidate_display_name({'platform': s.platform, 'display_name': s.title, 'handle': s.handle, 'external_id': s.external_id})} "
+                    f"не прошел фильтр активности (shorts за 60 дней: {recent_count}, нужно минимум 2)."
+                )
+                continue
         add_candidate(
             {
                 "platform": s.platform,

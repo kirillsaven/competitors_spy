@@ -420,6 +420,68 @@ def test_build_report_preview_keeps_youtube_section_when_instagram_prefetch_fail
     assert "platform-feature-disabled" in sections[Platform.INSTAGRAM]["note"]
 
 
+def test_build_report_preview_skips_youtube_competitors_without_recent_shorts(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=142, tg_chat_id=142, timezone_str="UTC")
+    youtube = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="yt-no-shorts",
+        handle="yt_no_shorts",
+        url="https://youtube.com/@yt_no_shorts",
+        display_name="YT No Shorts",
+    )
+    instagram = Competitor.objects.create(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-1",
+        handle="ig_handle",
+        url="https://www.instagram.com/ig_handle/",
+        display_name="IG Handle",
+    )
+    UserCompetitor.objects.create(user=user, competitor=youtube, is_active=True)
+    UserCompetitor.objects.create(user=user, competitor=instagram, is_active=True)
+
+    now = datetime(2026, 3, 24, 12, 0, tzinfo=UTC)
+    calls = {"youtube_refresh": 0, "instagram_refresh": 0}
+
+    def fake_refresh(*, competitor, mode, captured_at, provider_fetch_cache=None):
+        if competitor.platform == Platform.YOUTUBE:
+            calls["youtube_refresh"] += 1
+            raise AssertionError("YouTube competitor without recent shorts should be skipped before refresh")
+        calls["instagram_refresh"] += 1
+        item = competitor.content_items.create(
+            platform=competitor.platform,
+            external_id=f"item-{competitor.external_id}",
+            url=competitor.url,
+            title="Latest reel",
+            description="desc",
+            published_at=now - timedelta(hours=2),
+            duration_seconds=30,
+            meta={"content_type": "reel"},
+        )
+        MetricSnapshot.objects.create(
+            content_item=item,
+            captured_at=now,
+            views=1000,
+            likes=100,
+            comments=10,
+            shares=5,
+        )
+        return [item]
+
+    monkeypatch.setattr(report_pipeline, "youtube_profile_recent_shorts_gate_status", lambda **kwargs: (False, 0))
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", fake_refresh)
+
+    preview = build_report_preview(
+        user=user,
+        period_start=now - timedelta(hours=24),
+        period_end=now,
+    )
+
+    sections = {section["platform"]: section for section in preview.payload["sections"]}
+    assert sections[Platform.YOUTUBE]["items"] == []
+    assert sections[Platform.INSTAGRAM]["items"] != []
+    assert calls == {"youtube_refresh": 0, "instagram_refresh": 1}
+
+
 def test_build_report_preview_excludes_items_already_shown_in_regular_reports(db, monkeypatch):
     user = TgUser.objects.create(tg_user_id=15, tg_chat_id=15, timezone_str="UTC")
     competitor = Competitor.objects.create(

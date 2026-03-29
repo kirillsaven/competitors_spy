@@ -2532,6 +2532,30 @@ def _validate_youtube_candidate_collectible(
     return True
 
 
+def youtube_profile_recent_shorts_gate_status(
+    *,
+    external_id: str,
+    handle: str | None,
+    url: str,
+    display_name: str | None = None,
+    context: SetupRunContext | None = None,
+) -> tuple[bool, int]:
+    candidate = _DiscoveryCandidate(
+        platform=Platform.YOUTUBE,
+        external_id=str(external_id or "").strip(),
+        handle=str(handle or "").strip() or None,
+        url=str(url or "").strip(),
+        display_name=str(display_name or "").strip() or None,
+    )
+    _texts, _views, recent_count = _fetch_recent_youtube_short_signals(
+        candidate=candidate,
+        n=_DISCOVERY_VALIDATION_ITEMS,
+        context=context,
+    )
+    min_recent = _DISCOVERY_MIN_RECENT_ITEMS_BY_PLATFORM.get(Platform.YOUTUBE, _DISCOVERY_MIN_RECENT_SHORTS)
+    return recent_count >= min_recent, int(recent_count)
+
+
 def _collector_aware_candidates(
     *,
     platform: str,

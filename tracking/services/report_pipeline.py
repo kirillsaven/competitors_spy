@@ -27,6 +27,7 @@ from tracking.services.platform_onboarding import (
     _find_instagram_profile_for_lookup,
     fetch_instagram_profiles_cached,
     fetch_tiktok_profile_feeds_cached,
+    youtube_profile_recent_shorts_gate_status,
 )
 from tracking.services.provider_runtime import ProviderFetchCache
 from tracking.services.report_filters import (
@@ -261,6 +262,7 @@ def build_report_preview(
     provider_fetch_cache: ProviderFetchCache | None = None,
 ) -> ReportPreview:
     competitors = get_active_competitors(user=user)
+    eligible_competitors: list[Competitor] = []
     user_stopwords = get_user_report_stopwords(user=user)
     provider_fetch_cache = _ensure_provider_fetch_cache(
         provider_fetch_cache=provider_fetch_cache,
@@ -278,6 +280,37 @@ def build_report_preview(
     for competitor in competitors:
         if competitor.platform in blocked_platforms:
             continue
+        if competitor.platform == Platform.YOUTUBE:
+            try:
+                passes_gate, recent_count = youtube_profile_recent_shorts_gate_status(
+                    external_id=competitor.external_id,
+                    handle=competitor.handle,
+                    url=competitor.url,
+                    display_name=competitor.display_name,
+                )
+            except Exception as exc:
+                reason = _short_reason(str(exc))
+                platform_notes.setdefault(competitor.platform, reason)
+                logger.warning(
+                    "Skipping YouTube competitor during report preview due to shorts gate error "
+                    "(user_id=%s competitor_id=%s external_id=%s): %s",
+                    user.id,
+                    competitor.id,
+                    competitor.external_id,
+                    exc,
+                )
+                continue
+            if not passes_gate:
+                logger.info(
+                    "Skipping YouTube competitor during report preview due to recent shorts gate "
+                    "(user_id=%s competitor_id=%s external_id=%s recent_shorts=%s)",
+                    user.id,
+                    competitor.id,
+                    competitor.external_id,
+                    recent_count,
+                )
+                continue
+        eligible_competitors.append(competitor)
         try:
             updated_items.extend(
                 refresh_competitor(
@@ -305,7 +338,8 @@ def build_report_preview(
 
     competitor_by_item_id = {item.id: item.competitor for item in updated_items}
     baseline_by_competitor_id = {
-        competitor.id: compute_competitor_baseline(competitor=competitor, now=period_end) for competitor in competitors
+        competitor.id: compute_competitor_baseline(competitor=competitor, now=period_end)
+        for competitor in eligible_competitors
     }
     scored = score_items_for_period(
         items=updated_items,

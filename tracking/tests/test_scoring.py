@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from tracking.models import Competitor, ContentItem, MetricSnapshot, Platform, TgUser, UserCompetitor
-from tracking.services.scoring import BaselineMetrics, score_items_for_period
+from tracking.services.scoring import BaselineMetrics, compute_competitor_baseline, score_items_for_period
 
 
 @pytest.mark.django_db
@@ -29,7 +29,7 @@ def test_score_items_for_period_basic(settings) -> None:
         description="",
         published_at=published_at,
         duration_seconds=60,
-        meta={},
+        meta={"content_type": "short"},
     )
 
     period_start = datetime(2026, 2, 11, 0, 0, tzinfo=UTC)
@@ -180,3 +180,93 @@ def test_score_items_for_period_uses_current_vph_fallback_for_short_first_window
     assert len(scored) == 1
     assert scored[0].score_type == "current_vph"
     assert scored[0].delta_views == 0
+
+
+@pytest.mark.django_db
+def test_score_items_for_period_skips_youtube_long_form_items(settings) -> None:
+    settings.MIN_VIEWS_END = 0
+    comp = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="UC-LONG",
+        display_name="Long Channel",
+        meta={},
+    )
+    short_item = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.YOUTUBE,
+        external_id="yt-short",
+        url="https://www.youtube.com/watch?v=yt-short",
+        title="Short breakout",
+        description="",
+        published_at=datetime(2026, 2, 10, 0, 0, tzinfo=UTC),
+        duration_seconds=45,
+        meta={"content_type": "short"},
+    )
+    long_item = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.YOUTUBE,
+        external_id="yt-long",
+        url="https://www.youtube.com/watch?v=yt-long",
+        title="Long breakout",
+        description="",
+        published_at=datetime(2026, 2, 10, 1, 0, tzinfo=UTC),
+        duration_seconds=480,
+        meta={"content_type": "video"},
+    )
+    period_start = datetime(2026, 2, 11, 0, 0, tzinfo=UTC)
+    period_end = datetime(2026, 2, 11, 5, 0, tzinfo=UTC)
+    MetricSnapshot.objects.create(content_item=short_item, captured_at=period_start, views=100, likes=10, comments=2, extra={})
+    MetricSnapshot.objects.create(content_item=short_item, captured_at=period_end, views=700, likes=30, comments=5, extra={})
+    MetricSnapshot.objects.create(content_item=long_item, captured_at=period_start, views=1000, likes=50, comments=6, extra={})
+    MetricSnapshot.objects.create(content_item=long_item, captured_at=period_end, views=9000, likes=400, comments=40, extra={})
+
+    baseline = BaselineMetrics(vph_median=50.0, vph_iqr=10.0, er_median=None, er_iqr=None, n=4)
+    scored = score_items_for_period(
+        items=[short_item, long_item],
+        competitor_by_item_id={short_item.id: comp, long_item.id: comp},
+        baseline_by_competitor_id={comp.id: baseline},
+        period_start=period_start,
+        period_end=period_end,
+    )
+
+    assert [item.content_item.external_id for item in scored] == ["yt-short"]
+
+
+@pytest.mark.django_db
+def test_compute_competitor_baseline_uses_youtube_shorts_only() -> None:
+    comp = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="UC-BASELINE",
+        display_name="Baseline Channel",
+        meta={},
+    )
+    now = datetime(2026, 2, 11, 5, 0, tzinfo=UTC)
+    short_item = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.YOUTUBE,
+        external_id="baseline-short",
+        url="https://www.youtube.com/watch?v=baseline-short",
+        title="Short baseline",
+        description="",
+        published_at=now - timedelta(hours=5),
+        duration_seconds=40,
+        meta={"content_type": "short"},
+    )
+    long_item = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.YOUTUBE,
+        external_id="baseline-long",
+        url="https://www.youtube.com/watch?v=baseline-long",
+        title="Long baseline",
+        description="",
+        published_at=now - timedelta(hours=5),
+        duration_seconds=600,
+        meta={"content_type": "video"},
+    )
+    MetricSnapshot.objects.create(content_item=short_item, captured_at=now, views=1000, likes=100, comments=20, extra={})
+    MetricSnapshot.objects.create(content_item=long_item, captured_at=now, views=100000, likes=1000, comments=200, extra={})
+
+    baseline = compute_competitor_baseline(competitor=comp, now=now)
+
+    assert baseline.n == 1
+    assert baseline.vph_median == 200.0
