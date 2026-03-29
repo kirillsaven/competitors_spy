@@ -30,6 +30,7 @@ _NOISE_KEYWORDS = {
     "handle",
     "channel",
     "main",
+    "real",
     "video",
     "videos",
     "youtube",

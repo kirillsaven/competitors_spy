@@ -134,6 +134,35 @@ def test_infer_niche_keywords_uses_account_title_for_search_ready_subject_hints(
     assert any("урок" in keyword or "english" in keyword for keyword in keywords)
 
 
+def test_infer_niche_keywords_drops_generic_real_singleton_for_english_seed(monkeypatch):
+    monkeypatch.setattr(
+        niche_service,
+        "get_recent_seed_content_texts",
+        lambda *, seed, n=10: [
+            "Real English conversation practice",
+            "American English pronunciation resource",
+            "Language learning for native speakers and beginners",
+        ],
+    )
+    monkeypatch.setattr(niche_service, "infer_youtube_keywords", lambda seed: [])
+    seed = SeedResolution(
+        platform=Platform.YOUTUBE,
+        external_id="yt-rachel",
+        handle="rachelsenglish",
+        url="https://www.youtube.com/channel/UCvn_XCl_mgQmt3sD753zdJA",
+        title="Rachel's English",
+        description="Real English conversation and American English pronunciation.",
+        uploads_playlist_id="UU1",
+    )
+
+    keywords, source = niche_service.infer_niche_keywords(seed=seed, competitors=[])
+
+    assert source == "auto"
+    assert "real" not in keywords
+    assert any("english" in keyword for keyword in keywords)
+    assert any("american english" in keyword for keyword in keywords)
+
+
 def test_infer_niche_keywords_auto_filters_ru_en_junk_words(monkeypatch):
     monkeypatch.setattr(
         niche_service,
