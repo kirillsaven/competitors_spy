@@ -7,7 +7,7 @@ from aiogram.types import Message
 from botapp.db import db_call, db_run
 from botapp.user_sync import upsert_tg_user
 from common.time import format_dt_local, format_timezone_label
-from tracking.models import Platform, Schedule, UserCompetitor
+from tracking.models import Platform, Schedule, TgUser, UserCompetitor
 from tracking.tasks import run_user_report_now
 
 router = Router()
@@ -79,41 +79,3 @@ async def cmd_report(message: Message) -> None:
         return
     run_user_report_now.delay(user.id)
     await message.answer("Собираю отчет. Пришлю сообщением, когда будет готов.")
-
-
-@router.message(Command("competitors"))
-async def cmd_competitors(message: Message) -> None:
-    if not message.from_user:
-        return
-    user, _ = await db_call(
-        upsert_tg_user,
-        telegram_user_id=message.from_user.id,
-        chat_id=message.chat.id,
-        username=message.from_user.username,
-        first_name=message.from_user.first_name,
-        last_name=message.from_user.last_name,
-        language_code=message.from_user.language_code,
-    )
-    links = await db_run(
-        lambda: list(
-            UserCompetitor.objects.select_related("competitor")
-            .filter(user=user, is_active=True)
-            .order_by("id")
-        )
-    )
-    comps = [lnk.competitor for lnk in links]
-    if not comps:
-        await message.answer("Конкуренты не настроены. Запусти /setup.")
-        return
-    lines = ["Конкуренты:"]
-    for i, c in enumerate(comps, start=1):
-        name = c.display_name or c.handle or c.external_id
-        platform_label = {
-            Platform.YOUTUBE: "YouTube",
-            Platform.TIKTOK: "TikTok",
-            Platform.INSTAGRAM: "Instagram",
-        }.get(c.platform, c.platform)
-        lines.append(f"{i}) [{platform_label}] {name}")
-    lines.append("")
-    lines.append("Изменить список можно через /setup.")
-    await message.answer("\n".join(lines))

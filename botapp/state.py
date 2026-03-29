@@ -21,3 +21,8 @@ class SetupStates(StatesGroup):
     WAIT_TIME_1 = State()
     PICK_TIME_CUSTOM_2 = State()
     WAIT_TIME_2 = State()
+
+
+class CompetitorManagementStates(StatesGroup):
+    WAIT_COMPETITORS_ADD_INPUT = State()
+    WAIT_COMPETITORS_REMOVE_INPUT = State()
