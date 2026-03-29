@@ -2196,6 +2196,8 @@ def _fetch_recent_youtube_upload_signals(
                 detail
                 for detail in video_items_to_details(video_items)
                 if str(detail.title or "").strip()
+                and detail.duration_seconds is not None
+                and detail.duration_seconds <= 60
             ],
             key=lambda item: item.published_at,
             reverse=True,

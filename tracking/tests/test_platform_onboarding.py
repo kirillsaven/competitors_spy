@@ -1299,6 +1299,51 @@ def test_youtube_discovery_checks_multiple_candidates_before_returning_empty(mon
     ]
 
 
+def test_youtube_profile_recent_shorts_gate_status_ignores_long_uploads(monkeypatch):
+    recent_ts = (datetime.now(UTC) - timedelta(days=5)).isoformat().replace("+00:00", "Z")
+
+    class FakeClient:
+        def channels_list(self, *, part, for_handle=None, ids=None):
+            return [{"contentDetails": {"relatedPlaylists": {"uploads": "UU-test"}}}]
+
+        def playlist_items(self, *, playlist_id, max_results):
+            assert playlist_id == "UU-test"
+            return [
+                {"contentDetails": {"videoId": "long-1"}},
+                {"contentDetails": {"videoId": "long-2"}},
+                {"contentDetails": {"videoId": "long-3"}},
+            ]
+
+        def videos_list(self, *, ids, part):
+            return [
+                {
+                    "id": video_id,
+                    "snippet": {
+                        "title": f"Long {index}",
+                        "publishedAt": recent_ts,
+                    },
+                    "statistics": {"viewCount": "1000"},
+                    "contentDetails": {"duration": "PT8M"},
+                }
+                for index, video_id in enumerate(ids, start=1)
+            ]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(platform_onboarding, "get_youtube_client", lambda: FakeClient())
+
+    is_valid, recent_count = platform_onboarding.youtube_profile_recent_shorts_gate_status(
+        external_id="UC-test",
+        handle="test_handle",
+        url="https://www.youtube.com/@test_handle",
+        display_name="Test Handle",
+    )
+
+    assert is_valid is False
+    assert recent_count == 0
+
+
 def test_retry_cache_reuses_youtube_collectible_probe_across_setup_retries(monkeypatch):
     clear_retry_cache()
     calls = {"youtube": 0}
