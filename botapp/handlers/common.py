@@ -29,6 +29,8 @@ async def cmd_start(message: Message) -> None:
         "/setup - настройка\n"
         "/status - статус\n"
         "/competitors - список конкурентов\n"
+        "/competitors_add - добавить конкурентов\n"
+        "/competitors_remove - убрать конкурентов\n"
         "/schedule - изменить расписание\n"
         "/report - отчет сейчас\n"
         "/help - помощь\n"
@@ -42,5 +44,8 @@ async def cmd_help(message: Message) -> None:
         "Автоподбор конкурентов пока есть только для YouTube, а TikTok/Instagram добавляются вручную ссылками или хендлами.\n\n"
         "/setup - настроить нишу, конкурентов и расписание\n"
         "/status - показать конкурентов и следующее время отчета\n"
+        "/competitors - показать активный список\n"
+        "/competitors_add - добавить конкурентов вручную\n"
+        "/competitors_remove - убрать конкурентов из активного списка\n"
         "/report - запросить отчет прямо сейчас\n"
     )

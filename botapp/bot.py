@@ -20,6 +20,7 @@ async def main() -> None:
 
     # Import handlers only after django.setup(), otherwise models import will crash.
     from botapp.handlers.common import router as common_router
+    from botapp.handlers.competitors import router as competitors_router
     from botapp.handlers.setup import router as setup_router
     from botapp.handlers.status import router as status_router
 
@@ -30,6 +31,7 @@ async def main() -> None:
     bot = Bot(token=token)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(common_router)
+    dp.include_router(competitors_router)
     dp.include_router(setup_router)
     dp.include_router(status_router)
 
