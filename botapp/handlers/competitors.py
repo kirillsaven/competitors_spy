@@ -671,7 +671,7 @@ async def on_competitor_add_manual_input(message: Message, state: FSMContext) ->
 
     for raw_input in raw_inputs:
         try:
-            seed = await asyncio.to_thread(resolve_exact_seed, raw_input, context)
+            seed = await asyncio.to_thread(resolve_exact_seed, raw_input, context=context)
         except Exception as exc:
             errors.append(f"{raw_input}: не смог подтвердить профиль ({exc})")
             continue

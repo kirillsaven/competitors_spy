@@ -230,10 +230,9 @@ def test_competitor_add_manual_adds_valid_resolved_seed(monkeypatch):
 
     monkeypatch.setattr(competitors, "db_call", _db_call)
     monkeypatch.setattr(competitors, "db_run", _db_run)
-    monkeypatch.setattr(
-        competitors,
-        "resolve_exact_seed",
-        lambda raw_input, context=None: SeedResolution(
+    def fake_resolve_exact_seed(raw_input, *, context=None):
+        assert context is not None
+        return SeedResolution(
             platform=Platform.YOUTUBE,
             external_id="yt-manual",
             handle="manual_creator",
@@ -241,8 +240,9 @@ def test_competitor_add_manual_adds_valid_resolved_seed(monkeypatch):
             title="Manual Creator",
             description="desc",
             uploads_playlist_id="UUmanual",
-        ),
-    )
+        )
+
+    monkeypatch.setattr(competitors, "resolve_exact_seed", fake_resolve_exact_seed)
     monkeypatch.setattr(competitors, "youtube_profile_recent_shorts_gate_status", lambda **kwargs: (True, 3))
 
     state = DummyState()
@@ -269,10 +269,9 @@ def test_competitor_add_manual_rejects_youtube_without_recent_shorts(monkeypatch
 
     monkeypatch.setattr(competitors, "db_call", _db_call)
     monkeypatch.setattr(competitors, "db_run", _db_run)
-    monkeypatch.setattr(
-        competitors,
-        "resolve_exact_seed",
-        lambda raw_input, context=None: SeedResolution(
+    def fake_resolve_exact_seed(raw_input, *, context=None):
+        assert context is not None
+        return SeedResolution(
             platform=Platform.YOUTUBE,
             external_id="yt-reject",
             handle="reject_creator",
@@ -280,8 +279,9 @@ def test_competitor_add_manual_rejects_youtube_without_recent_shorts(monkeypatch
             title="Reject Creator",
             description="desc",
             uploads_playlist_id="UUreject",
-        ),
-    )
+        )
+
+    monkeypatch.setattr(competitors, "resolve_exact_seed", fake_resolve_exact_seed)
     monkeypatch.setattr(competitors, "youtube_profile_recent_shorts_gate_status", lambda **kwargs: (False, 1))
 
     state = DummyState()
@@ -297,6 +297,46 @@ def test_competitor_add_manual_rejects_youtube_without_recent_shorts(monkeypatch
     assert "Добавлено вручную: 0" in message.answers[-1]
     assert "Ошибки: 1" in message.answers[-1]
     assert "shorts за 60 дней: 1" in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_competitor_add_manual_adds_instagram_share_url_with_keyword_context(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=26, tg_chat_id=26)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+
+    def fake_resolve_exact_seed(raw_input, *, context=None):
+        assert raw_input == "https://www.instagram.com/eng.lisaa?igsh=Ym5rMHRodGhvZ3oy"
+        assert context is not None
+        return SeedResolution(
+            platform=Platform.INSTAGRAM,
+            external_id="ig-manual",
+            handle="eng.lisaa",
+            url="https://www.instagram.com/eng.lisaa/",
+            title="Eng Lisaa",
+            description="desc",
+            uploads_playlist_id=None,
+        )
+
+    monkeypatch.setattr(competitors, "resolve_exact_seed", fake_resolve_exact_seed)
+
+    state = DummyState()
+    async_to_sync(state.update_data)(user_id=user.id)
+    async_to_sync(state.set_state)(CompetitorManagementStates.WAIT_COMPETITORS_ADD_INPUT)
+    message = DummyMessage(user_id=26, text="https://www.instagram.com/eng.lisaa?igsh=Ym5rMHRodGhvZ3oy")
+
+    async_to_sync(competitors.on_competitor_add_manual_input)(message, state)
+
+    link = async_to_sync(sync_to_async(UserCompetitor.objects.select_related("competitor").get, thread_sensitive=True))(user=user)
+    assert state.state is None
+    assert link.added_by == "manual"
+    assert link.competitor.platform == Platform.INSTAGRAM
+    assert link.competitor.external_id == "ig-manual"
+    assert "Добавлено вручную: 1" in message.answers[-1]
+    assert "Ошибки: 0" in message.answers[-1]
+    assert "Instagram: 1" in message.answers[-1]
 
 
 @pytest.mark.django_db
