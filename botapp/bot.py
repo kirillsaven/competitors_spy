@@ -22,6 +22,7 @@ async def main() -> None:
     from botapp.handlers.common import router as common_router
     from botapp.handlers.competitors import router as competitors_router
     from botapp.handlers.setup import router as setup_router
+    from botapp.handlers.stopwords import router as stopwords_router
     from botapp.handlers.status import router as status_router
 
     token = getattr(settings, "TELEGRAM_BOT_TOKEN", "") or ""
@@ -33,6 +34,7 @@ async def main() -> None:
     dp.include_router(common_router)
     dp.include_router(competitors_router)
     dp.include_router(setup_router)
+    dp.include_router(stopwords_router)
     dp.include_router(status_router)
 
     await dp.start_polling(bot)
