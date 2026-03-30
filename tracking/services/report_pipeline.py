@@ -18,7 +18,9 @@ from tracking.models import (
     Platform,
     Report,
     ReportStatus,
+    SeedProfile,
     TgUser,
+    UserLinkedAccount,
     UserCompetitor,
 )
 from tracking.services.collector import refresh_competitor
@@ -41,7 +43,7 @@ from tracking.services.reporting import (
     render_report_text,
     split_telegram_text,
 )
-from tracking.services.scoring import compute_competitor_baseline, score_items_for_period
+from tracking.services.scoring import build_adaptation_context, compute_competitor_baseline, score_items_for_period
 
 logger = logging.getLogger(__name__)
 
@@ -238,6 +240,37 @@ def _merge_youtube_refresh_diagnostics(
     platform_entry["youtube_usable_short_form_items_returned"] += int(
         diagnostics.get("usable_short_form_items_returned") or 0
     )
+
+
+def _load_user_adaptation_context(*, user: TgUser, competitors: list[Competitor]):
+    seed_profile = (
+        SeedProfile.objects.filter(user=user)
+        .exclude(niche_keywords=[])
+        .order_by("-id")
+        .first()
+    )
+    niche_keywords = [str(item).strip() for item in list(getattr(seed_profile, "niche_keywords", []) or []) if str(item).strip()]
+    linked_accounts = list(UserLinkedAccount.objects.filter(user=user).all())
+    return build_adaptation_context(
+        niche_keywords=niche_keywords,
+        linked_accounts=linked_accounts,
+        competitors=competitors,
+    )
+
+
+def _log_adaptation_relevance(*, user: TgUser, scored: list[object]) -> None:
+    for item in list(scored or [])[:10]:
+        content_item = getattr(item, "content_item", None)
+        competitor = getattr(item, "competitor", None)
+        logger.info(
+            "report_item_adaptation user_id=%s platform=%s item_id=%s competitor_id=%s adaptation_score=%s factors=%s",
+            user.id,
+            getattr(content_item, "platform", ""),
+            getattr(content_item, "external_id", ""),
+            getattr(competitor, "id", ""),
+            getattr(item, "adaptation_relevance_score", 0.0),
+            getattr(item, "adaptation_relevance_factors", {}),
+        )
 
 
 def _reported_content_key(*, platform: str | None, external_id: str | None, url: str | None = None) -> tuple[str, str] | None:
@@ -531,6 +564,7 @@ def build_report_preview(
         competitor.id: compute_competitor_baseline(competitor=competitor, now=period_end)
         for competitor in eligible_competitors
     }
+    adaptation_context = _load_user_adaptation_context(user=user, competitors=competitors)
     for item in updated_items:
         drop_reason = _classify_item_drop_reason(
             item=item,
@@ -555,6 +589,7 @@ def build_report_preview(
         baseline_by_competitor_id=baseline_by_competitor_id,
         period_start=period_start,
         period_end=period_end,
+        adaptation_context=adaptation_context,
     )
     scored_after_history = _exclude_previously_reported_items(user=user, scored=scored)
     kept_after_history = {getattr(item.content_item, "id", None) for item in scored_after_history}
@@ -576,6 +611,7 @@ def build_report_preview(
         platform = str(getattr(item.content_item, "platform", None) or getattr(item.competitor, "platform", "")).strip()
         if platform in platform_diagnostics:
             platform_diagnostics[platform]["final_items"] += 1
+    _log_adaptation_relevance(user=user, scored=scored)
 
     for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM):
         _finalize_platform_diagnostics(
