@@ -107,6 +107,135 @@ def test_score_items_for_period_prefers_recent_high_scale_breakout(settings) -> 
 
 
 @pytest.mark.django_db
+def test_score_items_for_period_keeps_items_within_60_day_candidate_window(settings) -> None:
+    settings.REPORT_MAX_ITEM_AGE_DAYS = 60
+    settings.MIN_VIEWS_END = 1000
+    comp = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="UC-60D-KEEP",
+        display_name="60d Keep",
+        meta={},
+    )
+
+    period_start = datetime(2026, 3, 29, 0, 0, tzinfo=UTC)
+    period_end = datetime(2026, 3, 30, 0, 0, tzinfo=UTC)
+    item = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.YOUTUBE,
+        external_id="within-60d",
+        url="https://www.youtube.com/watch?v=within-60d",
+        title="Within 60d",
+        description="",
+        published_at=period_end - timedelta(days=30),
+        duration_seconds=55,
+        meta={"content_type": "short"},
+    )
+    MetricSnapshot.objects.create(content_item=item, captured_at=period_start, views=2000, likes=50, comments=5, extra={})
+    MetricSnapshot.objects.create(content_item=item, captured_at=period_end, views=6000, likes=150, comments=15, extra={})
+
+    baseline = BaselineMetrics(vph_median=100.0, vph_iqr=20.0, er_median=0.02, er_iqr=0.01, n=10, rph_median=3.0, rph_iqr=1.0)
+    scored = score_items_for_period(
+        items=[item],
+        competitor_by_item_id={item.id: comp},
+        baseline_by_competitor_id={comp.id: baseline},
+        period_start=period_start,
+        period_end=period_end,
+    )
+
+    assert [entry.content_item.external_id for entry in scored] == ["within-60d"]
+
+
+@pytest.mark.django_db
+def test_score_items_for_period_filters_items_older_than_60_day_candidate_window(settings) -> None:
+    settings.REPORT_MAX_ITEM_AGE_DAYS = 60
+    settings.MIN_VIEWS_END = 1000
+    comp = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="UC-60D-DROP",
+        display_name="60d Drop",
+        meta={},
+    )
+
+    period_start = datetime(2026, 3, 29, 0, 0, tzinfo=UTC)
+    period_end = datetime(2026, 3, 30, 0, 0, tzinfo=UTC)
+    item = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.YOUTUBE,
+        external_id="older-than-60d",
+        url="https://www.youtube.com/watch?v=older-than-60d",
+        title="Older than 60d",
+        description="",
+        published_at=period_end - timedelta(days=61),
+        duration_seconds=55,
+        meta={"content_type": "short"},
+    )
+    MetricSnapshot.objects.create(content_item=item, captured_at=period_start, views=2000, likes=50, comments=5, extra={})
+    MetricSnapshot.objects.create(content_item=item, captured_at=period_end, views=6000, likes=150, comments=15, extra={})
+
+    baseline = BaselineMetrics(vph_median=100.0, vph_iqr=20.0, er_median=0.02, er_iqr=0.01, n=10, rph_median=3.0, rph_iqr=1.0)
+    scored = score_items_for_period(
+        items=[item],
+        competitor_by_item_id={item.id: comp},
+        baseline_by_competitor_id={comp.id: baseline},
+        period_start=period_start,
+        period_end=period_end,
+    )
+
+    assert scored == []
+
+
+@pytest.mark.django_db
+def test_score_items_for_period_recency_bonus_prefers_fresher_item_when_other_signals_match(settings) -> None:
+    settings.REPORT_MAX_ITEM_AGE_DAYS = 60
+    settings.MIN_VIEWS_END = 1000
+    comp = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="UC-RECENCY",
+        display_name="Recency Channel",
+        meta={},
+    )
+
+    period_start = datetime(2026, 3, 29, 0, 0, tzinfo=UTC)
+    period_end = datetime(2026, 3, 30, 0, 0, tzinfo=UTC)
+    fresh = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.YOUTUBE,
+        external_id="fresh-5d",
+        url="https://www.youtube.com/watch?v=fresh-5d",
+        title="Fresh 5d",
+        description="",
+        published_at=period_end - timedelta(days=5),
+        duration_seconds=55,
+        meta={"content_type": "short"},
+    )
+    older = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.YOUTUBE,
+        external_id="older-30d",
+        url="https://www.youtube.com/watch?v=older-30d",
+        title="Older 30d",
+        description="",
+        published_at=period_end - timedelta(days=30),
+        duration_seconds=55,
+        meta={"content_type": "short"},
+    )
+    for item in (fresh, older):
+        MetricSnapshot.objects.create(content_item=item, captured_at=period_start, views=2000, likes=50, comments=5, extra={})
+        MetricSnapshot.objects.create(content_item=item, captured_at=period_end, views=6000, likes=150, comments=15, extra={})
+
+    baseline = BaselineMetrics(vph_median=100.0, vph_iqr=20.0, er_median=0.02, er_iqr=0.01, n=10, rph_median=3.0, rph_iqr=1.0)
+    scored = score_items_for_period(
+        items=[older, fresh],
+        competitor_by_item_id={fresh.id: comp, older.id: comp},
+        baseline_by_competitor_id={comp.id: baseline},
+        period_start=period_start,
+        period_end=period_end,
+    )
+
+    assert [entry.content_item.external_id for entry in scored] == ["fresh-5d", "older-30d"]
+
+
+@pytest.mark.django_db
 def test_score_items_for_period_filters_low_total_views_even_with_delta(settings) -> None:
     settings.MIN_VIEWS_END = 1000
     user = TgUser.objects.create(tg_user_id=3, tg_chat_id=3, timezone_str="UTC+00:00")

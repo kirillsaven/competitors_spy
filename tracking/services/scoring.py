@@ -157,7 +157,7 @@ def score_items_for_period(
     # Hard floor to avoid noisy "viral" picks on very short periods (e.g. a few minutes).
     # The main threshold is scaled by period length below.
     min_delta_floor = 20
-    max_age_days = int(getattr(settings, "REPORT_MAX_ITEM_AGE_DAYS", 14))
+    max_age_days = int(getattr(settings, "REPORT_MAX_ITEM_AGE_DAYS", 60))
     min_published_at = period_end - timedelta(days=max_age_days)
     period_hours = max((period_end - period_start).total_seconds() / 3600.0, 0.0)
 
