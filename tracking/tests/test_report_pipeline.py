@@ -344,6 +344,7 @@ def test_build_report_preview_keeps_youtube_section_when_tiktok_provider_fails(d
         )
         return [item]
 
+    monkeypatch.setattr(report_pipeline, "youtube_profile_recent_shorts_gate_status", lambda **kwargs: (True, 2))
     monkeypatch.setattr(report_pipeline, "refresh_competitor", fake_refresh)
 
     preview = build_report_preview(
@@ -406,6 +407,7 @@ def test_build_report_preview_keeps_youtube_section_when_instagram_prefetch_fail
         return [item]
 
     monkeypatch.setattr(report_pipeline, "fetch_instagram_profiles_cached", fake_fetch_instagram_profiles_cached)
+    monkeypatch.setattr(report_pipeline, "youtube_profile_recent_shorts_gate_status", lambda **kwargs: (True, 2))
     monkeypatch.setattr(report_pipeline, "refresh_competitor", fake_refresh)
 
     preview = build_report_preview(
@@ -480,6 +482,75 @@ def test_build_report_preview_skips_youtube_competitors_without_recent_shorts(db
     assert sections[Platform.YOUTUBE]["items"] == []
     assert sections[Platform.INSTAGRAM]["items"] != []
     assert calls == {"youtube_refresh": 0, "instagram_refresh": 1}
+
+
+def test_build_report_preview_reports_no_active_competitors_reason(db):
+    user = TgUser.objects.create(tg_user_id=143, tg_chat_id=143, timezone_str="UTC")
+
+    preview = build_report_preview(
+        user=user,
+        period_start=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 12, 0, tzinfo=UTC),
+    )
+
+    sections = {section["platform"]: section for section in preview.payload["sections"]}
+    youtube_diag = sections[Platform.YOUTUBE]["diagnostics"]
+    assert youtube_diag["active_competitors"] == 0
+    assert youtube_diag["final_items"] == 0
+    assert youtube_diag["empty_reason"] == "no_active_competitors"
+    assert "Причина: Нет активных конкурентов для этой платформы." in preview.text
+
+
+def test_build_report_preview_reports_scoring_filtered_reason_and_counters(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=144, tg_chat_id=144, timezone_str="UTC")
+    competitor = Competitor.objects.create(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-old",
+        handle="old_reels",
+        url="https://www.instagram.com/old_reels/",
+        display_name="Old Reels",
+    )
+    UserCompetitor.objects.create(user=user, competitor=competitor, is_active=True)
+    now = datetime(2026, 3, 24, 12, 0, tzinfo=UTC)
+
+    def fake_refresh(*, competitor, mode, captured_at, provider_fetch_cache=None):
+        item = competitor.content_items.create(
+            platform=competitor.platform,
+            external_id="old-reel-1",
+            url="https://www.instagram.com/reel/old-reel-1/",
+            title="Old reel",
+            description="desc",
+            published_at=now - timedelta(days=20),
+            duration_seconds=30,
+            meta={"content_type": "reel"},
+        )
+        MetricSnapshot.objects.create(
+            content_item=item,
+            captured_at=now,
+            views=3000,
+            likes=100,
+            comments=10,
+            shares=1,
+        )
+        return [item]
+
+    monkeypatch.setattr(report_pipeline, "youtube_profile_recent_shorts_gate_status", lambda **kwargs: (True, 2))
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", fake_refresh)
+
+    preview = build_report_preview(
+        user=user,
+        period_start=now - timedelta(hours=24),
+        period_end=now,
+    )
+
+    sections = {section["platform"]: section for section in preview.payload["sections"]}
+    instagram_diag = sections[Platform.INSTAGRAM]["diagnostics"]
+    assert instagram_diag["active_competitors"] == 1
+    assert instagram_diag["refreshed_items"] == 1
+    assert instagram_diag["dropped_by_age"] == 1
+    assert instagram_diag["final_items"] == 0
+    assert instagram_diag["empty_reason"] == "all_filtered_by_scoring"
+    assert "Причина: Ролики были, но текущие фильтры отбора ничего не пропустили." in preview.text
 
 
 def test_build_report_preview_excludes_items_already_shown_in_regular_reports(db, monkeypatch):
@@ -665,6 +736,58 @@ def test_build_report_preview_excludes_stopword_matches_only_for_that_user(db, m
 
     assert blocked_preview.payload["scored_external_ids"] == []
     assert plain_preview.payload["scored_external_ids"] == ["stopword-item"]
+
+
+def test_build_report_preview_reports_stopwords_reason_and_payload_diagnostics(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=161, tg_chat_id=161, timezone_str="UTC", report_stopwords=["spoiler"])
+    competitor = Competitor.objects.create(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-stopword",
+        handle="creator",
+        url="https://www.instagram.com/creator/",
+        display_name="Creator",
+    )
+    UserCompetitor.objects.create(user=user, competitor=competitor, is_active=True)
+    now = datetime(2026, 3, 24, 12, 0, tzinfo=UTC)
+
+    def fake_refresh(*, competitor, mode, captured_at, provider_fetch_cache=None):
+        item = competitor.content_items.create(
+            platform=competitor.platform,
+            external_id="ig-stopword-1",
+            url="https://www.instagram.com/reel/ig-stopword-1/",
+            title="Major spoiler reel",
+            description="desc",
+            published_at=now - timedelta(hours=2),
+            duration_seconds=30,
+            meta={"content_type": "reel"},
+        )
+        MetricSnapshot.objects.create(
+            content_item=item,
+            captured_at=now,
+            views=5000,
+            likes=100,
+            comments=10,
+            shares=1,
+        )
+        return [item]
+
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", fake_refresh)
+
+    preview = build_report_preview(
+        user=user,
+        period_start=now - timedelta(hours=24),
+        period_end=now,
+    )
+
+    sections = {section["platform"]: section for section in preview.payload["sections"]}
+    instagram_diag = sections[Platform.INSTAGRAM]["diagnostics"]
+    assert instagram_diag["active_competitors"] == 1
+    assert instagram_diag["refreshed_items"] == 1
+    assert instagram_diag["scored_items"] == 1
+    assert instagram_diag["dropped_by_stopwords"] == 1
+    assert instagram_diag["final_items"] == 0
+    assert instagram_diag["empty_reason"] == "all_filtered_by_stopwords"
+    assert "Причина: Все подходящие ролики скрыты вашими стоп-словами." in preview.text
 
 
 def test_build_setup_verification_preview_uses_latest_visible_item_when_newest_is_blocked(db, monkeypatch):

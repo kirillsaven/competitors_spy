@@ -139,6 +139,21 @@ def test_render_report_text_renders_instagram_items():
     assert "https://example.com/4" in text
 
 
+def test_render_report_text_truncates_regular_report_titles():
+    scored_item = _make_scored_item(platform=Platform.YOUTUBE, suffix="9")
+    scored_item.content_item.title = "A" * 120
+    payload = build_report_payload(
+        scored=[scored_item],
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+    )
+
+    text = render_report_text(payload=payload, timezone_str="UTC")
+
+    assert ("A" * 97) + "..." in text
+    assert "A" * 120 not in text
+
+
 def test_render_setup_verification_text_is_compact_and_strips_hashtags():
     payload = build_setup_verification_payload(
         generated_at=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
