@@ -44,6 +44,7 @@ from tracking.services.reporting import (
     split_telegram_text,
 )
 from tracking.services.scoring import build_adaptation_context, compute_competitor_baseline, score_items_for_period
+from tracking.services.youtube_topic_video_collection import collect_youtube_topic_video_candidates
 
 logger = logging.getLogger(__name__)
 
@@ -261,19 +262,49 @@ def _merge_youtube_refresh_diagnostics(
 
 
 def _load_user_adaptation_context(*, user: TgUser, competitors: list[Competitor]):
-    seed_profile = (
-        SeedProfile.objects.filter(user=user)
-        .exclude(niche_keywords=[])
-        .order_by("-id")
-        .first()
-    )
-    niche_keywords = [str(item).strip() for item in list(getattr(seed_profile, "niche_keywords", []) or []) if str(item).strip()]
+    niche_keywords = _load_user_niche_keywords(user=user)
     linked_accounts = list(UserLinkedAccount.objects.filter(user=user).all())
     return build_adaptation_context(
         niche_keywords=niche_keywords,
         linked_accounts=linked_accounts,
         competitors=competitors,
     )
+
+
+def _load_user_niche_keywords(*, user: TgUser) -> list[str]:
+    seed_profile = (
+        SeedProfile.objects.filter(user=user)
+        .exclude(niche_keywords=[])
+        .order_by("-id")
+        .first()
+    )
+    return [str(item).strip() for item in list(getattr(seed_profile, "niche_keywords", []) or []) if str(item).strip()]
+
+
+def _build_supplemental_payload(
+    *,
+    user: TgUser,
+    competitors: list[Competitor],
+    period_end,
+) -> dict[str, dict] | None:
+    if not bool(getattr(settings, "ENABLE_YOUTUBE_SUPPLEMENTAL_TOPIC_VIDEO_COLLECTION", False)):
+        return None
+    niche_keywords = _load_user_niche_keywords(user=user)
+    linked_accounts = list(UserLinkedAccount.objects.filter(user=user).all())
+    result = collect_youtube_topic_video_candidates(
+        niche_keywords=niche_keywords,
+        linked_accounts=linked_accounts,
+        competitors=competitors,
+        now=period_end,
+    )
+    logger.info(
+        "report_supplemental_collection user_id=%s lane=youtube_topic_video queries_built=%s queries_executed=%s final_candidates=%s",
+        user.id,
+        result.diagnostics.get("queries_built", 0),
+        result.diagnostics.get("queries_executed", 0),
+        result.diagnostics.get("final_candidates", 0),
+    )
+    return {"youtube_topic_video": result.to_payload()}
 
 
 def _log_adaptation_relevance(*, user: TgUser, scored: list[object]) -> None:
@@ -745,6 +776,11 @@ def build_report_preview(
         period_end=period_end,
         platform_diagnostics=platform_diagnostics,
     )
+    supplemental_payload = _build_supplemental_payload(
+        user=user,
+        competitors=competitors,
+        period_end=period_end,
+    )
 
     payload = build_report_payload(
         scored=scored,
@@ -753,6 +789,7 @@ def build_report_preview(
         baseline_by_competitor_id=baseline_by_competitor_id,
         platform_notes=platform_notes,
         platform_diagnostics=platform_diagnostics,
+        supplemental=supplemental_payload,
     )
     text = render_report_text(payload=payload, timezone_str=user.timezone_str)
     section_counts = {

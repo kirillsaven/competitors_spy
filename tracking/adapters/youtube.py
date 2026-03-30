@@ -41,6 +41,11 @@ def _parse_rfc3339(value: str) -> datetime:
     return dt
 
 
+def _format_rfc3339(value: datetime) -> str:
+    dt = value.astimezone(UTC).replace(microsecond=0)
+    return dt.isoformat().replace("+00:00", "Z")
+
+
 def _to_int(value: Any) -> int | None:
     try:
         if value is None:
@@ -281,6 +286,32 @@ class YouTubeClient:
             if cid:
                 out.append(cid)
         return out
+
+    def search_videos_page(
+        self,
+        *,
+        q: str,
+        max_results: int,
+        page_token: str | None = None,
+        published_after: datetime | None = None,
+        short_duration_only: bool = False,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        params: dict[str, Any] = {
+            "part": "snippet",
+            "type": "video",
+            "q": q,
+            "maxResults": min(50, max(1, int(max_results))),
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        if published_after is not None:
+            params["publishedAfter"] = _format_rfc3339(published_after)
+        if short_duration_only:
+            params["videoDuration"] = "short"
+        data = self._get("search", params)
+        items = data.get("items", []) or []
+        next_page_token = data.get("nextPageToken")
+        return items, str(next_page_token) if next_page_token else None
 
 
 def resolve_seed_input(client: YouTubeClient, raw_input: str) -> SeedResolution | None:

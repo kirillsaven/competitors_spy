@@ -987,6 +987,94 @@ def test_build_report_preview_adds_fallback_items_when_strict_path_is_thin(db, m
     assert section["diagnostics"]["fallback_reasons_used"] == {"delta_threshold_relaxed": 1}
 
 
+def test_build_report_preview_keeps_main_sections_unchanged_when_supplemental_collection_enabled(db, monkeypatch, settings):
+    settings.ENABLE_YOUTUBE_SUPPLEMENTAL_TOPIC_VIDEO_COLLECTION = True
+    user = TgUser.objects.create(tg_user_id=181, tg_chat_id=181, timezone_str="UTC")
+    competitor = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="yt-main-with-supplemental",
+        handle="yt_main_with_supplemental",
+        url="https://www.youtube.com/@yt_main_with_supplemental",
+        display_name="YT Main With Supplemental",
+        meta={"uploads_playlist_id": "UU-main-with-supplemental"},
+    )
+    UserCompetitor.objects.create(user=user, competitor=competitor, is_active=True)
+    now = datetime(2026, 3, 24, 12, 0, tzinfo=UTC)
+    item = competitor.content_items.create(
+        platform=competitor.platform,
+        external_id="strict-main-item",
+        url="https://www.youtube.com/watch?v=strict-main-item",
+        title="Strict main item",
+        description="desc",
+        published_at=now - timedelta(hours=2),
+        duration_seconds=30,
+        meta={"content_type": "short"},
+    )
+
+    monkeypatch.setattr(report_pipeline, "youtube_profile_recent_shorts_gate_status", lambda **kwargs: (True, 2))
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", lambda **kwargs: [item])
+    monkeypatch.setattr(report_pipeline, "compute_competitor_baseline", lambda **kwargs: SimpleNamespace(vph_median=1.0, rph_median=1.0))
+    monkeypatch.setattr(report_pipeline, "_classify_item_drop_reason", lambda **kwargs: None)
+    monkeypatch.setattr(
+        report_pipeline,
+        "score_items_for_period",
+        lambda **kwargs: [
+            SimpleNamespace(
+                content_item=item,
+                competitor=competitor,
+                views_end=5000,
+                likes_end=100,
+                comments_end=10,
+                shares_end=1,
+                velocity=250.0,
+                score_type="delta",
+                delta_views=1000,
+                delta_hours=4.0,
+                er_end=0.022,
+                base_score=3.0,
+                adaptation_relevance_score=0.4,
+                adaptation_relevance_factors={"niche_stem_overlap": 0.22},
+                selection_path="strict",
+                fallback_reason=None,
+                score=3.4,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        report_pipeline,
+        "collect_youtube_topic_video_candidates",
+        lambda **kwargs: SimpleNamespace(
+            to_payload=lambda: {
+                "source": "supplemental_topic_video",
+                "queries": ["spoken english"],
+                "diagnostics": {"queries_built": 1, "queries_executed": 1, "final_candidates": 1},
+                "candidates": [
+                    {
+                        "source": "supplemental_topic_video",
+                        "video_id": "supp-1",
+                        "matched_queries": ["spoken english"],
+                        "hit_count": 1,
+                        "first_seen_rank": 1,
+                    }
+                ],
+            },
+            diagnostics={"queries_built": 1, "queries_executed": 1, "final_candidates": 1},
+        ),
+    )
+
+    preview = build_report_preview(
+        user=user,
+        period_start=now - timedelta(hours=24),
+        period_end=now,
+    )
+
+    youtube_section = next(section for section in preview.payload["sections"] if section["platform"] == Platform.YOUTUBE)
+    assert [item["video_id"] for item in youtube_section["items"]] == ["strict-main-item"]
+    assert preview.section_counts[Platform.YOUTUBE] == 1
+    assert preview.payload["supplemental"]["youtube_topic_video"]["diagnostics"]["final_candidates"] == 1
+    assert preview.payload["supplemental"]["youtube_topic_video"]["candidates"][0]["video_id"] == "supp-1"
+
+
 def test_build_report_preview_fallback_still_respects_already_reported_and_stopwords(db, monkeypatch, settings):
     settings.REPORT_FALLBACK_MIN_ITEMS_PER_PLATFORM = 2
     user = TgUser.objects.create(tg_user_id=173, tg_chat_id=173, timezone_str="UTC", report_stopwords=["blocked"])

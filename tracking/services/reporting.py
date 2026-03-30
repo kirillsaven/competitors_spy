@@ -29,6 +29,7 @@ def build_report_payload(
     baseline_by_competitor_id: dict[int, object] | None = None,
     platform_notes: dict[str, str] | None = None,
     platform_diagnostics: dict[str, dict] | None = None,
+    supplemental: dict[str, dict] | None = None,
 ) -> dict:
     max_items_per_platform = max(1, int(getattr(settings, "REPORT_MAX_ITEMS_PER_PLATFORM", 10) or 10))
     section_items: dict[str, list[dict]] = {platform: [] for platform in PLATFORM_SECTION_ORDER}
@@ -100,7 +101,7 @@ def build_report_payload(
             }
         )
 
-    return {
+    payload = {
         "period_start": period_start.isoformat(),
         "period_end": period_end.isoformat(),
         "sections": [
@@ -113,6 +114,9 @@ def build_report_payload(
             for platform in PLATFORM_SECTION_ORDER
         ],
     }
+    if supplemental:
+        payload["supplemental"] = dict(supplemental)
+    return payload
 
 
 def build_setup_verification_payload(*, generated_at: datetime, sections: list[dict]) -> dict:
