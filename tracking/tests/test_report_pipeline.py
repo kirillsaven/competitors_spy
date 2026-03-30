@@ -850,6 +850,217 @@ def test_build_report_preview_reports_stopwords_reason_and_payload_diagnostics(d
     assert "Причина: Все подходящие ролики скрыты вашими стоп-словами." in preview.text
 
 
+def test_build_report_preview_keeps_strict_items_when_platform_already_has_enough(db, monkeypatch, settings):
+    settings.REPORT_FALLBACK_MIN_ITEMS_PER_PLATFORM = 2
+    user = TgUser.objects.create(tg_user_id=171, tg_chat_id=171, timezone_str="UTC")
+    competitor = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="yt-strict-enough",
+        handle="yt_strict_enough",
+        url="https://youtube.com/@yt_strict_enough",
+        display_name="YT Strict Enough",
+    )
+    UserCompetitor.objects.create(user=user, competitor=competitor, is_active=True)
+    now = datetime(2026, 3, 24, 12, 0, tzinfo=UTC)
+    first = competitor.content_items.create(
+        platform=competitor.platform,
+        external_id="strict-1",
+        url="https://www.youtube.com/watch?v=strict-1",
+        title="Strict 1",
+        description="desc",
+        published_at=now - timedelta(hours=2),
+        duration_seconds=30,
+        meta={"content_type": "short"},
+    )
+    second = competitor.content_items.create(
+        platform=competitor.platform,
+        external_id="strict-2",
+        url="https://www.youtube.com/watch?v=strict-2",
+        title="Strict 2",
+        description="desc",
+        published_at=now - timedelta(hours=1),
+        duration_seconds=30,
+        meta={"content_type": "short"},
+    )
+    fallback = competitor.content_items.create(
+        platform=competitor.platform,
+        external_id="fallback-1",
+        url="https://www.youtube.com/watch?v=fallback-1",
+        title="Fallback 1",
+        description="desc",
+        published_at=now - timedelta(hours=3),
+        duration_seconds=30,
+        meta={"content_type": "short"},
+    )
+
+    monkeypatch.setattr(report_pipeline, "youtube_profile_recent_shorts_gate_status", lambda **kwargs: (True, 2))
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", lambda **kwargs: [first, second, fallback])
+    monkeypatch.setattr(report_pipeline, "compute_competitor_baseline", lambda **kwargs: SimpleNamespace(vph_median=1.0, rph_median=1.0))
+
+    def fake_score_items_for_period(**kwargs):
+        selection_mode = kwargs["selection_mode"]
+        if selection_mode == "strict":
+            return [
+                SimpleNamespace(content_item=first, competitor=competitor, views_end=5000, likes_end=100, comments_end=10, shares_end=1, velocity=250.0, score_type="delta", delta_views=1000, delta_hours=4.0, er_end=0.022, base_score=3.0, adaptation_relevance_score=0.4, adaptation_relevance_factors={"niche_stem_overlap": 0.22}, selection_path="strict", fallback_reason=None, score=3.4),
+                SimpleNamespace(content_item=second, competitor=competitor, views_end=4500, likes_end=90, comments_end=9, shares_end=1, velocity=220.0, score_type="delta", delta_views=900, delta_hours=4.0, er_end=0.021, base_score=2.8, adaptation_relevance_score=0.3, adaptation_relevance_factors={"niche_stem_overlap": 0.22}, selection_path="strict", fallback_reason=None, score=3.1),
+            ]
+        return [
+            SimpleNamespace(content_item=fallback, competitor=competitor, views_end=3000, likes_end=70, comments_end=7, shares_end=1, velocity=150.0, score_type="fallback_delta", delta_views=180, delta_hours=4.0, er_end=0.019, base_score=2.0, adaptation_relevance_score=0.45, adaptation_relevance_factors={"niche_stem_overlap": 0.22}, selection_path="fallback", fallback_reason="delta_threshold_relaxed", score=2.45),
+        ]
+
+    monkeypatch.setattr(report_pipeline, "score_items_for_period", fake_score_items_for_period)
+
+    preview = build_report_preview(
+        user=user,
+        period_start=now - timedelta(hours=24),
+        period_end=now,
+    )
+
+    section = next(section for section in preview.payload["sections"] if section["platform"] == Platform.YOUTUBE)
+    assert [item["video_id"] for item in section["items"]] == ["strict-1", "strict-2"]
+    assert section["diagnostics"]["strict_items"] == 2
+    assert section["diagnostics"]["fallback_items"] == 0
+
+
+def test_build_report_preview_adds_fallback_items_when_strict_path_is_thin(db, monkeypatch, settings):
+    settings.REPORT_FALLBACK_MIN_ITEMS_PER_PLATFORM = 2
+    settings.REPORT_FALLBACK_MAX_ITEMS_PER_PLATFORM = 2
+    user = TgUser.objects.create(tg_user_id=172, tg_chat_id=172, timezone_str="UTC")
+    competitor = Competitor.objects.create(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-fallback-thin",
+        handle="ig_fallback_thin",
+        url="https://www.instagram.com/ig_fallback_thin/",
+        display_name="IG Fallback Thin",
+    )
+    UserCompetitor.objects.create(user=user, competitor=competitor, is_active=True)
+    now = datetime(2026, 3, 24, 12, 0, tzinfo=UTC)
+    strict_item = competitor.content_items.create(
+        platform=competitor.platform,
+        external_id="strict-item",
+        url="https://www.instagram.com/reel/strict-item/",
+        title="Strict item",
+        description="desc",
+        published_at=now - timedelta(hours=2),
+        duration_seconds=30,
+        meta={"content_type": "reel"},
+    )
+    fallback_item = competitor.content_items.create(
+        platform=competitor.platform,
+        external_id="fallback-item",
+        url="https://www.instagram.com/reel/fallback-item/",
+        title="Fallback item",
+        description="desc",
+        published_at=now - timedelta(hours=1),
+        duration_seconds=30,
+        meta={"content_type": "reel"},
+    )
+
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", lambda **kwargs: [strict_item, fallback_item])
+    monkeypatch.setattr(report_pipeline, "compute_competitor_baseline", lambda **kwargs: SimpleNamespace(vph_median=1.0, rph_median=1.0))
+
+    def fake_score_items_for_period(**kwargs):
+        selection_mode = kwargs["selection_mode"]
+        if selection_mode == "strict":
+            return [
+                SimpleNamespace(content_item=strict_item, competitor=competitor, views_end=5000, likes_end=100, comments_end=10, shares_end=1, velocity=250.0, score_type="delta", delta_views=1000, delta_hours=4.0, er_end=0.022, base_score=3.0, adaptation_relevance_score=0.4, adaptation_relevance_factors={"niche_stem_overlap": 0.22}, selection_path="strict", fallback_reason=None, score=3.4),
+            ]
+        return [
+            SimpleNamespace(content_item=fallback_item, competitor=competitor, views_end=3200, likes_end=80, comments_end=8, shares_end=1, velocity=160.0, score_type="fallback_delta", delta_views=180, delta_hours=4.0, er_end=0.02, base_score=2.1, adaptation_relevance_score=0.5, adaptation_relevance_factors={"instructional_markers": 0.2}, selection_path="fallback", fallback_reason="delta_threshold_relaxed", score=2.6),
+        ]
+
+    monkeypatch.setattr(report_pipeline, "score_items_for_period", fake_score_items_for_period)
+
+    preview = build_report_preview(
+        user=user,
+        period_start=now - timedelta(hours=24),
+        period_end=now,
+    )
+
+    section = next(section for section in preview.payload["sections"] if section["platform"] == Platform.INSTAGRAM)
+    assert [item["video_id"] for item in section["items"]] == ["strict-item", "fallback-item"]
+    assert section["items"][1]["selection_path"] == "fallback"
+    assert section["items"][1]["fallback_reason"] == "delta_threshold_relaxed"
+    assert section["diagnostics"]["strict_items"] == 1
+    assert section["diagnostics"]["fallback_candidates"] == 1
+    assert section["diagnostics"]["fallback_items"] == 1
+    assert section["diagnostics"]["fallback_reasons_used"] == {"delta_threshold_relaxed": 1}
+
+
+def test_build_report_preview_fallback_still_respects_already_reported_and_stopwords(db, monkeypatch, settings):
+    settings.REPORT_FALLBACK_MIN_ITEMS_PER_PLATFORM = 2
+    user = TgUser.objects.create(tg_user_id=173, tg_chat_id=173, timezone_str="UTC", report_stopwords=["blocked"])
+    competitor = Competitor.objects.create(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-fallback-blocked",
+        handle="ig_fallback_blocked",
+        url="https://www.instagram.com/ig_fallback_blocked/",
+        display_name="IG Fallback Blocked",
+    )
+    UserCompetitor.objects.create(user=user, competitor=competitor, is_active=True)
+    now = datetime(2026, 3, 24, 12, 0, tzinfo=UTC)
+    already_reported = competitor.content_items.create(
+        platform=competitor.platform,
+        external_id="already-reported",
+        url="https://www.instagram.com/reel/already-reported/",
+        title="Relevant fallback one",
+        description="desc",
+        published_at=now - timedelta(hours=2),
+        duration_seconds=30,
+        meta={"content_type": "reel"},
+    )
+    blocked = competitor.content_items.create(
+        platform=competitor.platform,
+        external_id="blocked-fallback",
+        url="https://www.instagram.com/reel/blocked-fallback/",
+        title="Blocked fallback",
+        description="blocked topic",
+        published_at=now - timedelta(hours=1),
+        duration_seconds=30,
+        meta={"content_type": "reel"},
+    )
+    Report.objects.create(
+        user=user,
+        period_start=now - timedelta(days=1),
+        period_end=now - timedelta(hours=12),
+        status="sent",
+        payload={
+            "sections": [
+                {
+                    "platform": Platform.INSTAGRAM,
+                    "items": [{"platform": Platform.INSTAGRAM, "video_id": "already-reported", "url": already_reported.url}],
+                }
+            ]
+        },
+    )
+
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", lambda **kwargs: [already_reported, blocked])
+    monkeypatch.setattr(report_pipeline, "compute_competitor_baseline", lambda **kwargs: SimpleNamespace(vph_median=1.0, rph_median=1.0))
+
+    def fake_score_items_for_period(**kwargs):
+        if kwargs["selection_mode"] == "strict":
+            return []
+        return [
+            SimpleNamespace(content_item=already_reported, competitor=competitor, views_end=3200, likes_end=80, comments_end=8, shares_end=1, velocity=160.0, score_type="fallback_delta", delta_views=180, delta_hours=4.0, er_end=0.02, base_score=2.1, adaptation_relevance_score=0.5, adaptation_relevance_factors={"instructional_markers": 0.2}, selection_path="fallback", fallback_reason="delta_threshold_relaxed", score=2.6),
+            SimpleNamespace(content_item=blocked, competitor=competitor, views_end=3000, likes_end=75, comments_end=7, shares_end=1, velocity=150.0, score_type="fallback_delta", delta_views=170, delta_hours=4.0, er_end=0.019, base_score=2.0, adaptation_relevance_score=0.45, adaptation_relevance_factors={"instructional_markers": 0.2}, selection_path="fallback", fallback_reason="delta_threshold_relaxed", score=2.45),
+        ]
+
+    monkeypatch.setattr(report_pipeline, "score_items_for_period", fake_score_items_for_period)
+
+    preview = build_report_preview(
+        user=user,
+        period_start=now - timedelta(hours=24),
+        period_end=now,
+    )
+
+    section = next(section for section in preview.payload["sections"] if section["platform"] == Platform.INSTAGRAM)
+    assert section["items"] == []
+    assert section["diagnostics"]["fallback_candidates"] == 2
+    assert section["diagnostics"]["fallback_items"] == 0
+    assert section["diagnostics"]["fallback_rejected_by_already_reported"] == 1
+    assert section["diagnostics"]["fallback_rejected_by_stopwords"] == 1
+
+
 def test_build_setup_verification_preview_uses_latest_visible_item_when_newest_is_blocked(db, monkeypatch):
     user = TgUser.objects.create(tg_user_id=18, tg_chat_id=18, timezone_str="UTC", report_stopwords=["spoiler"])
     competitor = Competitor.objects.create(

@@ -32,6 +32,13 @@ def _env_int(name: str, default: int) -> int:
     return int(v)
 
 
+def _env_float(name: str, default: float) -> float:
+    v = os.environ.get(name)
+    if v is None or not v.strip():
+        return default
+    return float(v)
+
+
 def _env_list(name: str, default: list[str] | None = None) -> list[str]:
     v = os.environ.get(name)
     if v is None:
@@ -189,6 +196,10 @@ MAX_COMPETITORS_YOUTUBE = MAX_COMPETITORS_PER_PLATFORM
 MIN_DELTA_VIEWS = _env_int("MIN_DELTA_VIEWS", 500)
 MIN_VIEWS_END = _env_int("MIN_VIEWS_END", 1000)
 REPORT_MAX_ITEM_AGE_DAYS = _env_int("REPORT_MAX_ITEM_AGE_DAYS", 60)
+REPORT_FALLBACK_MIN_ITEMS_PER_PLATFORM = _env_int("REPORT_FALLBACK_MIN_ITEMS_PER_PLATFORM", 2)
+REPORT_FALLBACK_MAX_ITEMS_PER_PLATFORM = _env_int("REPORT_FALLBACK_MAX_ITEMS_PER_PLATFORM", 2)
+REPORT_FALLBACK_MIN_ADAPTATION_SCORE = _env_float("REPORT_FALLBACK_MIN_ADAPTATION_SCORE", 0.35)
+REPORT_FALLBACK_DELTA_RATIO = _env_float("REPORT_FALLBACK_DELTA_RATIO", 0.35)
 YT_MAX_SEARCH_CALLS_PER_SETUP = _env_int("YT_MAX_SEARCH_CALLS_PER_SETUP", 5)
 SETUP_RETRY_CACHE_TTL_SECONDS = _env_int("SETUP_RETRY_CACHE_TTL_SECONDS", 300)
 YOUTUBE_SEARCH_CACHE_TTL_SECONDS = _env_int("YOUTUBE_SEARCH_CACHE_TTL_SECONDS", 21600)

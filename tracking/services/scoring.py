@@ -177,6 +177,8 @@ class ScoredItem:
     base_score: float
     adaptation_relevance_score: float
     adaptation_relevance_factors: dict[str, float]
+    selection_path: str
+    fallback_reason: str | None
     score: float
 
 
@@ -346,6 +348,26 @@ def _compute_adaptation_relevance(
     return adaptation_score, dict(sorted(factors.items(), key=lambda item: (-abs(item[1]), item[0])))
 
 
+def _fallback_candidate_passes(
+    *,
+    adaptation_relevance_score: float,
+    adaptation_relevance_factors: dict[str, float],
+    delta_views: int,
+    effective_min_delta: int,
+) -> tuple[bool, str | None]:
+    min_adaptation_score = float(getattr(settings, "REPORT_FALLBACK_MIN_ADAPTATION_SCORE", 0.35) or 0.35)
+    delta_ratio = float(getattr(settings, "REPORT_FALLBACK_DELTA_RATIO", 0.35) or 0.35)
+    relaxed_min_delta = max(int(effective_min_delta * delta_ratio), 20)
+    has_negative_penalty = any(float(value) < 0 for value in (adaptation_relevance_factors or {}).values())
+    if adaptation_relevance_score < min_adaptation_score:
+        return False, None
+    if has_negative_penalty:
+        return False, None
+    if delta_views < relaxed_min_delta:
+        return False, None
+    return True, "delta_threshold_relaxed"
+
+
 def compute_competitor_baseline(*, competitor: Competitor, now: datetime) -> BaselineMetrics:
     window_days = int(getattr(settings, "BASELINE_WINDOW_DAYS", 30))
     n_items = int(getattr(settings, "BASELINE_N", 30))
@@ -448,6 +470,7 @@ def score_items_for_period(
     period_start: datetime,
     period_end: datetime,
     adaptation_context: AdaptationContext | None = None,
+    selection_mode: str = "strict",
 ) -> list[ScoredItem]:
     scored: list[ScoredItem] = []
     min_delta_views = int(getattr(settings, "MIN_DELTA_VIEWS", 500))
@@ -471,6 +494,11 @@ def score_items_for_period(
         baseline = baseline_by_competitor_id.get(competitor.id)
         if not baseline:
             continue
+        adaptation_relevance_score, adaptation_relevance_factors = _compute_adaptation_relevance(
+            item=item,
+            competitor=competitor,
+            adaptation_context=adaptation_context,
+        )
 
         snap_end = (
             MetricSnapshot.objects.filter(content_item=item, captured_at__lte=period_end).order_by("-captured_at").first()
@@ -495,6 +523,7 @@ def score_items_for_period(
         delta_hours: float | None = None
         velocity: float | None = None
         score_type = "current_vph"
+        fallback_reason: str | None = None
 
         if snap_start:
             dv = views_end - int(snap_start.views)
@@ -505,10 +534,22 @@ def score_items_for_period(
                 # Scale the "minimal meaningful delta" by period length. MIN_DELTA_VIEWS is treated as a 24h threshold.
                 effective_min_delta = max(int(min_delta_views * (dh / 24.0)), min_delta_floor)
                 if dv < effective_min_delta and period_hours > short_window_fallback_hours:
-                    continue
+                    if selection_mode != "fallback":
+                        continue
+                    fallback_allowed, fallback_reason = _fallback_candidate_passes(
+                        adaptation_relevance_score=adaptation_relevance_score,
+                        adaptation_relevance_factors=adaptation_relevance_factors,
+                        delta_views=dv,
+                        effective_min_delta=effective_min_delta,
+                    )
+                    if not fallback_allowed:
+                        continue
                 if dv >= effective_min_delta:
                     velocity = float(dv) / dh
                     score_type = "delta"
+                elif fallback_reason is not None:
+                    velocity = float(dv) / dh
+                    score_type = "fallback_delta"
 
         if velocity is None:
             # Warm-up fallback: avoid tiny videos where vph is too noisy.
@@ -518,6 +559,9 @@ def score_items_for_period(
             if age_hours <= 0:
                 continue
             velocity = float(views_end) / age_hours
+
+        if selection_mode == "fallback" and fallback_reason is None:
+            continue
 
         er_end: float | None = None
         if snap_end.likes is not None and snap_end.comments is not None and snap_end.views > 0:
@@ -543,11 +587,6 @@ def score_items_for_period(
             + (0.20 * min(virality_ratio, 25.0) / 5.0)
             + (0.20 * recency_bonus)
         )
-        adaptation_relevance_score, adaptation_relevance_factors = _compute_adaptation_relevance(
-            item=item,
-            competitor=competitor,
-            adaptation_context=adaptation_context,
-        )
         score = base_score + adaptation_relevance_score
 
         scored.append(
@@ -566,6 +605,8 @@ def score_items_for_period(
                 base_score=base_score,
                 adaptation_relevance_score=adaptation_relevance_score,
                 adaptation_relevance_factors=adaptation_relevance_factors,
+                selection_path="fallback" if fallback_reason else "strict",
+                fallback_reason=fallback_reason,
                 score=score,
             )
         )
