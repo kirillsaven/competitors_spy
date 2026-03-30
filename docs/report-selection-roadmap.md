@@ -152,6 +152,27 @@ Verified on the stored March 30 snapshot:
 
 Keep the work split into narrow PRs. Do not mix selection tuning, diagnostics, and relevance logic into one rollout.
 
+### Architectural position: competitor-based core, video-first only as a supplemental lane
+
+- We are **not** planning a full transition from the current competitor-based model to direct topic-video search.
+- The main model remains:
+  - `competitor-based tracking`
+  - `baseline-aware scoring`
+- A video-first flow is considered only as a **supplemental lane**.
+- The purpose of the supplemental lane is:
+  - to find new video ideas
+  - to find new potential competitors first noticed through videos
+  - to improve recall when the main competitor lane produces too few strong candidates
+- The supplemental lane should not become the sole source for regular reports in its first iterations.
+
+### Why the roadmap stays hybrid
+
+- The hybrid is not useful because it magically removes the hard parts of video search and ranking.
+- It is useful because it lets us test a video-first source safely and incrementally.
+- If the supplemental lane is weak, the core competitor-based report still works.
+- If the supplemental lane is strong, it adds expansion and discovery value.
+- This reduces the risk of a full cutover onto an immature video-first ranking stack.
+
 ### PR 1. Forensic + roadmap
 
 - Add this investigation note and roadmap.
@@ -238,3 +259,24 @@ Keep the work split into narrow PRs. Do not mix selection tuning, diagnostics, a
   - fallback entry conditions
   - recency bonus weight
 - Keep this PR data-driven and separate from fetch-depth/relevance PRs.
+
+## C. Future Exploration: YouTube supplemental topic-video lane
+
+- First step is YouTube only.
+- This is not a replacement for the competitor lane.
+- Treat it as an additional discovery/source layer, not as the main ranking source in early iterations.
+- Intended use cases:
+  - surface new video ideas
+  - surface new potential competitors first noticed through videos
+- Initial rollout should be experimental and diagnostic:
+  - log how often the lane finds useful candidates
+  - compare overlap vs. competitor-lane outputs
+  - keep its output clearly separated from the core report path until it proves value
+
+### Candidate promotion flow
+
+`video-discovered creators -> suggested competitors / add-to-tracking`
+
+- If the supplemental lane repeatedly surfaces useful videos from the same creator, the system can suggest that creator as a new competitor.
+- Start with suggestion/recommendation only.
+- Do not auto-add video-discovered creators to tracking in the first iterations.
