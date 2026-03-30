@@ -3,15 +3,134 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import math
+import re
+from typing import Any, Iterable
 
 from django.conf import settings
 
+from common.text import _normalize_token, _stem_token
 from common.stats import iqr, median
 
 from tracking.models import Competitor, CompetitorBaseline, ContentItem, MetricSnapshot, Platform
 
 
 EPS = 1e-6
+_TOKEN_RE = re.compile(r"[0-9a-zа-яё]+", re.IGNORECASE)
+_META_TEXT_KEYS = {"description", "biography", "signature", "about", "headline", "summary", "keywords"}
+_INSTRUCTIONAL_MARKER_STEMS = {
+    _stem_token(value)
+    for value in (
+        "lesson",
+        "урок",
+        "guide",
+        "гайд",
+        "tutorial",
+        "how",
+        "разбор",
+        "tips",
+        "tip",
+        "совет",
+        "mistakes",
+        "ошибки",
+        "grammar",
+        "vocabulary",
+        "pronunciation",
+        "example",
+        "examples",
+        "exercise",
+        "упражнение",
+    )
+}
+_FORMAT_MARKER_STEMS = {
+    _stem_token(value)
+    for value in (
+        "checklist",
+        "чеклист",
+        "template",
+        "script",
+        "formula",
+        "framework",
+        "dialogue",
+        "dialog",
+        "диалог",
+        "разбор",
+        "example",
+        "examples",
+        "step",
+        "steps",
+        "plan",
+    )
+}
+_LOW_ADAPTATION_VALUE_STEMS = {
+    _stem_token(value)
+    for value in (
+        "viral",
+        "funny",
+        "meme",
+        "prank",
+        "drama",
+        "gossip",
+        "celebrity",
+        "dating",
+        "reaction",
+        "react",
+        "challenge",
+        "trend",
+        "trending",
+        "asmr",
+        "unboxing",
+        "shopping",
+        "giveaway",
+        "luxury",
+        "flex",
+        "vlog",
+        "shorts",
+    )
+}
+_SUBJECT_CLUSTER_MARKERS = {
+    "education_language": {
+        _stem_token(value)
+        for value in (
+            "english",
+            "language",
+            "grammar",
+            "vocabulary",
+            "pronunciation",
+            "speaking",
+            "lesson",
+            "teacher",
+            "tutor",
+            "английский",
+            "язык",
+            "грамматика",
+            "словарь",
+            "разговорный",
+            "репетитор",
+            "урок",
+        )
+    },
+    "beauty": {
+        _stem_token(value)
+        for value in ("makeup", "skincare", "beauty", "cosmetic", "nails", "hair", "макияж", "косметика", "маникюр")
+    },
+    "food": {_stem_token(value) for value in ("recipe", "cook", "cooking", "meal", "baking", "food", "рецепт", "еда", "кухня")},
+    "fitness": {
+        _stem_token(value)
+        for value in ("workout", "fitness", "gym", "diet", "yoga", "weightloss", "тренировка", "фитнес", "диета")
+    },
+    "gaming": {
+        _stem_token(value)
+        for value in ("game", "gaming", "minecraft", "fortnite", "dota", "stream", "стрим", "игра")
+    },
+    "finance": {
+        _stem_token(value)
+        for value in ("crypto", "trading", "invest", "investment", "bitcoin", "forex", "stock", "крипта", "инвестиции")
+    },
+    "entertainment": {
+        _stem_token(value)
+        for value in ("prank", "meme", "celebrity", "gossip", "drama", "funny", "dance", "dating", "влог", "мем")
+    },
+}
 
 
 def _is_youtube_short_item(item: ContentItem) -> bool:
@@ -33,6 +152,16 @@ class BaselineMetrics:
 
 
 @dataclass(frozen=True)
+class AdaptationContext:
+    niche_keywords: tuple[str, ...]
+    keyword_stems: frozenset[str]
+    keyword_phrases: tuple[str, ...]
+    account_stems: frozenset[str]
+    dominant_script: str | None
+    dominant_subject_cluster: str | None
+
+
+@dataclass(frozen=True)
 class ScoredItem:
     content_item: ContentItem
     competitor: Competitor
@@ -45,7 +174,176 @@ class ScoredItem:
     delta_views: int | None
     delta_hours: float | None
     er_end: float | None
+    base_score: float
+    adaptation_relevance_score: float
+    adaptation_relevance_factors: dict[str, float]
     score: float
+
+
+def _normalized_text(value: str | None) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip().lower()).strip()
+
+
+def _text_tokens(*values: str | None) -> list[str]:
+    tokens: list[str] = []
+    for value in values:
+        for raw in _TOKEN_RE.findall(str(value or "")):
+            token = _normalize_token(raw)
+            if len(token) >= 3:
+                tokens.append(token)
+    return tokens
+
+
+def _text_stems(*values: str | None) -> set[str]:
+    return {_stem_token(token) for token in _text_tokens(*values)}
+
+
+def _dominant_script(*values: str | None) -> str | None:
+    latin = 0
+    cyrillic = 0
+    for token in _text_tokens(*values):
+        if re.search(r"[a-z]", token, re.IGNORECASE):
+            latin += 1
+        if re.search(r"[а-яё]", token, re.IGNORECASE):
+            cyrillic += 1
+    total = latin + cyrillic
+    if total < 4:
+        return None
+    if latin / total >= 0.7:
+        return "latin"
+    if cyrillic / total >= 0.7:
+        return "cyrillic"
+    return None
+
+
+def _dominant_subject_cluster(stems: set[str]) -> str | None:
+    best_cluster: str | None = None
+    best_score = 0
+    for cluster, markers in _SUBJECT_CLUSTER_MARKERS.items():
+        score = len(stems & markers)
+        if score > best_score:
+            best_cluster = cluster
+            best_score = score
+    return best_cluster if best_score >= 2 else None
+
+
+def _iter_profile_texts(records: Iterable[Any]) -> list[str]:
+    texts: list[str] = []
+    for record in records:
+        for attr in ("display_name", "handle", "title", "description"):
+            value = str(getattr(record, attr, "") or "").strip()
+            if value:
+                texts.append(value)
+        meta = getattr(record, "meta", None)
+        if isinstance(meta, dict):
+            for key, value in meta.items():
+                if str(key or "").strip().lower() not in _META_TEXT_KEYS:
+                    continue
+                text = str(value or "").strip()
+                if text:
+                    texts.append(text)
+    return texts
+
+
+def build_adaptation_context(
+    *,
+    niche_keywords: list[str] | tuple[str, ...] | None,
+    linked_accounts: Iterable[Any] | None = None,
+    competitors: Iterable[Any] | None = None,
+) -> AdaptationContext | None:
+    normalized_keywords = tuple(
+        phrase
+        for phrase in (_normalized_text(keyword) for keyword in list(niche_keywords or []))
+        if phrase
+    )
+    keyword_stems = frozenset(_text_stems(*normalized_keywords))
+    keyword_phrases = tuple(
+        phrase for phrase in normalized_keywords if 2 <= len(_text_tokens(phrase)) <= 5
+    )
+    account_texts = _iter_profile_texts(linked_accounts or [])
+    competitor_texts = _iter_profile_texts(competitors or [])
+    account_stems = frozenset(_text_stems(*(account_texts + competitor_texts)) - set(keyword_stems))
+    context_texts = list(normalized_keywords) + account_texts + competitor_texts
+    if not keyword_stems and not account_stems and not keyword_phrases:
+        return None
+    return AdaptationContext(
+        niche_keywords=normalized_keywords,
+        keyword_stems=keyword_stems,
+        keyword_phrases=keyword_phrases,
+        account_stems=account_stems,
+        dominant_script=_dominant_script(*context_texts),
+        dominant_subject_cluster=_dominant_subject_cluster(set(keyword_stems) | set(account_stems)),
+    )
+
+
+def _competitor_profile_stems(competitor: Competitor) -> set[str]:
+    return _text_stems(*_iter_profile_texts([competitor]))
+
+
+def _compute_adaptation_relevance(
+    *,
+    item: ContentItem,
+    competitor: Competitor,
+    adaptation_context: AdaptationContext | None,
+) -> tuple[float, dict[str, float]]:
+    if adaptation_context is None:
+        return 0.0, {}
+
+    text = f"{item.title or ''}\n{item.description or ''}"
+    normalized_text = _normalized_text(text)
+    item_stems = _text_stems(text)
+    if not item_stems and not normalized_text:
+        return 0.0, {}
+
+    factors: dict[str, float] = {}
+    keyword_overlap = len(item_stems & set(adaptation_context.keyword_stems))
+    phrase_matches = sum(1 for phrase in adaptation_context.keyword_phrases if phrase in normalized_text)
+    account_overlap = len(item_stems & set(adaptation_context.account_stems))
+    competitor_overlap = len(item_stems & _competitor_profile_stems(competitor))
+    topical_alignment = keyword_overlap + phrase_matches
+
+    if keyword_overlap:
+        factors["niche_stem_overlap"] = min(keyword_overlap, 4) * 0.22
+    if phrase_matches:
+        factors["niche_phrase_match"] = min(phrase_matches, 2) * 0.30
+    if topical_alignment > 0 and account_overlap:
+        factors["account_context_overlap"] = min(account_overlap, 3) * 0.08
+    if topical_alignment > 0 and competitor_overlap:
+        factors["competitor_profile_overlap"] = min(competitor_overlap, 3) * 0.06
+
+    instructional_hits = len(item_stems & _INSTRUCTIONAL_MARKER_STEMS)
+    if topical_alignment > 0 and instructional_hits:
+        factors["instructional_markers"] = 0.18 + (min(instructional_hits, 3) * 0.04)
+    format_hits = len(item_stems & _FORMAT_MARKER_STEMS)
+    if topical_alignment > 0 and format_hits:
+        factors["format_markers"] = 0.10 + (min(format_hits, 2) * 0.03)
+    if topical_alignment >= 2 and competitor_overlap > 0:
+        factors["repeated_theme_boost"] = 0.12
+
+    item_cluster = _dominant_subject_cluster(item_stems)
+    if (
+        adaptation_context.dominant_subject_cluster
+        and item_cluster
+        and item_cluster != adaptation_context.dominant_subject_cluster
+        and topical_alignment <= 0
+    ):
+        factors["subject_mismatch_penalty"] = -0.45
+
+    item_script = _dominant_script(text)
+    if (
+        adaptation_context.dominant_script
+        and item_script
+        and item_script != adaptation_context.dominant_script
+        and topical_alignment <= 0
+    ):
+        factors["language_mismatch_penalty"] = -0.25
+
+    low_adaptation_hits = len(item_stems & _LOW_ADAPTATION_VALUE_STEMS)
+    if topical_alignment <= 0 and low_adaptation_hits:
+        factors["off_topic_penalty"] = -0.18 - (min(low_adaptation_hits, 3) * 0.09)
+
+    adaptation_score = round(sum(factors.values()), 4)
+    return adaptation_score, dict(sorted(factors.items(), key=lambda item: (-abs(item[1]), item[0])))
 
 
 def compute_competitor_baseline(*, competitor: Competitor, now: datetime) -> BaselineMetrics:
@@ -149,6 +447,7 @@ def score_items_for_period(
     baseline_by_competitor_id: dict[int, BaselineMetrics],
     period_start: datetime,
     period_end: datetime,
+    adaptation_context: AdaptationContext | None = None,
 ) -> list[ScoredItem]:
     scored: list[ScoredItem] = []
     min_delta_views = int(getattr(settings, "MIN_DELTA_VIEWS", 500))
@@ -237,13 +536,19 @@ def score_items_for_period(
         baseline_vph = float(baseline.vph_median or 0.0)
         virality_ratio = float(velocity) / max(baseline_vph, EPS) if baseline_vph > 0 else 0.0
         recency_bonus = max(0.0, 1.0 - min(age_hours_end / float(max(max_age_days * 24, 1)), 1.0))
-        score = (
+        base_score = (
             relative_score
             + (0.32 * delta_signal)
             + (0.18 * views_signal)
             + (0.20 * min(virality_ratio, 25.0) / 5.0)
             + (0.20 * recency_bonus)
         )
+        adaptation_relevance_score, adaptation_relevance_factors = _compute_adaptation_relevance(
+            item=item,
+            competitor=competitor,
+            adaptation_context=adaptation_context,
+        )
+        score = base_score + adaptation_relevance_score
 
         scored.append(
             ScoredItem(
@@ -258,6 +563,9 @@ def score_items_for_period(
                 delta_views=delta_views,
                 delta_hours=delta_hours,
                 er_end=er_end,
+                base_score=base_score,
+                adaptation_relevance_score=adaptation_relevance_score,
+                adaptation_relevance_factors=adaptation_relevance_factors,
                 score=score,
             )
         )

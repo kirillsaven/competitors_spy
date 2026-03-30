@@ -1,11 +1,20 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
 from tracking.models import Competitor, ContentItem, MetricSnapshot, Platform, TgUser, UserCompetitor
-from tracking.services.scoring import BaselineMetrics, compute_competitor_baseline, score_items_for_period
+from tracking.services.scoring import BaselineMetrics, build_adaptation_context, compute_competitor_baseline, score_items_for_period
+
+
+def _adaptation_context(*, keywords: list[str], linked_accounts: list[object] | None = None, competitors: list[object] | None = None):
+    return build_adaptation_context(
+        niche_keywords=keywords,
+        linked_accounts=linked_accounts or [],
+        competitors=competitors or [],
+    )
 
 
 @pytest.mark.django_db
@@ -233,6 +242,183 @@ def test_score_items_for_period_recency_bonus_prefers_fresher_item_when_other_si
     )
 
     assert [entry.content_item.external_id for entry in scored] == ["fresh-5d", "older-30d"]
+
+
+@pytest.mark.django_db
+def test_score_items_for_period_boosts_on_niche_item_over_off_topic_viralish_item(settings) -> None:
+    settings.REPORT_MAX_ITEM_AGE_DAYS = 60
+    settings.MIN_VIEWS_END = 1000
+    comp = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="UC-ADAPT-BOOST",
+        display_name="English Teacher",
+        handle="english_teacher",
+        meta={"description": "english grammar speaking vocabulary lessons"},
+    )
+    period_start = datetime(2026, 3, 29, 0, 0, tzinfo=UTC)
+    period_end = datetime(2026, 3, 30, 0, 0, tzinfo=UTC)
+    on_niche = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.YOUTUBE,
+        external_id="on-niche",
+        url="https://www.youtube.com/watch?v=on-niche",
+        title="5 grammar mistakes in spoken English",
+        description="lesson with examples for english learners",
+        published_at=period_end - timedelta(days=3),
+        duration_seconds=55,
+        meta={"content_type": "short"},
+    )
+    off_topic = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.YOUTUBE,
+        external_id="off-topic",
+        url="https://www.youtube.com/watch?v=off-topic",
+        title="Celebrity prank goes viral",
+        description="funny trending reaction challenge",
+        published_at=period_end - timedelta(days=3),
+        duration_seconds=55,
+        meta={"content_type": "short"},
+    )
+    MetricSnapshot.objects.create(content_item=on_niche, captured_at=period_start, views=3000, likes=60, comments=6, extra={})
+    MetricSnapshot.objects.create(content_item=on_niche, captured_at=period_end, views=7000, likes=200, comments=18, extra={})
+    MetricSnapshot.objects.create(content_item=off_topic, captured_at=period_start, views=4000, likes=90, comments=8, extra={})
+    MetricSnapshot.objects.create(content_item=off_topic, captured_at=period_end, views=8500, likes=260, comments=22, extra={})
+
+    baseline = BaselineMetrics(vph_median=100.0, vph_iqr=20.0, er_median=0.02, er_iqr=0.01, n=10, rph_median=3.0, rph_iqr=1.0)
+    scored = score_items_for_period(
+        items=[off_topic, on_niche],
+        competitor_by_item_id={on_niche.id: comp, off_topic.id: comp},
+        baseline_by_competitor_id={comp.id: baseline},
+        period_start=period_start,
+        period_end=period_end,
+        adaptation_context=_adaptation_context(keywords=["english grammar", "spoken english", "english lessons"]),
+    )
+
+    assert [entry.content_item.external_id for entry in scored] == ["on-niche", "off-topic"]
+    assert scored[0].adaptation_relevance_score > 0
+    assert scored[1].adaptation_relevance_score < 0
+
+
+@pytest.mark.django_db
+def test_score_items_for_period_penalizes_obvious_off_topic_item(settings) -> None:
+    settings.MIN_VIEWS_END = 1000
+    comp = Competitor.objects.create(platform=Platform.INSTAGRAM, external_id="IG-OFF", display_name="Creator", meta={})
+    period_start = datetime(2026, 3, 29, 0, 0, tzinfo=UTC)
+    period_end = datetime(2026, 3, 30, 0, 0, tzinfo=UTC)
+    item = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.INSTAGRAM,
+        external_id="ig-off",
+        url="https://www.instagram.com/reel/ig-off/",
+        title="Luxury shopping haul prank",
+        description="viral celebrity drama and giveaway",
+        published_at=period_end - timedelta(days=2),
+        duration_seconds=30,
+        meta={"content_type": "reel"},
+    )
+    MetricSnapshot.objects.create(content_item=item, captured_at=period_start, views=3000, likes=60, comments=6, extra={})
+    MetricSnapshot.objects.create(content_item=item, captured_at=period_end, views=6000, likes=180, comments=12, extra={})
+
+    baseline = BaselineMetrics(vph_median=100.0, vph_iqr=20.0, er_median=0.02, er_iqr=0.01, n=10, rph_median=3.0, rph_iqr=1.0)
+    scored = score_items_for_period(
+        items=[item],
+        competitor_by_item_id={item.id: comp},
+        baseline_by_competitor_id={comp.id: baseline},
+        period_start=period_start,
+        period_end=period_end,
+        adaptation_context=_adaptation_context(keywords=["english lessons", "grammar", "spoken english"]),
+    )
+
+    assert len(scored) == 1
+    assert scored[0].adaptation_relevance_score < 0
+    assert "off_topic_penalty" in scored[0].adaptation_relevance_factors
+
+
+@pytest.mark.django_db
+def test_score_items_for_period_rewards_instructional_markers_when_topic_aligns(settings) -> None:
+    settings.MIN_VIEWS_END = 1000
+    comp = Competitor.objects.create(platform=Platform.YOUTUBE, external_id="UC-INSTR", display_name="English Coach", meta={})
+    period_start = datetime(2026, 3, 29, 0, 0, tzinfo=UTC)
+    period_end = datetime(2026, 3, 30, 0, 0, tzinfo=UTC)
+    instructional = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.YOUTUBE,
+        external_id="instructional",
+        url="https://www.youtube.com/watch?v=instructional",
+        title="How to improve English speaking: 3 mistakes",
+        description="lesson and examples for learners",
+        published_at=period_end - timedelta(days=1),
+        duration_seconds=55,
+        meta={"content_type": "short"},
+    )
+    generic = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.YOUTUBE,
+        external_id="generic",
+        url="https://www.youtube.com/watch?v=generic",
+        title="English speaking today",
+        description="english speaking practice",
+        published_at=period_end - timedelta(days=1),
+        duration_seconds=55,
+        meta={"content_type": "short"},
+    )
+    for item in (instructional, generic):
+        MetricSnapshot.objects.create(content_item=item, captured_at=period_start, views=2500, likes=60, comments=6, extra={})
+        MetricSnapshot.objects.create(content_item=item, captured_at=period_end, views=6000, likes=180, comments=12, extra={})
+
+    baseline = BaselineMetrics(vph_median=100.0, vph_iqr=20.0, er_median=0.02, er_iqr=0.01, n=10, rph_median=3.0, rph_iqr=1.0)
+    scored = score_items_for_period(
+        items=[generic, instructional],
+        competitor_by_item_id={instructional.id: comp, generic.id: comp},
+        baseline_by_competitor_id={comp.id: baseline},
+        period_start=period_start,
+        period_end=period_end,
+        adaptation_context=_adaptation_context(keywords=["english speaking", "spoken english", "english lessons"]),
+    )
+
+    by_id = {entry.content_item.external_id: entry for entry in scored}
+    assert by_id["instructional"].adaptation_relevance_score > by_id["generic"].adaptation_relevance_score
+    assert "instructional_markers" in by_id["instructional"].adaptation_relevance_factors
+
+
+@pytest.mark.django_db
+def test_score_items_for_period_penalizes_language_and_subject_mismatch(settings) -> None:
+    settings.MIN_VIEWS_END = 1000
+    comp = Competitor.objects.create(platform=Platform.INSTAGRAM, external_id="IG-LANG", display_name="Creator", meta={})
+    period_start = datetime(2026, 3, 29, 0, 0, tzinfo=UTC)
+    period_end = datetime(2026, 3, 30, 0, 0, tzinfo=UTC)
+    mismatch = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.INSTAGRAM,
+        external_id="lang-mismatch",
+        url="https://www.instagram.com/reel/lang-mismatch/",
+        title="Skincare routine for glowing skin",
+        description="beauty tips and makeup favorites",
+        published_at=period_end - timedelta(days=2),
+        duration_seconds=30,
+        meta={"content_type": "reel"},
+    )
+    MetricSnapshot.objects.create(content_item=mismatch, captured_at=period_start, views=2500, likes=60, comments=6, extra={})
+    MetricSnapshot.objects.create(content_item=mismatch, captured_at=period_end, views=6000, likes=180, comments=12, extra={})
+
+    baseline = BaselineMetrics(vph_median=100.0, vph_iqr=20.0, er_median=0.02, er_iqr=0.01, n=10, rph_median=3.0, rph_iqr=1.0)
+    context = _adaptation_context(
+        keywords=["уроки английского", "разговорный английский", "английская грамматика"],
+        linked_accounts=[SimpleNamespace(display_name="Английский с Настей", handle="nasty_english", meta={"description": "уроки английского"})],
+    )
+    scored = score_items_for_period(
+        items=[mismatch],
+        competitor_by_item_id={mismatch.id: comp},
+        baseline_by_competitor_id={comp.id: baseline},
+        period_start=period_start,
+        period_end=period_end,
+        adaptation_context=context,
+    )
+
+    assert len(scored) == 1
+    assert scored[0].adaptation_relevance_score < 0
+    assert "subject_mismatch_penalty" in scored[0].adaptation_relevance_factors
+    assert "language_mismatch_penalty" in scored[0].adaptation_relevance_factors
 
 
 @pytest.mark.django_db
