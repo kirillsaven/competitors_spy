@@ -108,7 +108,7 @@ def _classify_item_drop_reason(
     if item.platform == Platform.YOUTUBE and not _is_setup_short_form_item(item):
         return "other"
 
-    max_age_days = int(getattr(settings, "REPORT_MAX_ITEM_AGE_DAYS", 14))
+    max_age_days = int(getattr(settings, "REPORT_MAX_ITEM_AGE_DAYS", 60))
     min_published_at = period_end - timedelta(days=max_age_days)
     if item.published_at < min_published_at:
         return "age"

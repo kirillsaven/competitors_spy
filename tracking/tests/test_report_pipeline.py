@@ -520,7 +520,7 @@ def test_build_report_preview_reports_scoring_filtered_reason_and_counters(db, m
             url="https://www.instagram.com/reel/old-reel-1/",
             title="Old reel",
             description="desc",
-            published_at=now - timedelta(days=20),
+            published_at=now - timedelta(days=61),
             duration_seconds=30,
             meta={"content_type": "reel"},
         )
