@@ -80,6 +80,12 @@ def _empty_platform_diagnostics() -> dict[str, Any]:
         "youtube_usable_short_form_items_returned": 0,
         "refreshed_items": 0,
         "scored_items": 0,
+        "strict_items": 0,
+        "fallback_candidates": 0,
+        "fallback_items": 0,
+        "fallback_rejected_by_already_reported": 0,
+        "fallback_rejected_by_stopwords": 0,
+        "fallback_reasons_used": {},
         "dropped_by_age": 0,
         "dropped_by_min_views": 0,
         "dropped_by_delta_threshold": 0,
@@ -170,9 +176,13 @@ def _finalize_platform_diagnostics(
     gate_rejected = int(diagnostics.get("gate_rejected_competitors") or 0)
     refreshed_items = int(diagnostics.get("refreshed_items") or 0)
     no_short_form_competitors = int(diagnostics.get("no_short_form_competitors") or 0)
-    scored_items = int(diagnostics.get("scored_items") or 0)
-    dropped_by_already_reported = int(diagnostics.get("dropped_by_already_reported") or 0)
-    dropped_by_stopwords = int(diagnostics.get("dropped_by_stopwords") or 0)
+    scored_items = int(diagnostics.get("scored_items") or 0) + int(diagnostics.get("fallback_candidates") or 0)
+    dropped_by_already_reported = int(diagnostics.get("dropped_by_already_reported") or 0) + int(
+        diagnostics.get("fallback_rejected_by_already_reported") or 0
+    )
+    dropped_by_stopwords = int(diagnostics.get("dropped_by_stopwords") or 0) + int(
+        diagnostics.get("fallback_rejected_by_stopwords") or 0
+    )
     remaining_after_already_reported = max(0, scored_items - dropped_by_already_reported)
 
     reason = None
@@ -197,7 +207,9 @@ def _log_platform_diagnostics(*, user: TgUser, period_start, period_end, platfor
         logger.info(
             "report_platform_diagnostics user_id=%s platform=%s period_start=%s period_end=%s "
             "active=%s gate_rejected=%s yt_pages=%s yt_uploads=%s yt_shorts_found=%s yt_shorts_returned=%s "
-            "refreshed=%s dropped_age=%s dropped_min_views=%s dropped_delta=%s "
+            "refreshed=%s strict_items=%s fallback_candidates=%s fallback_items=%s "
+            "fallback_rejected_history=%s fallback_rejected_stopwords=%s fallback_reasons=%s "
+            "dropped_age=%s dropped_min_views=%s dropped_delta=%s "
             "dropped_already_reported=%s dropped_stopwords=%s final=%s empty_reason=%s",
             user.id,
             platform,
@@ -210,6 +222,12 @@ def _log_platform_diagnostics(*, user: TgUser, period_start, period_end, platfor
             diagnostics.get("youtube_short_form_items_found", 0),
             diagnostics.get("youtube_usable_short_form_items_returned", 0),
             diagnostics.get("refreshed_items", 0),
+            diagnostics.get("strict_items", 0),
+            diagnostics.get("fallback_candidates", 0),
+            diagnostics.get("fallback_items", 0),
+            diagnostics.get("fallback_rejected_by_already_reported", 0),
+            diagnostics.get("fallback_rejected_by_stopwords", 0),
+            diagnostics.get("fallback_reasons_used", {}),
             diagnostics.get("dropped_by_age", 0),
             diagnostics.get("dropped_by_min_views", 0),
             diagnostics.get("dropped_by_delta_threshold", 0),
@@ -263,14 +281,59 @@ def _log_adaptation_relevance(*, user: TgUser, scored: list[object]) -> None:
         content_item = getattr(item, "content_item", None)
         competitor = getattr(item, "competitor", None)
         logger.info(
-            "report_item_adaptation user_id=%s platform=%s item_id=%s competitor_id=%s adaptation_score=%s factors=%s",
+            "report_item_adaptation user_id=%s platform=%s item_id=%s competitor_id=%s selection_path=%s "
+            "fallback_reason=%s adaptation_score=%s factors=%s",
             user.id,
             getattr(content_item, "platform", ""),
             getattr(content_item, "external_id", ""),
             getattr(competitor, "id", ""),
+            getattr(item, "selection_path", "strict"),
+            getattr(item, "fallback_reason", None),
             getattr(item, "adaptation_relevance_score", 0.0),
             getattr(item, "adaptation_relevance_factors", {}),
         )
+
+
+def _count_scored_items_by_platform(*, scored: list[object]) -> dict[str, int]:
+    counts = {platform: 0 for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)}
+    for item in scored:
+        platform = str(getattr(getattr(item, "content_item", None), "platform", "") or getattr(getattr(item, "competitor", None), "platform", "")).strip()
+        if platform in counts:
+            counts[platform] += 1
+    return counts
+
+
+def _select_soft_fallback_items(
+    *,
+    strict_scored: list[object],
+    fallback_scored: list[object],
+) -> list[object]:
+    min_items_per_platform = max(0, int(getattr(settings, "REPORT_FALLBACK_MIN_ITEMS_PER_PLATFORM", 2) or 2))
+    max_fallback_items = max(0, int(getattr(settings, "REPORT_FALLBACK_MAX_ITEMS_PER_PLATFORM", 2) or 2))
+    if min_items_per_platform <= 0 or max_fallback_items <= 0:
+        return []
+
+    strict_counts = _count_scored_items_by_platform(scored=strict_scored)
+    strict_ids = {getattr(getattr(item, "content_item", None), "id", None) for item in strict_scored}
+    fallback_by_platform = {platform: [] for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)}
+    for item in fallback_scored:
+        item_id = getattr(getattr(item, "content_item", None), "id", None)
+        if item_id in strict_ids:
+            continue
+        platform = str(getattr(getattr(item, "content_item", None), "platform", "") or getattr(getattr(item, "competitor", None), "platform", "")).strip()
+        if platform in fallback_by_platform:
+            fallback_by_platform[platform].append(item)
+
+    selected: list[object] = []
+    for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM):
+        strict_count = strict_counts.get(platform, 0)
+        if strict_count >= min_items_per_platform:
+            continue
+        allowance = min(min_items_per_platform - strict_count, max_fallback_items)
+        if allowance <= 0:
+            continue
+        selected.extend(fallback_by_platform[platform][:allowance])
+    return selected
 
 
 def _reported_content_key(*, platform: str | None, external_id: str | None, url: str | None = None) -> tuple[str, str] | None:
@@ -590,23 +653,80 @@ def build_report_preview(
         period_start=period_start,
         period_end=period_end,
         adaptation_context=adaptation_context,
+        selection_mode="strict",
     )
-    scored_after_history = _exclude_previously_reported_items(user=user, scored=scored)
-    kept_after_history = {getattr(item.content_item, "id", None) for item in scored_after_history}
-    for item in scored:
+    strict_scored = list(scored)
+    strict_scored_after_history = _exclude_previously_reported_items(user=user, scored=strict_scored)
+    kept_after_history = {getattr(item.content_item, "id", None) for item in strict_scored_after_history}
+    for item in strict_scored:
         item_id = getattr(item.content_item, "id", None)
         if item_id not in kept_after_history:
             platform = str(getattr(item.content_item, "platform", None) or getattr(item.competitor, "platform", "")).strip()
             if platform in platform_diagnostics:
                 platform_diagnostics[platform]["dropped_by_already_reported"] += 1
-    scored = filter_scored_items_for_stopwords(scored=scored_after_history, stopwords=user_stopwords)
-    kept_after_stopwords = {getattr(item.content_item, "id", None) for item in scored}
-    for item in scored_after_history:
+    strict_scored_final = filter_scored_items_for_stopwords(scored=strict_scored_after_history, stopwords=user_stopwords)
+    kept_after_stopwords = {getattr(item.content_item, "id", None) for item in strict_scored_final}
+    for item in strict_scored_after_history:
         item_id = getattr(item.content_item, "id", None)
         if item_id not in kept_after_stopwords:
             platform = str(getattr(item.content_item, "platform", None) or getattr(item.competitor, "platform", "")).strip()
             if platform in platform_diagnostics:
                 platform_diagnostics[platform]["dropped_by_stopwords"] += 1
+    strict_counts = _count_scored_items_by_platform(scored=strict_scored_final)
+    for platform, count in strict_counts.items():
+        if platform in platform_diagnostics:
+            platform_diagnostics[platform]["strict_items"] = count
+
+    min_fallback_items = max(0, int(getattr(settings, "REPORT_FALLBACK_MIN_ITEMS_PER_PLATFORM", 2) or 2))
+    selected_fallback: list[object] = []
+    if min_fallback_items > 0 and any(count < min_fallback_items for count in strict_counts.values()):
+        fallback_scored = score_items_for_period(
+            items=updated_items,
+            competitor_by_item_id=competitor_by_item_id,
+            baseline_by_competitor_id=baseline_by_competitor_id,
+            period_start=period_start,
+            period_end=period_end,
+            adaptation_context=adaptation_context,
+            selection_mode="fallback",
+        )
+        for platform, count in _count_scored_items_by_platform(scored=fallback_scored).items():
+            if platform in platform_diagnostics:
+                platform_diagnostics[platform]["fallback_candidates"] = count
+
+        fallback_after_history = _exclude_previously_reported_items(user=user, scored=fallback_scored)
+        kept_fallback_after_history = {getattr(item.content_item, "id", None) for item in fallback_after_history}
+        for item in fallback_scored:
+            item_id = getattr(item.content_item, "id", None)
+            if item_id not in kept_fallback_after_history:
+                platform = str(getattr(item.content_item, "platform", None) or getattr(item.competitor, "platform", "")).strip()
+                if platform in platform_diagnostics:
+                    platform_diagnostics[platform]["fallback_rejected_by_already_reported"] += 1
+
+        fallback_after_stopwords = filter_scored_items_for_stopwords(scored=fallback_after_history, stopwords=user_stopwords)
+        kept_fallback_after_stopwords = {getattr(item.content_item, "id", None) for item in fallback_after_stopwords}
+        for item in fallback_after_history:
+            item_id = getattr(item.content_item, "id", None)
+            if item_id not in kept_fallback_after_stopwords:
+                platform = str(getattr(item.content_item, "platform", None) or getattr(item.competitor, "platform", "")).strip()
+                if platform in platform_diagnostics:
+                    platform_diagnostics[platform]["fallback_rejected_by_stopwords"] += 1
+
+        selected_fallback = _select_soft_fallback_items(
+            strict_scored=strict_scored_final,
+            fallback_scored=fallback_after_stopwords,
+        )
+    scored = list(strict_scored_final) + list(selected_fallback)
+    scored.sort(key=lambda item: getattr(item, "score", 0.0), reverse=True)
+
+    for item in selected_fallback:
+        platform = str(getattr(item.content_item, "platform", None) or getattr(item.competitor, "platform", "")).strip()
+        if platform in platform_diagnostics:
+            platform_diagnostics[platform]["fallback_items"] += 1
+            fallback_reasons = dict(platform_diagnostics[platform].get("fallback_reasons_used") or {})
+            reason = str(getattr(item, "fallback_reason", "") or "fallback")
+            fallback_reasons[reason] = int(fallback_reasons.get(reason, 0) or 0) + 1
+            platform_diagnostics[platform]["fallback_reasons_used"] = fallback_reasons
+
     for item in scored:
         platform = str(getattr(item.content_item, "platform", None) or getattr(item.competitor, "platform", "")).strip()
         if platform in platform_diagnostics:

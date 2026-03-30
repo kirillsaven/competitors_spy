@@ -88,6 +88,8 @@ def build_report_payload(
                 "base_score": getattr(s, "base_score", s.score),
                 "adaptation_relevance_score": getattr(s, "adaptation_relevance_score", 0.0),
                 "adaptation_relevance_factors": dict(getattr(s, "adaptation_relevance_factors", {}) or {}),
+                "selection_path": getattr(s, "selection_path", "strict"),
+                "fallback_reason": getattr(s, "fallback_reason", None),
                 "score": s.score,
                 "er_end": s.er_end,
                 "avg_views_same_age": avg_views_same_age,

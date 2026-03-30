@@ -422,6 +422,98 @@ def test_score_items_for_period_penalizes_language_and_subject_mismatch(settings
 
 
 @pytest.mark.django_db
+def test_score_items_for_period_fallback_accepts_relevant_low_delta_item(settings) -> None:
+    settings.MIN_VIEWS_END = 1000
+    settings.MIN_DELTA_VIEWS = 500
+    settings.REPORT_FALLBACK_MIN_ADAPTATION_SCORE = 0.35
+    settings.REPORT_FALLBACK_DELTA_RATIO = 0.35
+    comp = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="UC-FALLBACK",
+        display_name="English Teacher",
+        handle="english_teacher",
+        meta={"description": "english grammar speaking vocabulary lessons"},
+    )
+    period_start = datetime(2026, 3, 29, 0, 0, tzinfo=UTC)
+    period_end = datetime(2026, 3, 30, 0, 0, tzinfo=UTC)
+    item = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.YOUTUBE,
+        external_id="fallback-keep",
+        url="https://www.youtube.com/watch?v=fallback-keep",
+        title="English speaking lesson: 3 mistakes",
+        description="guide with examples for learners",
+        published_at=period_end - timedelta(days=2),
+        duration_seconds=55,
+        meta={"content_type": "short"},
+    )
+    MetricSnapshot.objects.create(content_item=item, captured_at=period_start, views=2000, likes=50, comments=5, extra={})
+    MetricSnapshot.objects.create(content_item=item, captured_at=period_end, views=2250, likes=70, comments=8, extra={})
+
+    baseline = BaselineMetrics(vph_median=100.0, vph_iqr=20.0, er_median=0.02, er_iqr=0.01, n=10, rph_median=3.0, rph_iqr=1.0)
+    strict_scored = score_items_for_period(
+        items=[item],
+        competitor_by_item_id={item.id: comp},
+        baseline_by_competitor_id={comp.id: baseline},
+        period_start=period_start,
+        period_end=period_end,
+        adaptation_context=_adaptation_context(keywords=["english speaking", "spoken english", "english lessons"]),
+        selection_mode="strict",
+    )
+    fallback_scored = score_items_for_period(
+        items=[item],
+        competitor_by_item_id={item.id: comp},
+        baseline_by_competitor_id={comp.id: baseline},
+        period_start=period_start,
+        period_end=period_end,
+        adaptation_context=_adaptation_context(keywords=["english speaking", "spoken english", "english lessons"]),
+        selection_mode="fallback",
+    )
+
+    assert strict_scored == []
+    assert [entry.content_item.external_id for entry in fallback_scored] == ["fallback-keep"]
+    assert fallback_scored[0].selection_path == "fallback"
+    assert fallback_scored[0].fallback_reason == "delta_threshold_relaxed"
+
+
+@pytest.mark.django_db
+def test_score_items_for_period_fallback_rejects_off_topic_item(settings) -> None:
+    settings.MIN_VIEWS_END = 1000
+    settings.MIN_DELTA_VIEWS = 500
+    settings.REPORT_FALLBACK_MIN_ADAPTATION_SCORE = 0.35
+    settings.REPORT_FALLBACK_DELTA_RATIO = 0.35
+    comp = Competitor.objects.create(platform=Platform.INSTAGRAM, external_id="IG-FALLBACK", display_name="Creator", meta={})
+    period_start = datetime(2026, 3, 29, 0, 0, tzinfo=UTC)
+    period_end = datetime(2026, 3, 30, 0, 0, tzinfo=UTC)
+    item = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.INSTAGRAM,
+        external_id="fallback-drop",
+        url="https://www.instagram.com/reel/fallback-drop/",
+        title="Celebrity prank and giveaway",
+        description="funny viral reaction",
+        published_at=period_end - timedelta(days=2),
+        duration_seconds=30,
+        meta={"content_type": "reel"},
+    )
+    MetricSnapshot.objects.create(content_item=item, captured_at=period_start, views=2000, likes=50, comments=5, extra={})
+    MetricSnapshot.objects.create(content_item=item, captured_at=period_end, views=2250, likes=70, comments=8, extra={})
+
+    baseline = BaselineMetrics(vph_median=100.0, vph_iqr=20.0, er_median=0.02, er_iqr=0.01, n=10, rph_median=3.0, rph_iqr=1.0)
+    fallback_scored = score_items_for_period(
+        items=[item],
+        competitor_by_item_id={item.id: comp},
+        baseline_by_competitor_id={comp.id: baseline},
+        period_start=period_start,
+        period_end=period_end,
+        adaptation_context=_adaptation_context(keywords=["english speaking", "spoken english", "english lessons"]),
+        selection_mode="fallback",
+    )
+
+    assert fallback_scored == []
+
+
+@pytest.mark.django_db
 def test_score_items_for_period_filters_low_total_views_even_with_delta(settings) -> None:
     settings.MIN_VIEWS_END = 1000
     user = TgUser.objects.create(tg_user_id=3, tg_chat_id=3, timezone_str="UTC+00:00")

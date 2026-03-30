@@ -71,6 +71,8 @@ def test_build_report_payload_groups_by_platform_and_keeps_stub_sections():
     assert payload["sections"][2]["items"] == []
     assert payload["sections"][0]["items"][0]["adaptation_relevance_score"] == 0.0
     assert payload["sections"][0]["items"][0]["adaptation_relevance_factors"] == {}
+    assert payload["sections"][0]["items"][0]["selection_path"] == "strict"
+    assert payload["sections"][0]["items"][0]["fallback_reason"] is None
 
 
 def test_build_report_payload_caps_items_per_platform_at_ten():
@@ -108,6 +110,22 @@ def test_build_report_payload_keeps_adaptation_relevance_diagnostics():
         "niche_stem_overlap": 0.22,
         "instructional_markers": 0.20,
     }
+
+
+def test_build_report_payload_keeps_fallback_selection_diagnostics():
+    scored_item = _make_scored_item(platform=Platform.YOUTUBE, suffix="10")
+    scored_item.selection_path = "fallback"
+    scored_item.fallback_reason = "delta_threshold_relaxed"
+
+    payload = build_report_payload(
+        scored=[scored_item],
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+    )
+
+    item_payload = payload["sections"][0]["items"][0]
+    assert item_payload["selection_path"] == "fallback"
+    assert item_payload["fallback_reason"] == "delta_threshold_relaxed"
 
 
 def test_render_report_text_preserves_youtube_section_and_stub_lines():
