@@ -248,6 +248,7 @@ def test_score_items_for_period_recency_bonus_prefers_fresher_item_when_other_si
 def test_score_items_for_period_boosts_on_niche_item_over_off_topic_viralish_item(settings) -> None:
     settings.REPORT_MAX_ITEM_AGE_DAYS = 60
     settings.MIN_VIEWS_END = 1000
+    settings.ADAPTATION_RELEVANCE_WEIGHT = 2.0
     comp = Competitor.objects.create(
         platform=Platform.YOUTUBE,
         external_id="UC-ADAPT-BOOST",
@@ -295,8 +296,10 @@ def test_score_items_for_period_boosts_on_niche_item_over_off_topic_viralish_ite
     )
 
     assert [entry.content_item.external_id for entry in scored] == ["on-niche", "off-topic"]
+    assert scored[0].base_score < scored[1].base_score
     assert scored[0].adaptation_relevance_score > 0
     assert scored[1].adaptation_relevance_score < 0
+    assert scored[0].score > scored[1].score
 
 
 @pytest.mark.django_db
@@ -425,8 +428,8 @@ def test_score_items_for_period_penalizes_language_and_subject_mismatch(settings
 def test_score_items_for_period_fallback_accepts_relevant_low_delta_item(settings) -> None:
     settings.MIN_VIEWS_END = 1000
     settings.MIN_DELTA_VIEWS = 500
-    settings.REPORT_FALLBACK_MIN_ADAPTATION_SCORE = 0.35
-    settings.REPORT_FALLBACK_DELTA_RATIO = 0.35
+    settings.REPORT_FALLBACK_MIN_ADAPTATION_SCORE = 0.45
+    settings.REPORT_FALLBACK_DELTA_RATIO = 0.5
     comp = Competitor.objects.create(
         platform=Platform.YOUTUBE,
         external_id="UC-FALLBACK",
@@ -472,16 +475,60 @@ def test_score_items_for_period_fallback_accepts_relevant_low_delta_item(setting
 
     assert strict_scored == []
     assert [entry.content_item.external_id for entry in fallback_scored] == ["fallback-keep"]
+    assert fallback_scored[0].adaptation_relevance_score >= 0.45
     assert fallback_scored[0].selection_path == "fallback"
     assert fallback_scored[0].fallback_reason == "delta_threshold_relaxed"
+
+
+@pytest.mark.django_db
+def test_score_items_for_period_fallback_rejects_relevant_item_below_tuned_delta_floor(settings) -> None:
+    settings.MIN_VIEWS_END = 1000
+    settings.MIN_DELTA_VIEWS = 500
+    settings.REPORT_FALLBACK_MIN_ADAPTATION_SCORE = 0.45
+    settings.REPORT_FALLBACK_DELTA_RATIO = 0.5
+    comp = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="UC-FALLBACK-LOW-DELTA",
+        display_name="English Teacher",
+        handle="english_teacher",
+        meta={"description": "english grammar speaking vocabulary lessons"},
+    )
+    period_start = datetime(2026, 3, 29, 0, 0, tzinfo=UTC)
+    period_end = datetime(2026, 3, 30, 0, 0, tzinfo=UTC)
+    item = ContentItem.objects.create(
+        competitor=comp,
+        platform=Platform.YOUTUBE,
+        external_id="fallback-low-delta",
+        url="https://www.youtube.com/watch?v=fallback-low-delta",
+        title="English speaking lesson: 3 mistakes",
+        description="guide with examples for learners",
+        published_at=period_end - timedelta(days=2),
+        duration_seconds=55,
+        meta={"content_type": "short"},
+    )
+    MetricSnapshot.objects.create(content_item=item, captured_at=period_start, views=2000, likes=50, comments=5, extra={})
+    MetricSnapshot.objects.create(content_item=item, captured_at=period_end, views=2240, likes=70, comments=8, extra={})
+
+    baseline = BaselineMetrics(vph_median=100.0, vph_iqr=20.0, er_median=0.02, er_iqr=0.01, n=10, rph_median=3.0, rph_iqr=1.0)
+    fallback_scored = score_items_for_period(
+        items=[item],
+        competitor_by_item_id={item.id: comp},
+        baseline_by_competitor_id={comp.id: baseline},
+        period_start=period_start,
+        period_end=period_end,
+        adaptation_context=_adaptation_context(keywords=["english speaking", "spoken english", "english lessons"]),
+        selection_mode="fallback",
+    )
+
+    assert fallback_scored == []
 
 
 @pytest.mark.django_db
 def test_score_items_for_period_fallback_rejects_off_topic_item(settings) -> None:
     settings.MIN_VIEWS_END = 1000
     settings.MIN_DELTA_VIEWS = 500
-    settings.REPORT_FALLBACK_MIN_ADAPTATION_SCORE = 0.35
-    settings.REPORT_FALLBACK_DELTA_RATIO = 0.35
+    settings.REPORT_FALLBACK_MIN_ADAPTATION_SCORE = 0.45
+    settings.REPORT_FALLBACK_DELTA_RATIO = 0.5
     comp = Competitor.objects.create(platform=Platform.INSTAGRAM, external_id="IG-FALLBACK", display_name="Creator", meta={})
     period_start = datetime(2026, 3, 29, 0, 0, tzinfo=UTC)
     period_end = datetime(2026, 3, 30, 0, 0, tzinfo=UTC)
