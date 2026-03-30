@@ -12,6 +12,7 @@ from tracking.services.scoring import ScoredItem
 
 
 TELEGRAM_TEXT_LIMIT = 4096
+REGULAR_REPORT_TITLE_LIMIT = 100
 
 PLATFORM_SECTION_ORDER = [
     Platform.YOUTUBE,
@@ -27,6 +28,7 @@ def build_report_payload(
     period_end: datetime,
     baseline_by_competitor_id: dict[int, object] | None = None,
     platform_notes: dict[str, str] | None = None,
+    platform_diagnostics: dict[str, dict] | None = None,
 ) -> dict:
     max_items_per_platform = max(1, int(getattr(settings, "REPORT_MAX_ITEMS_PER_PLATFORM", 10) or 10))
     section_items: dict[str, list[dict]] = {platform: [] for platform in PLATFORM_SECTION_ORDER}
@@ -100,6 +102,7 @@ def build_report_payload(
             {
                 "platform": platform,
                 "items": section_items[platform],
+                **({"diagnostics": dict((platform_diagnostics or {}).get(platform) or {})} if (platform_diagnostics or {}).get(platform) is not None else {}),
                 **({"note": str((platform_notes or {}).get(platform) or "").strip()} if (platform_notes or {}).get(platform) else {}),
             }
             for platform in PLATFORM_SECTION_ORDER
@@ -139,15 +142,24 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
     lines.append("")
     yt_items = (sections_by_platform.get(Platform.YOUTUBE) or {}).get("items") or []
     yt_note = str((sections_by_platform.get(Platform.YOUTUBE) or {}).get("note") or "").strip()
-    _render_platform_section(lines=lines, title="YouTube:", items=yt_items, note=yt_note)
+    yt_diagnostics = (sections_by_platform.get(Platform.YOUTUBE) or {}).get("diagnostics") or {}
+    _render_platform_section(lines=lines, title="YouTube:", items=yt_items, note=yt_note, diagnostics=yt_diagnostics)
 
     tiktok_items = (sections_by_platform.get(Platform.TIKTOK) or {}).get("items") or []
     tiktok_note = str((sections_by_platform.get(Platform.TIKTOK) or {}).get("note") or "").strip()
-    _render_platform_section(lines=lines, title="TikTok:", items=tiktok_items, note=tiktok_note)
+    tiktok_diagnostics = (sections_by_platform.get(Platform.TIKTOK) or {}).get("diagnostics") or {}
+    _render_platform_section(lines=lines, title="TikTok:", items=tiktok_items, note=tiktok_note, diagnostics=tiktok_diagnostics)
 
     instagram_items = (sections_by_platform.get(Platform.INSTAGRAM) or {}).get("items") or []
     instagram_note = str((sections_by_platform.get(Platform.INSTAGRAM) or {}).get("note") or "").strip()
-    _render_platform_section(lines=lines, title="Instagram:", items=instagram_items, note=instagram_note)
+    instagram_diagnostics = (sections_by_platform.get(Platform.INSTAGRAM) or {}).get("diagnostics") or {}
+    _render_platform_section(
+        lines=lines,
+        title="Instagram:",
+        items=instagram_items,
+        note=instagram_note,
+        diagnostics=instagram_diagnostics,
+    )
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -268,6 +280,32 @@ def _clean_title(title: str) -> str:
     return text or "Без названия"
 
 
+def _truncate_regular_report_title(title: str, *, limit: int = REGULAR_REPORT_TITLE_LIMIT) -> str:
+    cleaned = _clean_title(title)
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: max(1, limit - 3)].rstrip() + "..."
+
+
+def _diagnostic_empty_reason_text(*, title: str, diagnostics: dict | None) -> str | None:
+    reason = str((diagnostics or {}).get("empty_reason") or "").strip()
+    if reason == "no_active_competitors":
+        return "Нет активных конкурентов для этой платформы."
+    if reason == "gate_rejected_competitors":
+        if "YouTube" in title:
+            return "Есть конкуренты, но ни один YouTube-канал не прошел фильтр недавних Shorts."
+        return "Есть конкуренты, но ни один профиль не прошел обязательный платформенный фильтр."
+    if reason == "no_short_form_items_found":
+        return "У конкурентов не нашлось недавних коротких роликов с метриками."
+    if reason == "all_filtered_by_already_reported":
+        return "Все подходящие ролики уже были в предыдущих отчетах."
+    if reason == "all_filtered_by_stopwords":
+        return "Все подходящие ролики скрыты вашими стоп-словами."
+    if reason == "all_filtered_by_scoring":
+        return "Ролики были, но текущие фильтры отбора ничего не пропустили."
+    return None
+
+
 def _format_decimal(value: object) -> str:
     try:
         return f"{float(value):.1f}"
@@ -302,16 +340,19 @@ def _render_platform_section(
     title: str,
     items: list[dict],
     note: str = "",
+    diagnostics: dict | None = None,
 ) -> None:
     lines.append(title)
-    if note:
-        lines.append(f"Причина: {note}")
+    reason_text = note or _diagnostic_empty_reason_text(title=title, diagnostics=diagnostics)
+    if reason_text:
+        lines.append(f"Причина: {reason_text}")
     if not items:
-        lines.append("Нет подходящих роликов.")
+        if not reason_text:
+            lines.append("Нет подходящих роликов.")
         return
 
     for idx, it in enumerate(items, start=1):
-        title_text = _clean_title(str(it.get("title") or "Без названия"))
+        title_text = _truncate_regular_report_title(str(it.get("title") or "Без названия"))
         url = it.get("url") or ""
         competitor = it.get("competitor") or {}
         channel_name = (

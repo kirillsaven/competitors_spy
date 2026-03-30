@@ -67,6 +67,148 @@ class SentReportResult:
 SETUP_REPORT_MAX_COMPETITORS_PER_PLATFORM = 20
 
 
+def _empty_platform_diagnostics() -> dict[str, Any]:
+    return {
+        "active_competitors": 0,
+        "gate_rejected_competitors": 0,
+        "no_short_form_competitors": 0,
+        "refreshed_items": 0,
+        "scored_items": 0,
+        "dropped_by_age": 0,
+        "dropped_by_min_views": 0,
+        "dropped_by_delta_threshold": 0,
+        "dropped_by_already_reported": 0,
+        "dropped_by_stopwords": 0,
+        "final_items": 0,
+        "empty_reason": None,
+    }
+
+
+def _init_platform_diagnostics() -> dict[str, dict[str, Any]]:
+    return {platform: _empty_platform_diagnostics() for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM)}
+
+
+def _is_no_short_form_reason(*, platform: str, reason: str) -> bool:
+    normalized = str(reason or "").lower()
+    if platform == Platform.YOUTUBE:
+        return "no recent shorts with usable metrics" in normalized
+    if platform == Platform.INSTAGRAM:
+        return "no recent reels with views" in normalized
+    return False
+
+
+def _classify_item_drop_reason(
+    *,
+    item: ContentItem,
+    competitor_by_item_id: dict[int, Competitor],
+    baseline_by_competitor_id: dict[int, object],
+    period_start,
+    period_end,
+) -> str | None:
+    if item.platform == Platform.YOUTUBE and not _is_setup_short_form_item(item):
+        return "other"
+
+    max_age_days = int(getattr(settings, "REPORT_MAX_ITEM_AGE_DAYS", 14))
+    min_published_at = period_end - timedelta(days=max_age_days)
+    if item.published_at < min_published_at:
+        return "age"
+
+    competitor = competitor_by_item_id.get(item.id)
+    if competitor is None:
+        return "other"
+    if baseline_by_competitor_id.get(competitor.id) is None:
+        return "other"
+
+    snap_end = (
+        MetricSnapshot.objects.filter(content_item=item, captured_at__lte=period_end).order_by("-captured_at").first()
+    )
+    if snap_end is None:
+        return "other"
+
+    min_views_end = int(getattr(settings, "MIN_VIEWS_END", 1000))
+    if int(snap_end.views) < min_views_end:
+        return "min_views"
+
+    snap_start = (
+        MetricSnapshot.objects.filter(content_item=item, captured_at__lte=period_start).order_by("-captured_at").first()
+    )
+    if snap_start is None:
+        return None
+
+    dv = int(snap_end.views) - int(snap_start.views)
+    dh = (snap_end.captured_at - snap_start.captured_at).total_seconds() / 3600.0
+    if dv < 0 or dh <= 0:
+        return None
+
+    min_delta_views = int(getattr(settings, "MIN_DELTA_VIEWS", 500))
+    short_window_fallback_hours = float(getattr(settings, "REPORT_SHORT_WINDOW_FALLBACK_HOURS", 6.0) or 6.0)
+    min_delta_floor = 20
+    period_hours = max((period_end - period_start).total_seconds() / 3600.0, 0.0)
+    effective_min_delta = max(int(min_delta_views * (dh / 24.0)), min_delta_floor)
+    if dv < effective_min_delta and period_hours > short_window_fallback_hours:
+        return "delta_threshold"
+    return None
+
+
+def _finalize_platform_diagnostics(
+    *,
+    platform: str,
+    diagnostics: dict[str, Any],
+    platform_note: str,
+) -> None:
+    diagnostics["final_items"] = int(diagnostics.get("final_items") or 0)
+    if diagnostics["final_items"] > 0 or platform_note:
+        diagnostics["empty_reason"] = None
+        return
+    active_competitors = int(diagnostics.get("active_competitors") or 0)
+    gate_rejected = int(diagnostics.get("gate_rejected_competitors") or 0)
+    refreshed_items = int(diagnostics.get("refreshed_items") or 0)
+    no_short_form_competitors = int(diagnostics.get("no_short_form_competitors") or 0)
+    scored_items = int(diagnostics.get("scored_items") or 0)
+    dropped_by_already_reported = int(diagnostics.get("dropped_by_already_reported") or 0)
+    dropped_by_stopwords = int(diagnostics.get("dropped_by_stopwords") or 0)
+    remaining_after_already_reported = max(0, scored_items - dropped_by_already_reported)
+
+    reason = None
+    if active_competitors <= 0:
+        reason = "no_active_competitors"
+    elif platform == Platform.YOUTUBE and gate_rejected >= active_competitors and refreshed_items <= 0:
+        reason = "gate_rejected_competitors"
+    elif refreshed_items <= 0 and no_short_form_competitors > 0:
+        reason = "no_short_form_items_found"
+    elif scored_items > 0 and dropped_by_already_reported >= scored_items:
+        reason = "all_filtered_by_already_reported"
+    elif remaining_after_already_reported > 0 and dropped_by_stopwords >= remaining_after_already_reported:
+        reason = "all_filtered_by_stopwords"
+    elif refreshed_items > 0:
+        reason = "all_filtered_by_scoring"
+    diagnostics["empty_reason"] = reason
+
+
+def _log_platform_diagnostics(*, user: TgUser, period_start, period_end, platform_diagnostics: dict[str, dict[str, Any]]) -> None:
+    for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM):
+        diagnostics = platform_diagnostics.get(platform) or {}
+        logger.info(
+            "report_platform_diagnostics user_id=%s platform=%s period_start=%s period_end=%s "
+            "active=%s gate_rejected=%s refreshed=%s dropped_age=%s dropped_min_views=%s dropped_delta=%s "
+            "dropped_already_reported=%s dropped_stopwords=%s final=%s empty_reason=%s",
+            user.id,
+            platform,
+            period_start.isoformat(),
+            period_end.isoformat(),
+            diagnostics.get("active_competitors", 0),
+            diagnostics.get("gate_rejected_competitors", 0),
+            diagnostics.get("refreshed_items", 0),
+            diagnostics.get("dropped_by_age", 0),
+            diagnostics.get("dropped_by_min_views", 0),
+            diagnostics.get("dropped_by_delta_threshold", 0),
+            diagnostics.get("dropped_by_already_reported", 0),
+            diagnostics.get("dropped_by_stopwords", 0),
+            diagnostics.get("final_items", 0),
+            diagnostics.get("empty_reason"),
+        )
+
+
 def _reported_content_key(*, platform: str | None, external_id: str | None, url: str | None = None) -> tuple[str, str] | None:
     normalized_platform = str(platform or "").strip()
     normalized_external_id = str(external_id or "").strip()
@@ -264,6 +406,9 @@ def build_report_preview(
     competitors = get_active_competitors(user=user)
     eligible_competitors: list[Competitor] = []
     user_stopwords = get_user_report_stopwords(user=user)
+    platform_diagnostics = _init_platform_diagnostics()
+    for competitor in competitors:
+        platform_diagnostics[competitor.platform]["active_competitors"] += 1
     provider_fetch_cache = _ensure_provider_fetch_cache(
         provider_fetch_cache=provider_fetch_cache,
         purpose="report_collection",
@@ -301,6 +446,7 @@ def build_report_preview(
                 )
                 continue
             if not passes_gate:
+                platform_diagnostics[competitor.platform]["gate_rejected_competitors"] += 1
                 logger.info(
                     "Skipping YouTube competitor during report preview due to recent shorts gate "
                     "(user_id=%s competitor_id=%s external_id=%s recent_shorts=%s)",
@@ -312,17 +458,20 @@ def build_report_preview(
                 continue
         eligible_competitors.append(competitor)
         try:
-            updated_items.extend(
-                refresh_competitor(
-                    competitor=competitor,
-                    mode="incremental",
-                    captured_at=period_end,
-                    provider_fetch_cache=provider_fetch_cache,
-                )
+            refreshed_items = refresh_competitor(
+                competitor=competitor,
+                mode="incremental",
+                captured_at=period_end,
+                provider_fetch_cache=provider_fetch_cache,
             )
+            updated_items.extend(refreshed_items)
+            platform_diagnostics[competitor.platform]["refreshed_items"] += len(refreshed_items)
         except Exception as exc:
             reason = _short_reason(str(exc))
-            platform_notes.setdefault(competitor.platform, reason)
+            if _is_no_short_form_reason(platform=competitor.platform, reason=reason):
+                platform_diagnostics[competitor.platform]["no_short_form_competitors"] += 1
+            else:
+                platform_notes.setdefault(competitor.platform, reason)
             logger.warning(
                 "Skipping competitor during report preview due to refresh error "
                 "(user_id=%s competitor_id=%s platform=%s external_id=%s): %s",
@@ -341,6 +490,24 @@ def build_report_preview(
         competitor.id: compute_competitor_baseline(competitor=competitor, now=period_end)
         for competitor in eligible_competitors
     }
+    for item in updated_items:
+        drop_reason = _classify_item_drop_reason(
+            item=item,
+            competitor_by_item_id=competitor_by_item_id,
+            baseline_by_competitor_id=baseline_by_competitor_id,
+            period_start=period_start,
+            period_end=period_end,
+        )
+        if drop_reason is None:
+            platform_diagnostics[item.platform]["scored_items"] += 1
+            continue
+        if drop_reason == "age":
+            platform_diagnostics[item.platform]["dropped_by_age"] += 1
+        elif drop_reason == "min_views":
+            platform_diagnostics[item.platform]["dropped_by_min_views"] += 1
+        elif drop_reason == "delta_threshold":
+            platform_diagnostics[item.platform]["dropped_by_delta_threshold"] += 1
+
     scored = score_items_for_period(
         items=updated_items,
         competitor_by_item_id=competitor_by_item_id,
@@ -348,8 +515,39 @@ def build_report_preview(
         period_start=period_start,
         period_end=period_end,
     )
-    scored = _exclude_previously_reported_items(user=user, scored=scored)
-    scored = filter_scored_items_for_stopwords(scored=scored, stopwords=user_stopwords)
+    scored_after_history = _exclude_previously_reported_items(user=user, scored=scored)
+    kept_after_history = {getattr(item.content_item, "id", None) for item in scored_after_history}
+    for item in scored:
+        item_id = getattr(item.content_item, "id", None)
+        if item_id not in kept_after_history:
+            platform = str(getattr(item.content_item, "platform", None) or getattr(item.competitor, "platform", "")).strip()
+            if platform in platform_diagnostics:
+                platform_diagnostics[platform]["dropped_by_already_reported"] += 1
+    scored = filter_scored_items_for_stopwords(scored=scored_after_history, stopwords=user_stopwords)
+    kept_after_stopwords = {getattr(item.content_item, "id", None) for item in scored}
+    for item in scored_after_history:
+        item_id = getattr(item.content_item, "id", None)
+        if item_id not in kept_after_stopwords:
+            platform = str(getattr(item.content_item, "platform", None) or getattr(item.competitor, "platform", "")).strip()
+            if platform in platform_diagnostics:
+                platform_diagnostics[platform]["dropped_by_stopwords"] += 1
+    for item in scored:
+        platform = str(getattr(item.content_item, "platform", None) or getattr(item.competitor, "platform", "")).strip()
+        if platform in platform_diagnostics:
+            platform_diagnostics[platform]["final_items"] += 1
+
+    for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM):
+        _finalize_platform_diagnostics(
+            platform=platform,
+            diagnostics=platform_diagnostics[platform],
+            platform_note=str(platform_notes.get(platform) or "").strip(),
+        )
+    _log_platform_diagnostics(
+        user=user,
+        period_start=period_start,
+        period_end=period_end,
+        platform_diagnostics=platform_diagnostics,
+    )
 
     payload = build_report_payload(
         scored=scored,
@@ -357,6 +555,7 @@ def build_report_preview(
         period_end=period_end,
         baseline_by_competitor_id=baseline_by_competitor_id,
         platform_notes=platform_notes,
+        platform_diagnostics=platform_diagnostics,
     )
     text = render_report_text(payload=payload, timezone_str=user.timezone_str)
     section_counts = {
