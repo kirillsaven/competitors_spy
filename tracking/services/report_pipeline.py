@@ -72,6 +72,10 @@ def _empty_platform_diagnostics() -> dict[str, Any]:
         "active_competitors": 0,
         "gate_rejected_competitors": 0,
         "no_short_form_competitors": 0,
+        "youtube_uploads_pages_scanned": 0,
+        "youtube_uploads_inspected": 0,
+        "youtube_short_form_items_found": 0,
+        "youtube_usable_short_form_items_returned": 0,
         "refreshed_items": 0,
         "scored_items": 0,
         "dropped_by_age": 0,
@@ -190,7 +194,8 @@ def _log_platform_diagnostics(*, user: TgUser, period_start, period_end, platfor
         diagnostics = platform_diagnostics.get(platform) or {}
         logger.info(
             "report_platform_diagnostics user_id=%s platform=%s period_start=%s period_end=%s "
-            "active=%s gate_rejected=%s refreshed=%s dropped_age=%s dropped_min_views=%s dropped_delta=%s "
+            "active=%s gate_rejected=%s yt_pages=%s yt_uploads=%s yt_shorts_found=%s yt_shorts_returned=%s "
+            "refreshed=%s dropped_age=%s dropped_min_views=%s dropped_delta=%s "
             "dropped_already_reported=%s dropped_stopwords=%s final=%s empty_reason=%s",
             user.id,
             platform,
@@ -198,6 +203,10 @@ def _log_platform_diagnostics(*, user: TgUser, period_start, period_end, platfor
             period_end.isoformat(),
             diagnostics.get("active_competitors", 0),
             diagnostics.get("gate_rejected_competitors", 0),
+            diagnostics.get("youtube_uploads_pages_scanned", 0),
+            diagnostics.get("youtube_uploads_inspected", 0),
+            diagnostics.get("youtube_short_form_items_found", 0),
+            diagnostics.get("youtube_usable_short_form_items_returned", 0),
             diagnostics.get("refreshed_items", 0),
             diagnostics.get("dropped_by_age", 0),
             diagnostics.get("dropped_by_min_views", 0),
@@ -207,6 +216,28 @@ def _log_platform_diagnostics(*, user: TgUser, period_start, period_end, platfor
             diagnostics.get("final_items", 0),
             diagnostics.get("empty_reason"),
         )
+
+
+def _merge_youtube_refresh_diagnostics(
+    *,
+    competitor: Competitor,
+    platform_diagnostics: dict[str, dict[str, Any]],
+    provider_fetch_cache: ProviderFetchCache | None,
+) -> None:
+    if competitor.platform != Platform.YOUTUBE or provider_fetch_cache is None:
+        return
+    diagnostics = provider_fetch_cache.get_youtube_refresh_diagnostics(competitor_id=competitor.id)
+    if not diagnostics:
+        return
+    platform_entry = platform_diagnostics.get(Platform.YOUTUBE)
+    if platform_entry is None:
+        return
+    platform_entry["youtube_uploads_pages_scanned"] += int(diagnostics.get("uploads_pages_scanned") or 0)
+    platform_entry["youtube_uploads_inspected"] += int(diagnostics.get("uploads_inspected") or 0)
+    platform_entry["youtube_short_form_items_found"] += int(diagnostics.get("short_form_items_found") or 0)
+    platform_entry["youtube_usable_short_form_items_returned"] += int(
+        diagnostics.get("usable_short_form_items_returned") or 0
+    )
 
 
 def _reported_content_key(*, platform: str | None, external_id: str | None, url: str | None = None) -> tuple[str, str] | None:
@@ -466,7 +497,17 @@ def build_report_preview(
             )
             updated_items.extend(refreshed_items)
             platform_diagnostics[competitor.platform]["refreshed_items"] += len(refreshed_items)
+            _merge_youtube_refresh_diagnostics(
+                competitor=competitor,
+                platform_diagnostics=platform_diagnostics,
+                provider_fetch_cache=provider_fetch_cache,
+            )
         except Exception as exc:
+            _merge_youtube_refresh_diagnostics(
+                competitor=competitor,
+                platform_diagnostics=platform_diagnostics,
+                provider_fetch_cache=provider_fetch_cache,
+            )
             reason = _short_reason(str(exc))
             if _is_no_short_form_reason(platform=competitor.platform, reason=reason):
                 platform_diagnostics[competitor.platform]["no_short_form_competitors"] += 1

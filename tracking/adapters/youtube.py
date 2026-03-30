@@ -231,6 +231,25 @@ class YouTubeClient:
                 break
         return out
 
+    def playlist_items_page(
+        self,
+        *,
+        playlist_id: str,
+        max_results: int,
+        page_token: str | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None]:
+        params: dict[str, Any] = {
+            "part": "contentDetails",
+            "playlistId": playlist_id,
+            "maxResults": min(50, max(1, int(max_results))),
+        }
+        if page_token:
+            params["pageToken"] = page_token
+        data = self._get("playlistItems", params)
+        items = data.get("items", []) or []
+        next_page_token = data.get("nextPageToken")
+        return items, str(next_page_token) if next_page_token else None
+
     def videos_list(self, *, ids: list[str], part: str) -> list[dict[str, Any]]:
         out: list[dict[str, Any]] = []
         for i in range(0, len(ids), 50):

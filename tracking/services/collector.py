@@ -101,6 +101,90 @@ def _instagram_reels_reason(*, username: str) -> str:
     return f"Instagram profile returned no recent reels with views: username={username}"
 
 
+def _youtube_uploads_page_limit(*, mode: str) -> int:
+    if mode == "full":
+        return max(1, int(getattr(settings, "YT_UPLOADS_MAX_PAGES_SCAN_FULL", getattr(settings, "YT_UPLOADS_MAX_PAGES_SCAN", 4))))
+    return max(1, int(getattr(settings, "YT_UPLOADS_MAX_PAGES_SCAN", 4)))
+
+
+def _youtube_uploads_inspection_limit(*, mode: str) -> int:
+    if mode == "full":
+        return max(
+            1,
+            int(
+                getattr(
+                    settings,
+                    "YT_UPLOADS_MAX_UPLOADS_INSPECTED_FULL",
+                    getattr(settings, "YT_UPLOADS_MAX_UPLOADS_INSPECTED", 200),
+                )
+            ),
+        )
+    return max(1, int(getattr(settings, "YT_UPLOADS_MAX_UPLOADS_INSPECTED", 200)))
+
+
+def _collect_youtube_short_details(
+    *,
+    client: YouTubeClient,
+    uploads_playlist_id: str,
+    target_short_count: int,
+    max_pages_scanned: int,
+    max_uploads_inspected: int,
+) -> tuple[list[object], dict[str, int | bool]]:
+    page_token: str | None = None
+    pages_scanned = 0
+    uploads_inspected = 0
+    short_form_items_found = 0
+    usable_details: list[object] = []
+    seen_video_ids: set[str] = set()
+
+    while (
+        pages_scanned < max_pages_scanned
+        and uploads_inspected < max_uploads_inspected
+        and len(usable_details) < target_short_count
+    ):
+        remaining_upload_budget = max_uploads_inspected - uploads_inspected
+        batch_size = min(50, remaining_upload_budget)
+        if batch_size <= 0:
+            break
+        playlist_items, next_page_token = client.playlist_items_page(
+            playlist_id=uploads_playlist_id,
+            max_results=batch_size,
+            page_token=page_token,
+        )
+        pages_scanned += 1
+        if not playlist_items:
+            break
+
+        video_ids = playlist_items_to_video_ids(playlist_items)
+        uploads_inspected += len(video_ids)
+        if video_ids:
+            video_items = client.videos_list(ids=video_ids, part="snippet,statistics,contentDetails")
+            page_short_details = [
+                item
+                for item in video_items_to_details(video_items)
+                if item.duration_seconds is not None and item.duration_seconds <= 60
+            ]
+            for item in page_short_details:
+                if item.video_id in seen_video_ids:
+                    continue
+                seen_video_ids.add(item.video_id)
+                short_form_items_found += 1
+                if len(usable_details) < target_short_count:
+                    usable_details.append(item)
+        if not next_page_token:
+            break
+        page_token = next_page_token
+
+    diagnostics: dict[str, int | bool] = {
+        "uploads_pages_scanned": pages_scanned,
+        "uploads_inspected": uploads_inspected,
+        "short_form_items_found": short_form_items_found,
+        "usable_short_form_items_returned": len(usable_details),
+        "deeper_pages_used": pages_scanned > 1,
+    }
+    return usable_details, diagnostics
+
+
 def refresh_youtube_competitor(
     *,
     competitor: Competitor,
@@ -113,8 +197,16 @@ def refresh_youtube_competitor(
     max_results = int(getattr(settings, "YT_RECENT_N_FOR_METRICS", 15))
     if mode == "full":
         max_results = int(getattr(settings, "BASELINE_N", 30))
-    # YouTube playlistItems.list maxResults is 50.
-    max_results = max(1, min(int(max_results), 50))
+    target_short_count = max(1, int(max_results))
+    max_pages_scanned = _youtube_uploads_page_limit(mode=mode)
+    max_uploads_inspected = _youtube_uploads_inspection_limit(mode=mode)
+    diagnostics: dict[str, int | bool] = {
+        "uploads_pages_scanned": 0,
+        "uploads_inspected": 0,
+        "short_form_items_found": 0,
+        "usable_short_form_items_returned": 0,
+        "deeper_pages_used": False,
+    }
 
     client = _get_youtube_client()
     try:
@@ -141,7 +233,13 @@ def refresh_youtube_competitor(
             raise CollectorError("uploads playlist id is missing")
 
         try:
-            playlist_items = client.playlist_items(playlist_id=str(uploads_playlist_id), max_results=max_results)
+            details, diagnostics = _collect_youtube_short_details(
+                client=client,
+                uploads_playlist_id=str(uploads_playlist_id),
+                target_short_count=target_short_count,
+                max_pages_scanned=max_pages_scanned,
+                max_uploads_inspected=max_uploads_inspected,
+            )
         except YouTubeApiError as e:
             # Playlist IDs can become stale/invalid for edge channels. Refresh channel data and retry once.
             if "playlistNotFound" not in str(e):
@@ -154,17 +252,34 @@ def refresh_youtube_competitor(
             uploads_playlist_id = refresh_uploads_playlist_id()
             if not uploads_playlist_id:
                 return []
-            playlist_items = client.playlist_items(playlist_id=str(uploads_playlist_id), max_results=max_results)
-        video_ids = playlist_items_to_video_ids(playlist_items)
-        if not video_ids:
-            raise CollectorError(_youtube_short_reason(competitor=competitor))
-
-        video_items = client.videos_list(ids=video_ids, part="snippet,statistics,contentDetails")
-        details = [
-            item
-            for item in video_items_to_details(video_items)
-            if item.duration_seconds is not None and item.duration_seconds <= 60
-        ]
+            details, diagnostics = _collect_youtube_short_details(
+                client=client,
+                uploads_playlist_id=str(uploads_playlist_id),
+                target_short_count=target_short_count,
+                max_pages_scanned=max_pages_scanned,
+                max_uploads_inspected=max_uploads_inspected,
+            )
+        if provider_fetch_cache is not None:
+            provider_fetch_cache.store_youtube_refresh_diagnostics(
+                competitor_id=competitor.id,
+                diagnostics=diagnostics,
+            )
+        logger.info(
+            "youtube_refresh_collection competitor_id=%s channel_id=%s mode=%s uploads_pages_scanned=%s "
+            "uploads_inspected=%s short_form_items_found=%s usable_short_form_items_returned=%s "
+            "target_short_count=%s max_pages_scanned=%s max_uploads_inspected=%s deeper_pages_used=%s",
+            competitor.id,
+            competitor.external_id,
+            mode,
+            diagnostics["uploads_pages_scanned"],
+            diagnostics["uploads_inspected"],
+            diagnostics["short_form_items_found"],
+            diagnostics["usable_short_form_items_returned"],
+            target_short_count,
+            max_pages_scanned,
+            max_uploads_inspected,
+            diagnostics["deeper_pages_used"],
+        )
         if not details:
             raise CollectorError(_youtube_short_reason(competitor=competitor))
 
