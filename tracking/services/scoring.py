@@ -355,8 +355,8 @@ def _fallback_candidate_passes(
     delta_views: int,
     effective_min_delta: int,
 ) -> tuple[bool, str | None]:
-    min_adaptation_score = float(getattr(settings, "REPORT_FALLBACK_MIN_ADAPTATION_SCORE", 0.35) or 0.35)
-    delta_ratio = float(getattr(settings, "REPORT_FALLBACK_DELTA_RATIO", 0.35) or 0.35)
+    min_adaptation_score = float(getattr(settings, "REPORT_FALLBACK_MIN_ADAPTATION_SCORE", 0.45) or 0.45)
+    delta_ratio = float(getattr(settings, "REPORT_FALLBACK_DELTA_RATIO", 0.5) or 0.5)
     relaxed_min_delta = max(int(effective_min_delta * delta_ratio), 20)
     has_negative_penalty = any(float(value) < 0 for value in (adaptation_relevance_factors or {}).values())
     if adaptation_relevance_score < min_adaptation_score:
@@ -587,7 +587,8 @@ def score_items_for_period(
             + (0.20 * min(virality_ratio, 25.0) / 5.0)
             + (0.20 * recency_bonus)
         )
-        score = base_score + adaptation_relevance_score
+        adaptation_weight = float(getattr(settings, "ADAPTATION_RELEVANCE_WEIGHT", 2.0) or 2.0)
+        score = base_score + (adaptation_weight * adaptation_relevance_score)
 
         scored.append(
             ScoredItem(
