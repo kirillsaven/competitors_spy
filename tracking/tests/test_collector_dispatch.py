@@ -75,12 +75,16 @@ def test_refresh_youtube_competitor_keeps_shorts_only(db, monkeypatch):
     )
 
     class FakeClient:
-        def playlist_items(self, *, playlist_id, max_results):
+        def __init__(self):
+            self.page_calls = 0
+
+        def playlist_items_page(self, *, playlist_id, max_results, page_token=None):
             assert playlist_id == "UUshorts123"
+            self.page_calls += 1
             return [
                 {"contentDetails": {"videoId": "short-1"}},
                 {"contentDetails": {"videoId": "long-1"}},
-            ]
+            ], None
 
         def videos_list(self, *, ids, part):
             assert ids == ["short-1", "long-1"]
@@ -110,19 +114,31 @@ def test_refresh_youtube_competitor_keeps_shorts_only(db, monkeypatch):
         def close(self):
             return None
 
-    monkeypatch.setattr(collector, "_get_youtube_client", lambda: FakeClient())
+    fake_client = FakeClient()
+    cache = ProviderFetchCache()
+    monkeypatch.setattr(collector, "_get_youtube_client", lambda: fake_client)
 
     items = collector.refresh_youtube_competitor(
         competitor=competitor,
         mode="incremental",
         captured_at=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        provider_fetch_cache=cache,
     )
 
     assert [item.external_id for item in items] == ["short-1"]
     content_item = ContentItem.objects.get(platform=Platform.YOUTUBE, external_id="short-1")
     snapshot = MetricSnapshot.objects.get(content_item=content_item)
+    diagnostics = cache.get_youtube_refresh_diagnostics(competitor_id=competitor.id)
+    assert fake_client.page_calls == 1
     assert content_item.meta["content_type"] == "short"
     assert snapshot.views == 1200
+    assert diagnostics == {
+        "uploads_pages_scanned": 1,
+        "uploads_inspected": 2,
+        "short_form_items_found": 1,
+        "usable_short_form_items_returned": 1,
+        "deeper_pages_used": False,
+    }
     assert not ContentItem.objects.filter(platform=Platform.YOUTUBE, external_id="long-1").exists()
 
 
@@ -135,8 +151,8 @@ def test_refresh_youtube_competitor_raises_when_no_recent_shorts_exist(db, monke
     )
 
     class FakeClient:
-        def playlist_items(self, *, playlist_id, max_results):
-            return [{"contentDetails": {"videoId": "long-1"}}]
+        def playlist_items_page(self, *, playlist_id, max_results, page_token=None):
+            return [{"contentDetails": {"videoId": "long-1"}}], None
 
         def videos_list(self, *, ids, part):
             return [
@@ -166,6 +182,139 @@ def test_refresh_youtube_competitor_raises_when_no_recent_shorts_exist(db, monke
             mode="incremental",
             captured_at=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
         )
+
+
+def test_refresh_youtube_competitor_scans_deeper_pages_until_shorts_found(db, monkeypatch):
+    competitor = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="UCmixed123",
+        handle="mixed-channel",
+        meta={"uploads_playlist_id": "UUmixed123"},
+    )
+    cache = ProviderFetchCache()
+
+    class FakeClient:
+        def __init__(self):
+            self.page_calls: list[str | None] = []
+
+        def playlist_items_page(self, *, playlist_id, max_results, page_token=None):
+            self.page_calls.append(page_token)
+            if page_token is None:
+                return [{"contentDetails": {"videoId": "long-1"}}], "page-2"
+            if page_token == "page-2":
+                return [{"contentDetails": {"videoId": "short-2"}}], None
+            raise AssertionError(f"unexpected page token: {page_token}")
+
+        def videos_list(self, *, ids, part):
+            mapping = {
+                "long-1": {
+                    "id": "long-1",
+                    "snippet": {
+                        "title": "Long lesson",
+                        "description": "Long description",
+                        "publishedAt": "2026-03-20T13:00:00Z",
+                    },
+                    "statistics": {"viewCount": "8200", "likeCount": "144", "commentCount": "15"},
+                    "contentDetails": {"duration": "PT8M"},
+                },
+                "short-2": {
+                    "id": "short-2",
+                    "snippet": {
+                        "title": "Short lesson",
+                        "description": "Short description",
+                        "publishedAt": "2026-03-20T14:00:00Z",
+                    },
+                    "statistics": {"viewCount": "2200", "likeCount": "64", "commentCount": "8"},
+                    "contentDetails": {"duration": "PT50S"},
+                },
+            }
+            return [mapping[item_id] for item_id in ids]
+
+        def close(self):
+            return None
+
+    fake_client = FakeClient()
+    monkeypatch.setattr(collector, "_get_youtube_client", lambda: fake_client)
+
+    items = collector.refresh_youtube_competitor(
+        competitor=competitor,
+        mode="incremental",
+        captured_at=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        provider_fetch_cache=cache,
+    )
+
+    diagnostics = cache.get_youtube_refresh_diagnostics(competitor_id=competitor.id)
+    assert [item.external_id for item in items] == ["short-2"]
+    assert fake_client.page_calls == [None, "page-2"]
+    assert diagnostics == {
+        "uploads_pages_scanned": 2,
+        "uploads_inspected": 2,
+        "short_form_items_found": 1,
+        "usable_short_form_items_returned": 1,
+        "deeper_pages_used": True,
+    }
+
+
+def test_refresh_youtube_competitor_stops_at_guardrail_without_infinite_scan(db, monkeypatch, settings):
+    settings.YT_UPLOADS_MAX_PAGES_SCAN = 2
+    settings.YT_UPLOADS_MAX_UPLOADS_INSPECTED = 100
+    competitor = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="UCguard123",
+        handle="guard-channel",
+        meta={"uploads_playlist_id": "UUguard123"},
+    )
+    cache = ProviderFetchCache()
+
+    class FakeClient:
+        def __init__(self):
+            self.page_calls: list[str | None] = []
+
+        def playlist_items_page(self, *, playlist_id, max_results, page_token=None):
+            self.page_calls.append(page_token)
+            next_page = f"page-{len(self.page_calls) + 1}"
+            return [{"contentDetails": {"videoId": f"long-{len(self.page_calls)}"}}], next_page
+
+        def videos_list(self, *, ids, part):
+            return [
+                {
+                    "id": ids[0],
+                    "snippet": {
+                        "title": "Long lesson",
+                        "description": "Long description",
+                        "publishedAt": "2026-03-20T13:00:00Z",
+                    },
+                    "statistics": {"viewCount": "8200", "likeCount": "144", "commentCount": "15"},
+                    "contentDetails": {"duration": "PT8M"},
+                }
+            ]
+
+        def close(self):
+            return None
+
+    fake_client = FakeClient()
+    monkeypatch.setattr(collector, "_get_youtube_client", lambda: fake_client)
+
+    with pytest.raises(
+        collector.CollectorError,
+        match="YouTube channel returned no recent Shorts with usable metrics: channel_id=UCguard123",
+    ):
+        collector.refresh_youtube_competitor(
+            competitor=competitor,
+            mode="incremental",
+            captured_at=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+            provider_fetch_cache=cache,
+        )
+
+    diagnostics = cache.get_youtube_refresh_diagnostics(competitor_id=competitor.id)
+    assert fake_client.page_calls == [None, "page-2"]
+    assert diagnostics == {
+        "uploads_pages_scanned": 2,
+        "uploads_inspected": 2,
+        "short_form_items_found": 0,
+        "usable_short_form_items_returned": 0,
+        "deeper_pages_used": True,
+    }
 
 
 def test_refresh_tiktok_competitor_raises_for_unsupported_provider(db, monkeypatch):

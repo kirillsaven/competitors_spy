@@ -20,6 +20,7 @@ class ProviderFetchCache:
     tiktok_feeds_by_handle: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     instagram_profiles_by_lookup: dict[str, dict[str, Any]] = field(default_factory=dict)
     platform_errors: dict[str, str] = field(default_factory=dict)
+    youtube_refresh_diagnostics_by_competitor_id: dict[int, dict[str, Any]] = field(default_factory=dict)
 
     def store_tiktok_feed(self, *, handle: str, items: list[dict[str, Any]]) -> None:
         key = _normalize_lookup(handle)
@@ -66,6 +67,19 @@ class ProviderFetchCache:
             return None
         reason = self.platform_errors.get(key)
         return str(reason) if reason else None
+
+    def store_youtube_refresh_diagnostics(self, *, competitor_id: int, diagnostics: dict[str, Any]) -> None:
+        if int(competitor_id or 0) <= 0:
+            return
+        self.youtube_refresh_diagnostics_by_competitor_id[int(competitor_id)] = dict(diagnostics or {})
+
+    def get_youtube_refresh_diagnostics(self, *, competitor_id: int) -> dict[str, Any] | None:
+        if int(competitor_id or 0) <= 0:
+            return None
+        diagnostics = self.youtube_refresh_diagnostics_by_competitor_id.get(int(competitor_id))
+        if diagnostics is None:
+            return None
+        return dict(diagnostics)
 
 
 def log_provider_call(

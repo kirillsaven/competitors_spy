@@ -501,6 +501,66 @@ def test_build_report_preview_reports_no_active_competitors_reason(db):
     assert "Причина: Нет активных конкурентов для этой платформы." in preview.text
 
 
+def test_build_report_preview_includes_youtube_collection_depth_diagnostics(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=1431, tg_chat_id=1431, timezone_str="UTC")
+    competitor = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="yt-depth",
+        handle="yt_depth",
+        url="https://youtube.com/@yt_depth",
+        display_name="YT Depth",
+    )
+    UserCompetitor.objects.create(user=user, competitor=competitor, is_active=True)
+    now = datetime(2026, 3, 24, 12, 0, tzinfo=UTC)
+
+    def fake_refresh(*, competitor, mode, captured_at, provider_fetch_cache=None):
+        provider_fetch_cache.store_youtube_refresh_diagnostics(
+            competitor_id=competitor.id,
+            diagnostics={
+                "uploads_pages_scanned": 2,
+                "uploads_inspected": 75,
+                "short_form_items_found": 4,
+                "usable_short_form_items_returned": 3,
+                "deeper_pages_used": True,
+            },
+        )
+        item = competitor.content_items.create(
+            platform=competitor.platform,
+            external_id="yt-depth-1",
+            url="https://www.youtube.com/watch?v=yt-depth-1",
+            title="Depth short",
+            description="desc",
+            published_at=now - timedelta(hours=2),
+            duration_seconds=30,
+            meta={"content_type": "short"},
+        )
+        MetricSnapshot.objects.create(
+            content_item=item,
+            captured_at=now,
+            views=2000,
+            likes=100,
+            comments=10,
+            shares=1,
+        )
+        return [item]
+
+    monkeypatch.setattr(report_pipeline, "youtube_profile_recent_shorts_gate_status", lambda **kwargs: (True, 2))
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", fake_refresh)
+
+    preview = build_report_preview(
+        user=user,
+        period_start=now - timedelta(hours=24),
+        period_end=now,
+    )
+
+    sections = {section["platform"]: section for section in preview.payload["sections"]}
+    youtube_diag = sections[Platform.YOUTUBE]["diagnostics"]
+    assert youtube_diag["youtube_uploads_pages_scanned"] == 2
+    assert youtube_diag["youtube_uploads_inspected"] == 75
+    assert youtube_diag["youtube_short_form_items_found"] == 4
+    assert youtube_diag["youtube_usable_short_form_items_returned"] == 3
+
+
 def test_build_report_preview_reports_scoring_filtered_reason_and_counters(db, monkeypatch):
     user = TgUser.objects.create(tg_user_id=144, tg_chat_id=144, timezone_str="UTC")
     competitor = Competitor.objects.create(
