@@ -8,7 +8,11 @@ from django.conf import settings
 from django.utils import timezone
 
 from tracking.models import AddedBy, Platform, Report, ReportStatus, TgUser, UserCompetitor
-from tracking.services.competitor_service import get_active_user_competitor_counts, upsert_competitor
+from tracking.services.competitor_service import (
+    get_active_user_competitor_counts,
+    get_inactive_user_competitor_external_ids,
+    upsert_competitor,
+)
 from tracking.services.platform_onboarding import youtube_profile_recent_shorts_gate_status
 from tracking.services.seed_resolver import resolve_exact_seed
 from tracking.services.setup_runtime import SetupRunContext
@@ -29,6 +33,60 @@ def _base_acceptance_payload() -> dict[str, Any]:
         "already_active": 0,
         "events": [],
     }
+
+
+_QUALITY_FACTOR_KEYS = (
+    "niche_phrase_match",
+    "query_phrase_match",
+    "query_specificity_bonus",
+    "instructional_markers",
+    "adaptable_format_markers",
+    "multi_query_support",
+)
+
+
+def _supporting_video_evidence(candidate: dict[str, Any]) -> dict[str, Any]:
+    factors = dict(candidate.get("supplemental_ranking_factors") or {})
+    views = int(candidate.get("views") or 0)
+    likes = int(candidate.get("likes") or 0)
+    comments = int(candidate.get("comments") or 0)
+    reaction_rate = (likes + comments) / views if views > 0 else 0.0
+    quality_signal_count = sum(1 for key in _QUALITY_FACTOR_KEYS if float(factors.get(key) or 0.0) > 0.0)
+    return {
+        "video_id": str(candidate.get("video_id") or "").strip(),
+        "video_title": str(candidate.get("title") or "").strip(),
+        "video_url": str(candidate.get("url") or "").strip(),
+        "supplemental_score": float(candidate.get("supplemental_score") or 0.0),
+        "views": views,
+        "likes": likes,
+        "comments": comments,
+        "hit_count": int(candidate.get("hit_count") or 0),
+        "supplemental_survival_reason": str(candidate.get("supplemental_survival_reason") or "").strip(),
+        "supplemental_ranking_factors": factors,
+        "reaction_rate": round(float(reaction_rate), 4),
+        "quality_signal_count": int(quality_signal_count),
+    }
+
+
+def _supporting_video_passes_quality_gate(evidence: dict[str, Any]) -> bool:
+    min_support_score = float(
+        getattr(settings, "REPORT_YOUTUBE_SUGGESTED_COMPETITORS_MIN_SUPPORTING_VIDEO_SCORE", 0.6) or 0.6
+    )
+    min_reaction_rate = float(
+        getattr(settings, "REPORT_YOUTUBE_SUGGESTED_COMPETITORS_MIN_SUPPORTING_VIDEO_REACTION_RATE", 0.025) or 0.025
+    )
+    min_traction = float(
+        getattr(settings, "REPORT_YOUTUBE_SUGGESTED_COMPETITORS_MIN_SUPPORTING_VIDEO_TRACTION", 0.12) or 0.12
+    )
+    score = float(evidence.get("supplemental_score") or 0.0)
+    reaction_rate = float(evidence.get("reaction_rate") or 0.0)
+    traction = float((evidence.get("supplemental_ranking_factors") or {}).get("traction") or 0.0)
+    quality_signal_count = int(evidence.get("quality_signal_count") or 0)
+    return (
+        score >= min_support_score
+        and quality_signal_count >= 1
+        and (reaction_rate >= min_reaction_rate or traction >= min_traction)
+    )
 
 
 def build_youtube_suggested_competitors_payload(
@@ -60,6 +118,7 @@ def build_youtube_suggested_competitors_payload(
         "suggestions_generated": 0,
         "suggestions_sent": 0,
         "dropped_missing_channel_id": 0,
+        "dropped_blocked": 0,
         "dropped_already_active": 0,
         "dropped_not_repeated": 0,
         "dropped_dedup": 0,
@@ -67,6 +126,7 @@ def build_youtube_suggested_competitors_payload(
         "suppressed_by_run_cap": 0,
         "suppressed_by_cooldown": 0,
         "dropped_low_average_score": 0,
+        "dropped_weak_supporting_evidence": 0,
         "final_suggestions": 0,
     }
     section = {
@@ -98,6 +158,7 @@ def build_youtube_suggested_competitors_payload(
         ).values_list("competitor__external_id", flat=True)
         if str(external_id).strip()
     }
+    blocked_channel_ids = get_inactive_user_competitor_external_ids(user=user, platform=Platform.YOUTUBE)
 
     current_creator_stats: dict[str, dict[str, Any]] = {}
     for candidate in candidates:
@@ -116,10 +177,12 @@ def build_youtube_suggested_competitors_payload(
                 "sample_video_title": "",
                 "sample_video_url": "",
                 "matched_queries": set(),
+                "supporting_videos": [],
             },
         )
         creator["current_run_hits"] += 1
         creator["current_scores"].append(float(candidate.get("supplemental_score") or 0.0))
+        creator["supporting_videos"].append(_supporting_video_evidence(candidate))
         if not creator["sample_video_title"]:
             creator["sample_video_title"] = str(candidate.get("title") or "").strip()
         if not creator["sample_video_url"]:
@@ -131,7 +194,7 @@ def build_youtube_suggested_competitors_payload(
     diagnostics["suggestions_considered"] = len(current_creator_stats)
     diagnostics["dropped_dedup"] = max(valid_candidates - diagnostics["suggestions_considered"], 0)
 
-    history_by_channel: dict[str, dict[int, float]] = defaultdict(dict)
+    history_by_channel: dict[str, dict[int, dict[str, Any]]] = defaultdict(dict)
     prior_reports = list(
         Report.objects.filter(user=user, status=ReportStatus.SENT).order_by("-id")[:history_runs]
     )
@@ -144,18 +207,24 @@ def build_youtube_suggested_competitors_payload(
             channel_id = str(candidate.get("channel_id") or "").strip()
             if not channel_id:
                 continue
-            score = float(candidate.get("supplemental_score") or 0.0)
-            previous_score = history_by_channel[channel_id].get(report.id)
-            if previous_score is None or score > previous_score:
-                history_by_channel[channel_id][report.id] = score
+            evidence = _supporting_video_evidence(candidate)
+            previous_evidence = history_by_channel[channel_id].get(report.id)
+            if previous_evidence is None or float(evidence.get("supplemental_score") or 0.0) > float(
+                previous_evidence.get("supplemental_score") or 0.0
+            ):
+                history_by_channel[channel_id][report.id] = evidence
 
     suggestions: list[dict[str, Any]] = []
     for channel_id, creator in current_creator_stats.items():
+        if channel_id in blocked_channel_ids:
+            diagnostics["dropped_blocked"] += 1
+            continue
         if channel_id in active_channel_ids:
             diagnostics["dropped_already_active"] += 1
             continue
 
-        history_scores = list(history_by_channel.get(channel_id, {}).values())
+        history_evidence = list(history_by_channel.get(channel_id, {}).values())
+        history_scores = [float(item.get("supplemental_score") or 0.0) for item in history_evidence]
         appearance_count = 1 + len(history_scores)
         if appearance_count < min_appearances:
             diagnostics["dropped_not_repeated"] += 1
@@ -165,6 +234,18 @@ def build_youtube_suggested_competitors_payload(
         average_score = mean([current_best_score, *history_scores])
         if average_score < min_average_score:
             diagnostics["dropped_low_average_score"] += 1
+            continue
+        strongest_support = max(
+            list(creator["supporting_videos"]) + history_evidence,
+            key=lambda item: (
+                float(item.get("supplemental_score") or 0.0),
+                float(item.get("reaction_rate") or 0.0),
+                float((item.get("supplemental_ranking_factors") or {}).get("traction") or 0.0),
+            ),
+            default={},
+        )
+        if not _supporting_video_passes_quality_gate(strongest_support):
+            diagnostics["dropped_weak_supporting_evidence"] += 1
             continue
 
         suggestions.append(
@@ -180,6 +261,15 @@ def build_youtube_suggested_competitors_payload(
                 "matched_queries": sorted(creator["matched_queries"]),
                 "sample_video_title": creator["sample_video_title"],
                 "sample_video_url": creator["sample_video_url"],
+                "strongest_supporting_video_id": str(strongest_support.get("video_id") or "").strip(),
+                "strongest_supporting_video_title": str(strongest_support.get("video_title") or "").strip(),
+                "strongest_supporting_video_url": str(strongest_support.get("video_url") or "").strip(),
+                "strongest_supporting_video_score": round(float(strongest_support.get("supplemental_score") or 0.0), 4),
+                "strongest_supporting_video_reaction_rate": round(float(strongest_support.get("reaction_rate") or 0.0), 4),
+                "strongest_supporting_video_traction": round(
+                    float((strongest_support.get("supplemental_ranking_factors") or {}).get("traction") or 0.0),
+                    4,
+                ),
                 "suggestion_reason": "repeated_supplemental_creator",
             }
         )
