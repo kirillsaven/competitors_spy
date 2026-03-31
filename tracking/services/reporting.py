@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from typing import Any
 
 from django.conf import settings
 
@@ -13,6 +14,7 @@ from tracking.services.scoring import ScoredItem
 
 TELEGRAM_TEXT_LIMIT = 4096
 REGULAR_REPORT_TITLE_LIMIT = 100
+YOUTUBE_SUPPLEMENTAL_RENDER_LIMIT = 3
 
 PLATFORM_SECTION_ORDER = [
     Platform.YOUTUBE,
@@ -115,7 +117,14 @@ def build_report_payload(
         ],
     }
     if supplemental:
-        payload["supplemental"] = dict(supplemental)
+        supplemental_payload = dict(supplemental)
+        youtube_topic_video_payload = _build_youtube_supplemental_section_payload(
+            lane_payload=supplemental_payload.get("youtube_topic_video"),
+            main_youtube_items=section_items.get(Platform.YOUTUBE) or [],
+        )
+        if youtube_topic_video_payload is not None:
+            supplemental_payload["youtube_topic_video"] = youtube_topic_video_payload
+        payload["supplemental"] = supplemental_payload
     return payload
 
 
@@ -169,6 +178,7 @@ def render_report_text(*, payload: dict, timezone_str: str) -> str:
         note=instagram_note,
         diagnostics=instagram_diagnostics,
     )
+    _render_youtube_supplemental_section(lines=lines, payload=payload)
     return "\n".join(lines).rstrip() + "\n"
 
 
@@ -296,6 +306,60 @@ def _truncate_regular_report_title(title: str, *, limit: int = REGULAR_REPORT_TI
     return cleaned[: max(1, limit - 3)].rstrip() + "..."
 
 
+def _build_youtube_supplemental_section_payload(
+    *,
+    lane_payload: dict | None,
+    main_youtube_items: list[dict],
+) -> dict | None:
+    if not isinstance(lane_payload, dict):
+        return None
+
+    diagnostics = dict(lane_payload.get("diagnostics") or {})
+    candidates = [candidate for candidate in (lane_payload.get("candidates") or []) if isinstance(candidate, dict)]
+    max_items = max(
+        1,
+        int(getattr(settings, "REPORT_YOUTUBE_SUPPLEMENTAL_MAX_ITEMS", YOUTUBE_SUPPLEMENTAL_RENDER_LIMIT) or YOUTUBE_SUPPLEMENTAL_RENDER_LIMIT),
+    )
+
+    main_video_ids = {str(item.get("video_id") or "").strip() for item in main_youtube_items if str(item.get("video_id") or "").strip()}
+    main_urls = {str(item.get("url") or "").strip() for item in main_youtube_items if str(item.get("url") or "").strip()}
+
+    section_items: list[dict[str, Any]] = []
+    dropped_duplicates = 0
+    for candidate in candidates:
+        video_id = str(candidate.get("video_id") or "").strip()
+        url = str(candidate.get("url") or "").strip()
+        if (video_id and video_id in main_video_ids) or (url and url in main_urls):
+            dropped_duplicates += 1
+            continue
+        if len(section_items) >= max_items:
+            break
+        section_items.append(
+            {
+                "video_id": video_id,
+                "url": url,
+                "title": str(candidate.get("title") or "").strip(),
+                "channel_title": str(candidate.get("channel_title") or "").strip(),
+                "views": candidate.get("views"),
+                "matched_queries": list(candidate.get("matched_queries") or []),
+                "supplemental_score": candidate.get("supplemental_score"),
+            }
+        )
+
+    diagnostics["dropped_by_main_report_duplicate"] = dropped_duplicates
+    diagnostics["rendered_candidates"] = len(section_items)
+
+    enriched_payload = dict(lane_payload)
+    enriched_payload["diagnostics"] = diagnostics
+    enriched_payload["section"] = {
+        "title": "Дополнительно в YouTube:",
+        "subtitle": "Идеи по теме, найденные вне списка конкурентов.",
+        "max_items": max_items,
+        "items": section_items,
+    }
+    return enriched_payload
+
+
 def _diagnostic_empty_reason_text(*, title: str, diagnostics: dict | None) -> str | None:
     reason = str((diagnostics or {}).get("empty_reason") or "").strip()
     if reason == "no_active_competitors":
@@ -388,6 +452,33 @@ def _render_platform_section(
         )
         lines.append(f"ER: {_format_percent(it.get('er_end'))}")
         lines.append(f"Вирусность: {_format_decimal(it.get('virality'))}x")
+        lines.append("")
+
+
+def _render_youtube_supplemental_section(*, lines: list[str], payload: dict) -> None:
+    supplemental = payload.get("supplemental") or {}
+    youtube_lane = supplemental.get("youtube_topic_video") if isinstance(supplemental, dict) else None
+    if not isinstance(youtube_lane, dict):
+        return
+    section = youtube_lane.get("section") or {}
+    items = [item for item in (section.get("items") or []) if isinstance(item, dict)]
+    if not items:
+        return
+
+    lines.append("")
+    lines.append(str(section.get("title") or "Дополнительно в YouTube:"))
+    subtitle = str(section.get("subtitle") or "").strip()
+    if subtitle:
+        lines.append(subtitle)
+    for idx, item in enumerate(items, start=1):
+        channel_title = str(item.get("channel_title") or "").strip() or "YouTube"
+        title_text = _truncate_regular_report_title(str(item.get("title") or "Без названия"))
+        lines.append(f"{idx}) {channel_title}")
+        lines.append(title_text)
+        if item.get("url"):
+            lines.append(str(item.get("url")))
+        if item.get("views") is not None:
+            lines.append(f"Просмотры: {_format_int(item.get('views'))}")
         lines.append("")
 
 

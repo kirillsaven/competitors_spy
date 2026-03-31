@@ -1075,6 +1075,122 @@ def test_build_report_preview_keeps_main_sections_unchanged_when_supplemental_co
     assert preview.payload["supplemental"]["youtube_topic_video"]["candidates"][0]["video_id"] == "supp-1"
 
 
+def test_build_report_preview_renders_youtube_supplemental_section_without_main_duplicates(db, monkeypatch, settings):
+    settings.ENABLE_YOUTUBE_SUPPLEMENTAL_TOPIC_VIDEO_COLLECTION = True
+    settings.REPORT_YOUTUBE_SUPPLEMENTAL_MAX_ITEMS = 2
+    user = TgUser.objects.create(tg_user_id=182, tg_chat_id=182, timezone_str="UTC")
+    competitor = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="yt-main-supp-render",
+        handle="yt_main_supp_render",
+        url="https://www.youtube.com/@yt_main_supp_render",
+        display_name="YT Main Supp Render",
+        meta={"uploads_playlist_id": "UU-main-supp-render"},
+    )
+    UserCompetitor.objects.create(user=user, competitor=competitor, is_active=True)
+    now = datetime(2026, 3, 24, 12, 0, tzinfo=UTC)
+    item = competitor.content_items.create(
+        platform=competitor.platform,
+        external_id="strict-main-item",
+        url="https://www.youtube.com/watch?v=strict-main-item",
+        title="Strict main item",
+        description="desc",
+        published_at=now - timedelta(hours=2),
+        duration_seconds=30,
+        meta={"content_type": "short"},
+    )
+
+    monkeypatch.setattr(report_pipeline, "youtube_profile_recent_shorts_gate_status", lambda **kwargs: (True, 2))
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", lambda **kwargs: [item])
+    monkeypatch.setattr(report_pipeline, "compute_competitor_baseline", lambda **kwargs: SimpleNamespace(vph_median=1.0, rph_median=1.0))
+    monkeypatch.setattr(report_pipeline, "_classify_item_drop_reason", lambda **kwargs: None)
+    monkeypatch.setattr(
+        report_pipeline,
+        "score_items_for_period",
+        lambda **kwargs: [
+            SimpleNamespace(
+                content_item=item,
+                competitor=competitor,
+                views_end=5000,
+                likes_end=100,
+                comments_end=10,
+                shares_end=1,
+                velocity=250.0,
+                score_type="delta",
+                delta_views=1000,
+                delta_hours=4.0,
+                er_end=0.022,
+                base_score=3.0,
+                adaptation_relevance_score=0.4,
+                adaptation_relevance_factors={"niche_stem_overlap": 0.22},
+                selection_path="strict",
+                fallback_reason=None,
+                score=3.4,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        report_pipeline,
+        "collect_youtube_topic_video_candidates",
+        lambda **kwargs: SimpleNamespace(
+            to_payload=lambda: {
+                "source": "supplemental_topic_video",
+                "queries": ["spoken english"],
+                "diagnostics": {"queries_built": 1, "queries_executed": 1, "final_candidates": 3},
+                "candidates": [
+                    {
+                        "source": "supplemental_topic_video",
+                        "video_id": "strict-main-item",
+                        "url": "https://www.youtube.com/watch?v=strict-main-item",
+                        "title": "Main duplicate",
+                        "channel_title": "Duplicate Channel",
+                        "views": 7000,
+                        "matched_queries": ["spoken english"],
+                        "hit_count": 1,
+                        "first_seen_rank": 1,
+                    },
+                    {
+                        "source": "supplemental_topic_video",
+                        "video_id": "supp-1",
+                        "url": "https://www.youtube.com/watch?v=supp-1",
+                        "title": "Supplemental idea one",
+                        "channel_title": "Topic Coach",
+                        "views": 6100,
+                        "matched_queries": ["spoken english"],
+                        "hit_count": 1,
+                        "first_seen_rank": 2,
+                    },
+                    {
+                        "source": "supplemental_topic_video",
+                        "video_id": "supp-2",
+                        "url": "https://www.youtube.com/watch?v=supp-2",
+                        "title": "Supplemental idea two",
+                        "channel_title": "Format Coach",
+                        "views": 5900,
+                        "matched_queries": ["spoken english"],
+                        "hit_count": 1,
+                        "first_seen_rank": 3,
+                    },
+                ],
+            },
+            diagnostics={"queries_built": 1, "queries_executed": 1, "final_candidates": 3},
+        ),
+    )
+
+    preview = build_report_preview(
+        user=user,
+        period_start=now - timedelta(hours=24),
+        period_end=now,
+    )
+
+    youtube_supplemental = preview.payload["supplemental"]["youtube_topic_video"]
+    assert [item["video_id"] for item in youtube_supplemental["section"]["items"]] == ["supp-1", "supp-2"]
+    assert youtube_supplemental["diagnostics"]["dropped_by_main_report_duplicate"] == 1
+    assert "Дополнительно в YouTube:" in preview.text
+    assert "Supplemental idea one" in preview.text
+    assert "Main duplicate" not in preview.text
+
+
 def test_build_report_preview_fallback_still_respects_already_reported_and_stopwords(db, monkeypatch, settings):
     settings.REPORT_FALLBACK_MIN_ITEMS_PER_PLATFORM = 2
     user = TgUser.objects.create(tg_user_id=173, tg_chat_id=173, timezone_str="UTC", report_stopwords=["blocked"])

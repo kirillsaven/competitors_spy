@@ -3,6 +3,8 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
+from django.test import override_settings
+
 from tracking.models import Platform
 from tracking.services.reporting import (
     build_report_payload,
@@ -47,6 +49,30 @@ def _make_scored_item(*, platform: str, suffix: str):
         reactions_delta_pct=60.7,
         virality=1.8,
     )
+
+
+def _make_supplemental_candidate(*, suffix: str, title: str | None = None, channel_title: str | None = None):
+    return {
+        "source": "supplemental_topic_video",
+        "video_id": f"supp-{suffix}",
+        "url": f"https://www.youtube.com/watch?v=supp-{suffix}",
+        "title": title or f"Supplemental title {suffix}",
+        "description": f"Supplemental description {suffix}",
+        "published_at": datetime(2026, 3, 24, 12, 0, tzinfo=UTC).isoformat().replace("+00:00", "Z"),
+        "duration_seconds": 32,
+        "views": 4200,
+        "likes": 120,
+        "comments": 8,
+        "channel_id": f"chan-{suffix}",
+        "channel_title": channel_title or f"Supplemental Channel {suffix}",
+        "matched_queries": ["spoken english"],
+        "hit_count": 1,
+        "first_seen_rank": 1,
+        "query_positions": {"spoken english": 1},
+        "supplemental_score": 0.72,
+        "supplemental_ranking_factors": {"query_phrase_match": 0.4},
+        "supplemental_survival_reason": "deterministic_rank_pass",
+    }
 
 
 def test_build_report_payload_groups_by_platform_and_keeps_stub_sections():
@@ -147,6 +173,7 @@ def test_render_report_text_preserves_youtube_section_and_stub_lines():
     assert "TikTok:" in text
     assert "Нет подходящих роликов." in text
     assert "Instagram:" in text
+    assert "Дополнительно в YouTube:" not in text
     assert "Канал:" not in text
     assert "Опубликовано:" not in text
 
@@ -196,6 +223,111 @@ def test_render_report_text_truncates_regular_report_titles():
 
     assert ("A" * 97) + "..." in text
     assert "A" * 120 not in text
+
+
+def test_build_report_payload_keeps_separate_youtube_supplemental_section_and_dedups_main_items():
+    scored_item = _make_scored_item(platform=Platform.YOUTUBE, suffix="1")
+    scored_item.content_item.external_id = "shared-video"
+    scored_item.content_item.url = "https://www.youtube.com/watch?v=shared-video"
+
+    supplemental = {
+        "youtube_topic_video": {
+            "source": "supplemental_topic_video",
+            "queries": ["spoken english"],
+            "diagnostics": {"final_candidates": 3},
+            "candidates": [
+                {
+                    **_make_supplemental_candidate(suffix="dup"),
+                    "video_id": "shared-video",
+                    "url": "https://www.youtube.com/watch?v=shared-video",
+                    "title": "Same as main item",
+                },
+                _make_supplemental_candidate(suffix="2"),
+                _make_supplemental_candidate(suffix="3"),
+            ],
+        }
+    }
+
+    payload = build_report_payload(
+        scored=[scored_item],
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        supplemental=supplemental,
+    )
+
+    youtube_supplemental = payload["supplemental"]["youtube_topic_video"]
+    assert youtube_supplemental["diagnostics"]["dropped_by_main_report_duplicate"] == 1
+    assert youtube_supplemental["diagnostics"]["rendered_candidates"] == 2
+    assert [item["video_id"] for item in youtube_supplemental["section"]["items"]] == ["supp-2", "supp-3"]
+
+
+def test_render_report_text_renders_compact_youtube_supplemental_section_separately():
+    payload = build_report_payload(
+        scored=[_make_scored_item(platform=Platform.YOUTUBE, suffix="1")],
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        supplemental={
+            "youtube_topic_video": {
+                "source": "supplemental_topic_video",
+                "queries": ["spoken english"],
+                "diagnostics": {"final_candidates": 1},
+                "candidates": [_make_supplemental_candidate(suffix="2", title="Useful topic idea", channel_title="Topic Coach")],
+            }
+        },
+    )
+
+    text = render_report_text(payload=payload, timezone_str="UTC")
+
+    assert "YouTube:" in text
+    assert "Дополнительно в YouTube:" in text
+    assert "Идеи по теме, найденные вне списка конкурентов." in text
+    assert "Topic Coach" in text
+    assert "Useful topic idea" in text
+    assert "Просмотры: 4200" in text
+
+
+@override_settings(REPORT_YOUTUBE_SUPPLEMENTAL_MAX_ITEMS=2)
+def test_render_report_text_limits_youtube_supplemental_items():
+    payload = build_report_payload(
+        scored=[_make_scored_item(platform=Platform.YOUTUBE, suffix="1")],
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        supplemental={
+            "youtube_topic_video": {
+                "source": "supplemental_topic_video",
+                "queries": ["spoken english"],
+                "diagnostics": {"final_candidates": 3},
+                "candidates": [
+                    _make_supplemental_candidate(suffix="2"),
+                    _make_supplemental_candidate(suffix="3"),
+                    _make_supplemental_candidate(suffix="4"),
+                ],
+            }
+        },
+    )
+
+    section_items = payload["supplemental"]["youtube_topic_video"]["section"]["items"]
+    assert [item["video_id"] for item in section_items] == ["supp-2", "supp-3"]
+
+
+def test_render_report_text_skips_empty_youtube_supplemental_section():
+    payload = build_report_payload(
+        scored=[_make_scored_item(platform=Platform.YOUTUBE, suffix="1")],
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        supplemental={
+            "youtube_topic_video": {
+                "source": "supplemental_topic_video",
+                "queries": ["spoken english"],
+                "diagnostics": {"final_candidates": 0},
+                "candidates": [],
+            }
+        },
+    )
+
+    text = render_report_text(payload=payload, timezone_str="UTC")
+
+    assert "Дополнительно в YouTube:" not in text
 
 
 def test_render_setup_verification_text_is_compact_and_strips_hashtags():
