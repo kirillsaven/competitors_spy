@@ -81,6 +81,13 @@ The production override switches Django to Gunicorn behind an Nginx reverse prox
 
 For the first real VPS deployment baseline, see `DEPLOY.md`.
 
+Post-merge completion standard:
+
+- merge is not enough
+- done = merge + deploy + verify
+- use `pwsh ./scripts/post_merge_deploy_verify.ps1 -SmokeUserId <user_id>` after every merged production PR
+- truth report must include live SHA before, live SHA after, restarted services, one smoke check, and whether the key symptom is fixed
+
 ## CI
 GitHub Actions runs `python manage.py check`, `python manage.py check --deploy --fail-level WARNING`, and `pytest -q` on pushes to `main` and on pull requests targeting `main`.
 

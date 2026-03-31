@@ -1,5 +1,11 @@
 # Report Selection Roadmap
 
+## Execution Standard
+
+- Merge without deploy and live verification is not a completed rollout.
+- For any merged production-affecting PR, done means `merge -> deploy -> verify live SHA -> smoke check -> truth report`.
+- See [docs/post-merge-deploy-verify.md](./post-merge-deploy-verify.md).
+
 ## A. Forensic Note: YouTube-zero report on 2026-03-30
 
 ### Target report
