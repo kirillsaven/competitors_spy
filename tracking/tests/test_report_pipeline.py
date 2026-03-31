@@ -168,6 +168,67 @@ def test_create_and_send_report_marks_failed_when_telegram_send_errors(db, monke
     assert report.status == "failed"
 
 
+def test_create_and_send_report_sends_youtube_suggestion_message_when_present(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=113, tg_chat_id=113, timezone_str="UTC")
+    preview = ReportPreview(
+        payload={
+            "sections": [],
+            "suggested_competitors": {
+                "youtube": {
+                    "items": [
+                        {
+                            "channel_id": "chan-1",
+                            "channel_title": "Topic Coach",
+                            "appearance_count": 2,
+                        }
+                    ]
+                }
+            },
+        },
+        text="Обычный отчет",
+        section_counts={},
+    )
+    monkeypatch.setattr(report_pipeline, "build_report_preview", lambda **kwargs: preview)
+    sent: list[dict] = []
+
+    def fake_send_message(**kwargs):
+        sent.append(kwargs)
+        return {"message_id": len(sent)}
+
+    monkeypatch.setattr(report_pipeline, "send_message", fake_send_message)
+
+    result = create_and_send_report(
+        user=user,
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+    )
+
+    assert len(sent) == 2
+    assert sent[1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == f"suggytadd:{result.report.id}:0"
+    assert result.telegram_result["suggestion_message_id"] == 2
+
+
+def test_create_and_send_report_skips_youtube_suggestion_message_when_none(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=114, tg_chat_id=114, timezone_str="UTC")
+    preview = ReportPreview(
+        payload={"sections": [], "suggested_competitors": {"youtube": {"items": []}}},
+        text="Обычный отчет",
+        section_counts={},
+    )
+    monkeypatch.setattr(report_pipeline, "build_report_preview", lambda **kwargs: preview)
+    sent: list[dict] = []
+    monkeypatch.setattr(report_pipeline, "send_message", lambda **kwargs: sent.append(kwargs) or {"message_id": len(sent)})
+
+    result = create_and_send_report(
+        user=user,
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+    )
+
+    assert len(sent) == 1
+    assert "suggestion_message_id" not in result.telegram_result
+
+
 def test_build_setup_verification_preview_prefetches_ig_and_tt_provider_payloads(db, monkeypatch):
     user = TgUser.objects.create(tg_user_id=12, tg_chat_id=12, timezone_str="UTC")
     instagram = Competitor.objects.create(
@@ -1228,6 +1289,84 @@ def test_build_report_preview_renders_youtube_supplemental_section_without_main_
     assert "Дополнительно в YouTube:" in preview.text
     assert "Supplemental idea one" in preview.text
     assert "Main duplicate" not in preview.text
+
+
+def test_build_report_preview_attaches_youtube_suggested_competitors_payload(db, monkeypatch, settings):
+    settings.ENABLE_YOUTUBE_SUPPLEMENTAL_TOPIC_VIDEO_COLLECTION = True
+    user = TgUser.objects.create(tg_user_id=183, tg_chat_id=183, timezone_str="UTC")
+    competitor = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="yt-suggested-payload",
+        handle="yt_suggested_payload",
+        url="https://www.youtube.com/@yt_suggested_payload",
+        display_name="YT Suggested Payload",
+        meta={"uploads_playlist_id": "UU-suggested-payload"},
+    )
+    UserCompetitor.objects.create(user=user, competitor=competitor, is_active=True)
+    now = datetime(2026, 3, 24, 12, 0, tzinfo=UTC)
+    Report.objects.create(
+        user=user,
+        period_start=now - timedelta(days=2),
+        period_end=now - timedelta(days=1),
+        status="sent",
+        payload={
+            "sections": [],
+            "supplemental": {
+                "youtube_topic_video": {
+                    "source": "supplemental_topic_video",
+                    "candidates": [
+                        {
+                            "video_id": "hist-sugg",
+                            "url": "https://www.youtube.com/watch?v=hist-sugg",
+                            "title": "Historic suggested idea",
+                            "channel_id": "chan-repeat",
+                            "channel_title": "Topic Coach",
+                            "matched_queries": ["spoken english"],
+                            "supplemental_score": 0.61,
+                        }
+                    ],
+                }
+            },
+        },
+    )
+
+    monkeypatch.setattr(report_pipeline, "youtube_profile_recent_shorts_gate_status", lambda **kwargs: (True, 2))
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", lambda **kwargs: [])
+    monkeypatch.setattr(report_pipeline, "compute_competitor_baseline", lambda **kwargs: None)
+    monkeypatch.setattr(report_pipeline, "score_items_for_period", lambda **kwargs: [])
+    monkeypatch.setattr(
+        report_pipeline,
+        "collect_youtube_topic_video_candidates",
+        lambda **kwargs: SimpleNamespace(
+            to_payload=lambda: {
+                "source": "supplemental_topic_video",
+                "queries": ["spoken english"],
+                "diagnostics": {"final_candidates": 1},
+                "candidates": [
+                    {
+                        "video_id": "curr-sugg",
+                        "url": "https://www.youtube.com/watch?v=curr-sugg",
+                        "title": "Current suggested idea",
+                        "channel_id": "chan-repeat",
+                        "channel_title": "Topic Coach",
+                        "matched_queries": ["spoken english"],
+                        "supplemental_score": 0.64,
+                    }
+                ],
+            },
+            diagnostics={"final_candidates": 1},
+        ),
+    )
+
+    preview = build_report_preview(
+        user=user,
+        period_start=now - timedelta(hours=24),
+        period_end=now,
+    )
+
+    suggestions = preview.payload["suggested_competitors"]["youtube"]
+    assert suggestions["diagnostics"]["final_suggestions"] == 1
+    assert suggestions["items"][0]["channel_id"] == "chan-repeat"
 
 
 def test_build_report_preview_fallback_still_respects_already_reported_and_stopwords(db, monkeypatch, settings):

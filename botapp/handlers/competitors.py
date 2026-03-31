@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -16,6 +17,7 @@ from tracking.adapters.base import SeedResolution
 from tracking.models import (
     AddedBy,
     Platform,
+    Report,
     Schedule,
     SeedProfile,
     SeedStatus,
@@ -35,9 +37,11 @@ from tracking.services.competitor_service import (
 from tracking.services.platform_onboarding import discover_competitors_for_onboarding
 from tracking.services.platform_onboarding import youtube_profile_recent_shorts_gate_status
 from tracking.services.seed_resolver import resolve_exact_seed
+from tracking.services.suggested_competitors import activate_youtube_suggested_competitor
 from tracking.services.setup_runtime import SetupRunContext
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 _PAGE_SIZE = 8
 
@@ -238,6 +242,13 @@ def _manual_add_prompt_text() -> str:
 
 def _manual_add_inputs(raw_text: str) -> list[str]:
     return [line.strip() for line in str(raw_text or "").splitlines() if line.strip()]
+
+
+def _youtube_suggestion_added_text(*, display_name: str, counts: dict[str, int]) -> str:
+    return (
+        f"Добавил конкурента в YouTube: {display_name}.\n"
+        f"Активных YouTube-конкурентов: {counts.get(Platform.YOUTUBE, 0)}"
+    )
 
 
 async def _render_add_picker(message: Message, state: FSMContext) -> None:
@@ -469,6 +480,67 @@ async def cmd_competitors_remove(message: Message, state: FSMContext) -> None:
     )
     await state.set_state(CompetitorManagementStates.PICK_COMPETITORS_REMOVE)
     await _render_remove_picker(picker, state)
+
+
+@router.callback_query(F.data.startswith("suggytadd:"))
+async def on_suggested_youtube_add(cb: CallbackQuery) -> None:
+    if not cb.message or not cb.from_user:
+        return
+    try:
+        _, report_id_raw, suggestion_idx_raw = str(cb.data).split(":", 2)
+        report_id = int(report_id_raw)
+        suggestion_idx = int(suggestion_idx_raw)
+    except Exception:
+        await cb.answer("Не понял, какую подсказку добавить.", show_alert=True)
+        return
+
+    user, _ = await db_call(
+        upsert_tg_user,
+        telegram_user_id=cb.from_user.id,
+        chat_id=cb.message.chat.id,
+        username=cb.from_user.username,
+        first_name=cb.from_user.first_name,
+        last_name=cb.from_user.last_name,
+        language_code=cb.from_user.language_code,
+    )
+    report = await db_run(lambda: Report.objects.filter(id=report_id, user=user).first())
+    if report is None:
+        await cb.answer("Подсказка устарела. Дождись нового отчета.", show_alert=True)
+        return
+
+    youtube_suggestions = ((((report.payload or {}).get("suggested_competitors") or {}).get("youtube")) or {})
+    items = [item for item in list(youtube_suggestions.get("items") or []) if isinstance(item, dict)]
+    if suggestion_idx < 0 or suggestion_idx >= len(items):
+        await cb.answer("Не нашел эту подсказку в отчете.", show_alert=True)
+        return
+
+    suggestion = items[suggestion_idx]
+    try:
+        result = await db_call(
+            activate_youtube_suggested_competitor,
+            user=user,
+            suggestion=suggestion,
+            added_by=AddedBy.SUGGESTED,
+        )
+    except Exception as exc:
+        await cb.answer(str(exc), show_alert=True)
+        return
+
+    channel_id = str(suggestion.get("channel_id") or "").strip()
+    if result.status == "already_active":
+        await cb.message.answer(f"{result.display_name} уже есть в активных YouTube-конкурентах.")
+        await cb.answer("Уже в активном списке.")
+        return
+
+    await cb.message.answer(_youtube_suggestion_added_text(display_name=result.display_name, counts=result.counts))
+    await cb.answer("Конкурент добавлен.")
+    logger.info(
+        "suggested_competitor_added_via_click user_id=%s report_id=%s channel_id=%s status=%s",
+        user.id,
+        report.id,
+        channel_id,
+        result.status,
+    )
 
 
 @router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_ADD, F.data == "noop")

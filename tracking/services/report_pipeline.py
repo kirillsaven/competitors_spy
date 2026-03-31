@@ -10,6 +10,7 @@ from typing import Any
 from django.conf import settings
 from django.utils import timezone
 
+from botapp.keyboards import kb_youtube_suggested_competitors
 from botapp.telegram_api import send_message
 from tracking.models import (
     Competitor,
@@ -36,6 +37,10 @@ from tracking.services.report_filters import (
     filter_content_items_for_stopwords,
     filter_scored_items_for_stopwords,
     get_user_report_stopwords,
+)
+from tracking.services.suggested_competitors import (
+    build_youtube_suggested_competitors_payload,
+    render_youtube_suggested_competitors_text,
 )
 from tracking.services.reporting import (
     build_report_payload,
@@ -313,6 +318,38 @@ def _build_supplemental_payload(
         result.diagnostics.get("final_candidates", 0),
     )
     return {"youtube_topic_video": result.to_payload()}
+
+
+def _attach_suggested_competitors_payload(
+    *,
+    user: TgUser,
+    payload: dict[str, Any],
+) -> None:
+    supplemental_payload = dict(payload.get("supplemental") or {})
+    youtube_lane_payload = supplemental_payload.get("youtube_topic_video")
+    youtube_suggestions = build_youtube_suggested_competitors_payload(
+        user=user,
+        current_lane_payload=youtube_lane_payload,
+    )
+    payload["suggested_competitors"] = {"youtube": youtube_suggestions}
+
+
+def _send_youtube_suggested_competitors_message(*, user: TgUser, report: Report) -> dict[str, Any] | None:
+    suggestions_payload = (((report.payload or {}).get("suggested_competitors") or {}).get("youtube") or {})
+    text = render_youtube_suggested_competitors_text(suggestion_payload=suggestions_payload)
+    if not text:
+        return None
+
+    suggestions = [item for item in list(suggestions_payload.get("items") or []) if isinstance(item, dict)]
+    if not suggestions:
+        return None
+
+    reply_markup = kb_youtube_suggested_competitors(report_id=report.id, suggestions=suggestions).model_dump(exclude_none=True)
+    return send_message(
+        chat_id=int(user.tg_chat_id),
+        text=text,
+        reply_markup=reply_markup,
+    )
 
 
 def _log_adaptation_relevance(*, user: TgUser, scored: list[object]) -> None:
@@ -798,6 +835,7 @@ def build_report_preview(
         platform_diagnostics=platform_diagnostics,
         supplemental=supplemental_payload,
     )
+    _attach_suggested_competitors_payload(user=user, payload=payload)
     text = render_report_text(payload=payload, timezone_str=user.timezone_str)
     section_counts = {
         str(section.get("platform")): len(section.get("items") or []) for section in (payload.get("sections") or [])
@@ -908,6 +946,18 @@ def create_and_send_report(
         "message_id": message_results[0]["message_id"],
         "message_ids": [result["message_id"] for result in message_results],
     }
+    try:
+        suggestion_message_result = _send_youtube_suggested_competitors_message(user=user, report=report)
+    except Exception:
+        logger.exception(
+            "report_suggested_competitors_send_failed user_id=%s report_id=%s",
+            user.id,
+            report.id,
+        )
+        suggestion_message_result = None
+    if suggestion_message_result is not None:
+        telegram_result["suggestion_message_id"] = suggestion_message_result.get("message_id")
+        telegram_result["suggestion_message_ids"] = [suggestion_message_result.get("message_id")]
 
     report.status = ReportStatus.SENT
     report.sent_at = timezone.now()

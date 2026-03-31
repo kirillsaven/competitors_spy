@@ -148,6 +148,19 @@ def kb_link_candidates(*, candidates: list[dict]) -> InlineKeyboardMarkup:
     return b.as_markup()
 
 
+def kb_youtube_suggested_competitors(*, report_id: int, suggestions: list[dict]) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for idx, suggestion in enumerate(list(suggestions or [])):
+        channel_title = str(suggestion.get("channel_title") or suggestion.get("channel_id") or f"YouTube {idx + 1}").strip()
+        b.row(
+            InlineKeyboardButton(
+                text=f"Добавить {idx + 1}. {channel_title}"[:64],
+                callback_data=f"suggytadd:{report_id}:{idx}",
+            )
+        )
+    return b.as_markup()
+
+
 def kb_competitors_next_or_ignore() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.add(InlineKeyboardButton(text="Дальше", callback_data="comp_done"))

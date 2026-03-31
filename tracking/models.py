@@ -30,6 +30,7 @@ class NicheSource(models.TextChoices):
 class AddedBy(models.TextChoices):
     MANUAL = "manual", "Manual"
     AUTO = "auto", "Auto"
+    SUGGESTED = "suggested", "Suggested"
 
 
 class LinkedAccountSource(models.TextChoices):
