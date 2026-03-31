@@ -109,6 +109,18 @@ def get_active_user_competitor_counts(*, user: TgUser) -> dict[str, int]:
     return counts
 
 
+def get_inactive_user_competitor_external_ids(*, user: TgUser, platform: str) -> set[str]:
+    return {
+        str(external_id).strip()
+        for external_id in UserCompetitor.objects.filter(
+            user=user,
+            is_active=False,
+            competitor__platform=platform,
+        ).values_list("competitor__external_id", flat=True)
+        if str(external_id).strip()
+    }
+
+
 def deactivate_user_competitors(*, user: TgUser, competitor_ids: list[int]) -> int:
     if not competitor_ids:
         return 0

@@ -25,6 +25,7 @@ from tracking.models import (
     UserCompetitor,
 )
 from tracking.services.collector import refresh_competitor
+from tracking.services.competitor_service import get_inactive_user_competitor_external_ids
 from tracking.services.platform_onboarding import (
     PlatformOnboardingError,
     _find_instagram_profile_for_lookup,
@@ -409,6 +410,7 @@ def _prepare_youtube_suggested_competitor_delivery(
     payload = (((report.payload or {}).get("suggested_competitors") or {}).get("youtube") or {})
     suggestions = [item for item in list(payload.get("items") or []) if isinstance(item, dict)]
     recently_sent_by_channel: dict[str, Any] = {}
+    blocked_channel_ids = get_inactive_user_competitor_external_ids(user=user, platform=Platform.YOUTUBE)
 
     prior_reports = (
         Report.objects.filter(user=user, status=ReportStatus.SENT)
@@ -434,6 +436,15 @@ def _prepare_youtube_suggested_competitor_delivery(
     suppressed_by_cooldown = 0
     for suggestion in suggestions:
         channel_id = str(suggestion.get("channel_id") or "").strip()
+        if channel_id and channel_id in blocked_channel_ids:
+            suppressed_items.append(
+                {
+                    "channel_id": channel_id,
+                    "channel_title": str(suggestion.get("channel_title") or channel_id).strip(),
+                    "suppression_reason": "blocked",
+                }
+            )
+            continue
         if channel_id and channel_id in recently_sent_by_channel:
             suppressed_by_cooldown += 1
             suppressed_items.append(
