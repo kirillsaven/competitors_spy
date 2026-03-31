@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 import logging
+import math
 import re
 from typing import Any, Iterable
 
@@ -14,6 +15,16 @@ from common.time import parse_iso8601_duration_seconds
 
 from tracking.adapters.youtube import YouTubeClient
 from tracking.models import Competitor
+from tracking.services.scoring import (
+    _FORMAT_MARKER_STEMS,
+    _INSTRUCTIONAL_MARKER_STEMS,
+    _LOW_ADAPTATION_VALUE_STEMS,
+    _dominant_script,
+    _dominant_subject_cluster,
+    _normalized_text,
+    _text_stems,
+    build_adaptation_context,
+)
 from tracking.services.youtube_service import get_youtube_client
 
 
@@ -21,6 +32,154 @@ logger = logging.getLogger(__name__)
 
 _PROFILE_META_TEXT_KEYS = {"description", "biography", "signature", "about", "headline", "summary", "keywords"}
 _SHORT_QUERY_STEMS = {_stem_token(value) for value in ("short", "shorts", "reel", "reels")}
+_GENERIC_QUERY_STEMS = {
+    _stem_token(value)
+    for value in (
+        "english",
+        "language",
+        "lesson",
+        "lessons",
+        "teacher",
+        "tutor",
+        "learn",
+        "learning",
+        "study",
+        "course",
+        "class",
+        "video",
+        "videos",
+        "урок",
+        "уроки",
+        "язык",
+        "английский",
+        "репетитор",
+        "преподаватель",
+        "учить",
+        "обучение",
+        "занятия",
+        "short",
+        "shorts",
+        "reel",
+        "reels",
+    )
+}
+_ADAPTABLE_MARKER_STEMS = {
+    _stem_token(value)
+    for value in (
+        "example",
+        "examples",
+        "пример",
+        "примеры",
+        "dialogue",
+        "dialog",
+        "диалог",
+        "practice",
+        "практика",
+        "exercise",
+        "упражнение",
+        "script",
+        "checklist",
+        "template",
+        "plan",
+        "разыграть",
+        "phrase",
+        "phrases",
+        "фраза",
+        "фразы",
+    )
+}
+_SUPPLEMENTAL_LOW_ADAPTATION_STEMS = _LOW_ADAPTATION_VALUE_STEMS | {
+    _stem_token(value)
+    for value in (
+        "song",
+        "songs",
+        "music",
+        "lyrics",
+        "lyric",
+        "cover",
+        "dance",
+        "podcast",
+        "interview",
+        "news",
+        "football",
+        "movie",
+        "film",
+        "клип",
+        "музыка",
+        "песня",
+        "песни",
+        "текст",
+        "новости",
+        "фильм",
+        "интервью",
+    )
+}
+_SUPPLEMENTAL_SUBJECT_MARKERS = {
+    "education_language": {
+        _stem_token(value)
+        for value in (
+            "english",
+            "language",
+            "grammar",
+            "vocabulary",
+            "pronunciation",
+            "speaking",
+            "teacher",
+            "tutor",
+            "lesson",
+            "exercise",
+            "dialogue",
+            "example",
+            "английский",
+            "язык",
+            "грамматика",
+            "словарь",
+            "разговорный",
+            "репетитор",
+            "урок",
+            "упражнение",
+            "диалог",
+            "фраза",
+        )
+    },
+    "music_entertainment": {
+        _stem_token(value)
+        for value in (
+            "music",
+            "song",
+            "songs",
+            "lyrics",
+            "lyric",
+            "cover",
+            "dance",
+            "concert",
+            "музыка",
+            "песня",
+            "песни",
+            "текст",
+            "танец",
+            "кавер",
+        )
+    },
+    "general_entertainment": {
+        _stem_token(value)
+        for value in (
+            "prank",
+            "meme",
+            "gossip",
+            "celebrity",
+            "vlog",
+            "challenge",
+            "trend",
+            "funny",
+            "новости",
+            "мем",
+            "влог",
+            "челлендж",
+        )
+    },
+}
+_SUPPLEMENTAL_MIN_SCORE = 0.35
 
 
 @dataclass(frozen=True)
@@ -40,6 +199,9 @@ class YouTubeSupplementalVideoCandidate:
     hit_count: int
     first_seen_rank: int | None
     query_positions: dict[str, int]
+    supplemental_score: float
+    supplemental_ranking_factors: dict[str, float]
+    supplemental_survival_reason: str
     source: str = "supplemental_topic_video"
 
     def to_payload(self) -> dict[str, Any]:
@@ -60,6 +222,9 @@ class YouTubeSupplementalVideoCandidate:
             "hit_count": self.hit_count,
             "first_seen_rank": self.first_seen_rank,
             "query_positions": dict(self.query_positions),
+            "supplemental_score": self.supplemental_score,
+            "supplemental_ranking_factors": dict(self.supplemental_ranking_factors),
+            "supplemental_survival_reason": self.supplemental_survival_reason,
         }
 
 
@@ -76,6 +241,14 @@ class YouTubeSupplementalCollectionResult:
             "diagnostics": dict(self.diagnostics),
             "candidates": [candidate.to_payload() for candidate in self.candidates],
         }
+
+
+@dataclass(frozen=True)
+class _SupplementalRankingDecision:
+    score: float
+    factors: dict[str, float]
+    drop_reason: str | None
+    survival_reason: str | None
 
 
 def _profile_texts(records: Iterable[Any]) -> list[str]:
@@ -197,6 +370,194 @@ def _search_hit_video_id(item: dict[str, Any]) -> str:
     return str(((item.get("id") or {}).get("videoId")) or "").strip()
 
 
+def _sorted_factors(factors: dict[str, float]) -> dict[str, float]:
+    return dict(sorted(factors.items(), key=lambda item: (-abs(item[1]), item[0])))
+
+
+def _query_stems(query: str) -> set[str]:
+    return {_stem_token(_normalize_token(token)) for token in _TOKEN_RE.findall(str(query or "")) if len(_normalize_token(token)) >= 3}
+
+
+def _query_is_generic(query: str) -> bool:
+    stems = _query_stems(query) - _SHORT_QUERY_STEMS
+    if not stems:
+        return True
+    return not (stems - _GENERIC_QUERY_STEMS)
+
+
+def _best_query_specificity(*, matched_queries: tuple[str, ...], normalized_text: str, keyword_stems: set[str]) -> tuple[int, int]:
+    best_meaningful_stems = 0
+    query_phrase_hits = 0
+    for query in matched_queries:
+        normalized_query = _normalize_query(query)
+        if not normalized_query:
+            continue
+        stems = _query_stems(normalized_query) - _SHORT_QUERY_STEMS
+        meaningful = stems - _GENERIC_QUERY_STEMS
+        best_meaningful_stems = max(best_meaningful_stems, len(meaningful | (stems & keyword_stems)))
+        if len(_TOKEN_RE.findall(normalized_query)) >= 2 and normalized_query in normalized_text:
+            query_phrase_hits += 1
+    return best_meaningful_stems, query_phrase_hits
+
+
+def _supplemental_subject_cluster(stems: set[str]) -> str | None:
+    best_cluster: str | None = None
+    best_score = 0
+    for cluster, markers in _SUPPLEMENTAL_SUBJECT_MARKERS.items():
+        score = len(stems & markers)
+        if score > best_score:
+            best_cluster = cluster
+            best_score = score
+    return best_cluster if best_score >= 2 else None
+
+
+def _compute_supplemental_candidate_ranking(
+    *,
+    candidate: YouTubeSupplementalVideoCandidate,
+    now: datetime,
+    max_age_days: int,
+    keyword_stems: set[str],
+    keyword_phrases: tuple[str, ...],
+    linked_context_stems: set[str],
+    competitor_context_stems: set[str],
+    dominant_script: str | None,
+    dominant_subject_cluster: str | None,
+) -> _SupplementalRankingDecision:
+    text = "\n".join(
+        part
+        for part in (
+            candidate.title,
+            candidate.description,
+            candidate.channel_title or "",
+        )
+        if str(part or "").strip()
+    )
+    normalized_text = _normalized_text(text)
+    item_stems = _text_stems(text)
+    if not item_stems and not normalized_text:
+        return _SupplementalRankingDecision(
+            score=0.0,
+            factors={},
+            drop_reason="low_supplemental_score",
+            survival_reason=None,
+        )
+
+    factors: dict[str, float] = {}
+    keyword_overlap = len(item_stems & keyword_stems)
+    phrase_matches = sum(1 for phrase in keyword_phrases if phrase in normalized_text)
+    linked_overlap = len(item_stems & linked_context_stems)
+    competitor_overlap = len(item_stems & competitor_context_stems)
+    best_query_specificity, query_phrase_hits = _best_query_specificity(
+        matched_queries=candidate.matched_queries,
+        normalized_text=normalized_text,
+        keyword_stems=keyword_stems,
+    )
+    generic_query_only = bool(candidate.matched_queries) and all(_query_is_generic(query) for query in candidate.matched_queries)
+    topical_alignment = keyword_overlap + phrase_matches + query_phrase_hits
+
+    if keyword_overlap:
+        factors["niche_stem_overlap"] = min(keyword_overlap, 3) * 0.16
+    if phrase_matches:
+        factors["niche_phrase_match"] = min(phrase_matches, 2) * 0.28
+    if query_phrase_hits:
+        factors["query_phrase_match"] = min(query_phrase_hits, 2) * 0.18
+    if best_query_specificity:
+        factors["query_specificity_bonus"] = min(best_query_specificity, 3) * 0.08
+    if linked_overlap and topical_alignment > 0:
+        factors["linked_context_overlap"] = min(linked_overlap, 3) * 0.07
+    if competitor_overlap and topical_alignment > 0:
+        factors["competitor_context_overlap"] = min(competitor_overlap, 3) * 0.06
+
+    instructional_hits = len(item_stems & _INSTRUCTIONAL_MARKER_STEMS)
+    if instructional_hits and topical_alignment > 0:
+        factors["instructional_markers"] = 0.14 + (min(instructional_hits, 3) * 0.04)
+    format_hits = len(item_stems & (_FORMAT_MARKER_STEMS | _ADAPTABLE_MARKER_STEMS))
+    if format_hits and topical_alignment > 0:
+        factors["adaptable_format_markers"] = 0.10 + (min(format_hits, 3) * 0.03)
+
+    age_days = max((now - candidate.published_at).total_seconds() / 86400.0, 0.0)
+    freshness_ratio = max(0.0, 1.0 - (age_days / max(float(max_age_days), 1.0)))
+    factors["freshness"] = round(0.12 * freshness_ratio, 4)
+
+    traction_views = max(int(candidate.views or 0), 1)
+    factors["traction"] = round(min(math.log10(traction_views) / 20.0, 0.18), 4)
+    if candidate.hit_count > 1:
+        factors["multi_query_support"] = min((candidate.hit_count - 1) * 0.06, 0.18)
+    if candidate.first_seen_rank is not None:
+        factors["search_rank_bonus"] = round(max(0.0, 0.10 - (max(candidate.first_seen_rank, 1) - 1) * 0.01), 4)
+
+    low_adaptation_hits = len(item_stems & _SUPPLEMENTAL_LOW_ADAPTATION_STEMS)
+    item_subject_cluster = _supplemental_subject_cluster(item_stems) or _dominant_subject_cluster(item_stems)
+    if dominant_subject_cluster and item_subject_cluster and item_subject_cluster != dominant_subject_cluster and topical_alignment <= 0:
+        factors["subject_mismatch_penalty"] = -0.40
+
+    item_script = _dominant_script(text)
+    if dominant_script and item_script and item_script != dominant_script and topical_alignment <= 0:
+        factors["language_mismatch_penalty"] = -0.25
+
+    if low_adaptation_hits and topical_alignment <= 0:
+        factors["off_topic_penalty"] = -0.24 - (min(low_adaptation_hits, 3) * 0.10)
+    elif low_adaptation_hits and topical_alignment < 2:
+        factors["low_adaptation_penalty"] = -0.12 - (min(low_adaptation_hits, 2) * 0.05)
+
+    if generic_query_only:
+        if (
+            phrase_matches <= 0
+            and query_phrase_hits <= 0
+            and keyword_overlap <= 1
+            and (linked_overlap + competitor_overlap) <= 1
+            and low_adaptation_hits > 0
+        ):
+            factors["generic_query_only_penalty"] = -0.55
+        elif topical_alignment <= 0 and best_query_specificity <= 1:
+            factors["generic_query_only_penalty"] = -0.55
+        elif phrase_matches <= 0 and query_phrase_hits <= 0 and (linked_overlap + competitor_overlap) <= 1:
+            factors["generic_query_only_penalty"] = -0.24
+
+    score = round(sum(factors.values()), 4)
+    sorted_factors = _sorted_factors(factors)
+    if float(sorted_factors.get("generic_query_only_penalty", 0.0)) <= -0.5:
+        return _SupplementalRankingDecision(
+            score=score,
+            factors=sorted_factors,
+            drop_reason="generic_query_weakness",
+            survival_reason=None,
+        )
+    if low_adaptation_hits >= 2 and topical_alignment < 2 and instructional_hits <= 0 and format_hits <= 0:
+        return _SupplementalRankingDecision(
+            score=score,
+            factors=sorted_factors,
+            drop_reason="off_topic_penalty",
+            survival_reason=None,
+        )
+    if any(name in sorted_factors for name in ("off_topic_penalty", "subject_mismatch_penalty", "language_mismatch_penalty")):
+        negative_total = sum(
+            float(sorted_factors.get(name, 0.0))
+            for name in ("off_topic_penalty", "subject_mismatch_penalty", "language_mismatch_penalty")
+        )
+        positive_total = sum(max(float(value), 0.0) for value in sorted_factors.values())
+        if negative_total <= -0.35 and positive_total < 0.45:
+            return _SupplementalRankingDecision(
+                score=score,
+                factors=sorted_factors,
+                drop_reason="off_topic_penalty",
+                survival_reason=None,
+            )
+    if score < _SUPPLEMENTAL_MIN_SCORE:
+        return _SupplementalRankingDecision(
+            score=score,
+            factors=sorted_factors,
+            drop_reason="low_supplemental_score",
+            survival_reason=None,
+        )
+    return _SupplementalRankingDecision(
+        score=score,
+        factors=sorted_factors,
+        drop_reason=None,
+        survival_reason="deterministic_rank_pass",
+    )
+
+
 def collect_youtube_topic_video_candidates(
     *,
     niche_keywords: list[str] | tuple[str, ...] | None,
@@ -252,6 +613,17 @@ def collect_youtube_topic_video_candidates(
 
     own_client = client is None
     youtube_client = client or get_youtube_client()
+    adaptation_context = build_adaptation_context(
+        niche_keywords=niche_keywords,
+        linked_accounts=linked_accounts,
+        competitors=competitors,
+    )
+    keyword_stems = set(adaptation_context.keyword_stems) if adaptation_context is not None else set()
+    keyword_phrases = tuple(adaptation_context.keyword_phrases) if adaptation_context is not None else ()
+    linked_context_stems = _text_stems(*_profile_texts(linked_accounts or []))
+    competitor_context_stems = _text_stems(*_profile_texts(competitors or []))
+    dominant_script = adaptation_context.dominant_script if adaptation_context is not None else None
+    dominant_subject_cluster = adaptation_context.dominant_subject_cluster if adaptation_context is not None else None
     provenance_by_video_id: dict[str, dict[str, Any]] = {}
     hydration_ids: list[str] = []
 
@@ -329,6 +701,10 @@ def collect_youtube_topic_video_candidates(
         )
         diagnostics["hydrated_video_items"] = len(hydrated_items)
         diagnostics["hydration_misses"] = max(len(hydration_ids) - len(hydrated_items), 0)
+        diagnostics["raw_candidates_before_ranking"] = 0
+        diagnostics["dropped_by_generic_query_weakness"] = 0
+        diagnostics["dropped_by_off_topic_penalty"] = 0
+        diagnostics["dropped_by_low_supplemental_score"] = 0
 
         candidates: list[YouTubeSupplementalVideoCandidate] = []
         query_final_counts: dict[str, int] = {entry["query"]: 0 for entry in diagnostics["query_stats"]}
@@ -361,7 +737,7 @@ def collect_youtube_topic_video_candidates(
                 continue
 
             provenance = provenance_by_video_id.get(video_id) or {}
-            candidate = YouTubeSupplementalVideoCandidate(
+            raw_candidate = YouTubeSupplementalVideoCandidate(
                 video_id=video_id,
                 url=f"https://www.youtube.com/watch?v={video_id}",
                 title=str(snippet.get("title") or "").strip(),
@@ -377,13 +753,64 @@ def collect_youtube_topic_video_candidates(
                 hit_count=int(provenance.get("hit_count") or 0),
                 first_seen_rank=provenance.get("first_seen_rank"),
                 query_positions=dict(provenance.get("query_positions") or {}),
+                supplemental_score=0.0,
+                supplemental_ranking_factors={},
+                supplemental_survival_reason="",
+            )
+            diagnostics["raw_candidates_before_ranking"] += 1
+            ranking = _compute_supplemental_candidate_ranking(
+                candidate=raw_candidate,
+                now=current_time,
+                max_age_days=max_age_days,
+                keyword_stems=keyword_stems,
+                keyword_phrases=keyword_phrases,
+                linked_context_stems=linked_context_stems,
+                competitor_context_stems=competitor_context_stems,
+                dominant_script=dominant_script,
+                dominant_subject_cluster=dominant_subject_cluster,
+            )
+            if ranking.drop_reason == "generic_query_weakness":
+                diagnostics["dropped_by_generic_query_weakness"] += 1
+                continue
+            if ranking.drop_reason == "off_topic_penalty":
+                diagnostics["dropped_by_off_topic_penalty"] += 1
+                continue
+            if ranking.drop_reason == "low_supplemental_score":
+                diagnostics["dropped_by_low_supplemental_score"] += 1
+                continue
+
+            candidate = YouTubeSupplementalVideoCandidate(
+                video_id=raw_candidate.video_id,
+                url=raw_candidate.url,
+                title=raw_candidate.title,
+                description=raw_candidate.description,
+                published_at=raw_candidate.published_at,
+                duration_seconds=raw_candidate.duration_seconds,
+                views=raw_candidate.views,
+                likes=raw_candidate.likes,
+                comments=raw_candidate.comments,
+                channel_id=raw_candidate.channel_id,
+                channel_title=raw_candidate.channel_title,
+                matched_queries=raw_candidate.matched_queries,
+                hit_count=raw_candidate.hit_count,
+                first_seen_rank=raw_candidate.first_seen_rank,
+                query_positions=raw_candidate.query_positions,
+                supplemental_score=ranking.score,
+                supplemental_ranking_factors=ranking.factors,
+                supplemental_survival_reason=ranking.survival_reason or "deterministic_rank_pass",
             )
             candidates.append(candidate)
             for matched_query in candidate.matched_queries:
                 if matched_query in query_final_counts:
                     query_final_counts[matched_query] += 1
 
-        candidates.sort(key=lambda item: (item.first_seen_rank if item.first_seen_rank is not None else 10**9, -item.hit_count))
+        candidates.sort(
+            key=lambda item: (
+                -item.supplemental_score,
+                -item.hit_count,
+                item.first_seen_rank if item.first_seen_rank is not None else 10**9,
+            )
+        )
         diagnostics["final_candidates"] = len(candidates)
         for entry in diagnostics["query_stats"]:
             query = str(entry.get("query") or "")
@@ -393,7 +820,9 @@ def collect_youtube_topic_video_candidates(
             "youtube_topic_video_collection queries_built=%s queries_executed=%s search_hits_total=%s "
             "unique_video_hits=%s hydration_requested=%s hydrated_video_items=%s dropped_by_dedup=%s "
             "dropped_by_hydration_budget=%s filtered_missing_published_at=%s filtered_missing_metrics=%s "
-            "filtered_too_old=%s filtered_non_short=%s final_candidates=%s",
+            "filtered_too_old=%s filtered_non_short=%s raw_candidates_before_ranking=%s "
+            "dropped_by_generic_query_weakness=%s dropped_by_off_topic_penalty=%s "
+            "dropped_by_low_supplemental_score=%s final_candidates=%s",
             diagnostics["queries_built"],
             diagnostics["queries_executed"],
             diagnostics["search_hits_total"],
@@ -406,6 +835,10 @@ def collect_youtube_topic_video_candidates(
             diagnostics["filtered_missing_metrics"],
             diagnostics["filtered_too_old"],
             diagnostics["filtered_non_short"],
+            diagnostics["raw_candidates_before_ranking"],
+            diagnostics["dropped_by_generic_query_weakness"],
+            diagnostics["dropped_by_off_topic_penalty"],
+            diagnostics["dropped_by_low_supplemental_score"],
             diagnostics["final_candidates"],
         )
         return YouTubeSupplementalCollectionResult(
