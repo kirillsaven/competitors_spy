@@ -44,6 +44,7 @@ from tracking.services.reporting import (
     split_telegram_text,
 )
 from tracking.services.scoring import build_adaptation_context, compute_competitor_baseline, score_items_for_period
+from tracking.services.youtube_service import YouTubeNotConfigured
 from tracking.services.youtube_topic_video_collection import collect_youtube_topic_video_candidates
 
 logger = logging.getLogger(__name__)
@@ -291,12 +292,19 @@ def _build_supplemental_payload(
         return None
     niche_keywords = _load_user_niche_keywords(user=user)
     linked_accounts = list(UserLinkedAccount.objects.filter(user=user).all())
-    result = collect_youtube_topic_video_candidates(
-        niche_keywords=niche_keywords,
-        linked_accounts=linked_accounts,
-        competitors=competitors,
-        now=period_end,
-    )
+    try:
+        result = collect_youtube_topic_video_candidates(
+            niche_keywords=niche_keywords,
+            linked_accounts=linked_accounts,
+            competitors=competitors,
+            now=period_end,
+        )
+    except YouTubeNotConfigured:
+        logger.info(
+            "report_supplemental_collection_skipped user_id=%s lane=youtube_topic_video reason=youtube_not_configured",
+            user.id,
+        )
+        return None
     logger.info(
         "report_supplemental_collection user_id=%s lane=youtube_topic_video queries_built=%s queries_executed=%s final_candidates=%s",
         user.id,
