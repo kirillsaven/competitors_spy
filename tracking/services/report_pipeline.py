@@ -332,6 +332,47 @@ def _attach_suggested_competitors_payload(
         current_lane_payload=youtube_lane_payload,
     )
     payload["suggested_competitors"] = {"youtube": youtube_suggestions}
+    _log_youtube_suggested_competitors_observability(
+        user=user,
+        suggestion_payload=youtube_suggestions,
+        stage="preview",
+    )
+
+
+def _set_youtube_suggestions_sent_count(*, payload: dict[str, Any], suggestions_sent: int) -> None:
+    suggested_payload = dict(payload.get("suggested_competitors") or {})
+    youtube_payload = dict(suggested_payload.get("youtube") or {})
+    diagnostics = dict(youtube_payload.get("diagnostics") or {})
+    diagnostics["suggestions_sent"] = int(suggestions_sent or 0)
+    youtube_payload["diagnostics"] = diagnostics
+    suggested_payload["youtube"] = youtube_payload
+    payload["suggested_competitors"] = suggested_payload
+
+
+def _log_youtube_suggested_competitors_observability(
+    *,
+    user: TgUser,
+    suggestion_payload: dict | None,
+    stage: str,
+    report_id: int | None = None,
+) -> None:
+    payload = dict(suggestion_payload or {})
+    diagnostics = dict(payload.get("diagnostics") or {})
+    logger.info(
+        "report_suggested_competitors_observability user_id=%s report_id=%s stage=%s "
+        "suggestions_considered=%s suggestions_generated=%s suggestions_sent=%s "
+        "dropped_already_active=%s dropped_not_repeated=%s dropped_dedup=%s dropped_limit=%s",
+        user.id,
+        report_id,
+        stage,
+        diagnostics.get("suggestions_considered", 0),
+        diagnostics.get("suggestions_generated", 0),
+        diagnostics.get("suggestions_sent", 0),
+        diagnostics.get("dropped_already_active", 0),
+        diagnostics.get("dropped_not_repeated", 0),
+        diagnostics.get("dropped_dedup", 0),
+        diagnostics.get("dropped_limit", 0),
+    )
 
 
 def _send_youtube_suggested_competitors_message(*, user: TgUser, report: Report) -> dict[str, Any] | None:
@@ -345,11 +386,12 @@ def _send_youtube_suggested_competitors_message(*, user: TgUser, report: Report)
         return None
 
     reply_markup = kb_youtube_suggested_competitors(report_id=report.id, suggestions=suggestions).model_dump(exclude_none=True)
-    return send_message(
+    result = send_message(
         chat_id=int(user.tg_chat_id),
         text=text,
         reply_markup=reply_markup,
     )
+    return {**result, "suggestions_sent": len(suggestions)}
 
 
 def _log_adaptation_relevance(*, user: TgUser, scored: list[object]) -> None:
@@ -955,13 +997,22 @@ def create_and_send_report(
             report.id,
         )
         suggestion_message_result = None
+    suggestions_sent = int((suggestion_message_result or {}).get("suggestions_sent") or 0)
+    _set_youtube_suggestions_sent_count(payload=preview.payload, suggestions_sent=suggestions_sent)
+    _set_youtube_suggestions_sent_count(payload=report.payload, suggestions_sent=suggestions_sent)
+    _log_youtube_suggested_competitors_observability(
+        user=user,
+        suggestion_payload=(((report.payload or {}).get("suggested_competitors") or {}).get("youtube") or {}),
+        stage="send",
+        report_id=report.id,
+    )
     if suggestion_message_result is not None:
         telegram_result["suggestion_message_id"] = suggestion_message_result.get("message_id")
         telegram_result["suggestion_message_ids"] = [suggestion_message_result.get("message_id")]
 
     report.status = ReportStatus.SENT
     report.sent_at = timezone.now()
-    report.save(update_fields=["status", "sent_at"])
+    report.save(update_fields=["status", "sent_at", "payload"])
     return SentReportResult(report=report, preview=preview, telegram_result=telegram_result)
 
 
