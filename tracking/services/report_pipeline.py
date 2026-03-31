@@ -549,14 +549,13 @@ def _prefetch_provider_data_for_competitors(
 
 
 def get_active_competitors(*, user: TgUser) -> list[Competitor]:
-    max_competitors = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
     competitors: list[Competitor] = []
     for platform in (Platform.YOUTUBE, Platform.TIKTOK, Platform.INSTAGRAM):
         links = (
             UserCompetitor.objects.select_related("competitor")
             .filter(user=user, is_active=True, competitor__platform=platform)
             .order_by("id")
-            .all()[:max_competitors]
+            .all()
         )
         competitors.extend(link.competitor for link in links)
     return competitors
