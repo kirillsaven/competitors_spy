@@ -17,11 +17,40 @@ function Invoke-RemoteBash {
         [string]$Label
     )
 
-    $output = $Script | ssh $Server bash 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "Remote command failed [$Label]`n$output"
+    # PowerShell on Windows can push CRLF through stdin pipelines into ssh, which breaks
+    # remote bash scripts (`cd /path\r`). Encode the script and decode it remotely instead.
+    # Also capture ssh stdout/stderr via temp files so remote stderr progress lines do not
+    # become terminating PowerShell errors under ErrorActionPreference=Stop.
+    $normalizedScript = ($Script -replace "`r`n", "`n" -replace "`r", "`n").Trim()
+    $encodedScript = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($normalizedScript))
+    $remoteCommand = "printf '%s' '$encodedScript' | base64 -d | bash"
+
+    $stdoutPath = [System.IO.Path]::GetTempFileName()
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+
+    try {
+        $process = Start-Process `
+            -FilePath "ssh" `
+            -ArgumentList @($Server, $remoteCommand) `
+            -NoNewWindow `
+            -Wait `
+            -PassThru `
+            -RedirectStandardOutput $stdoutPath `
+            -RedirectStandardError $stderrPath
+
+        $stdout = if (Test-Path $stdoutPath) { [System.IO.File]::ReadAllText($stdoutPath) } else { "" }
+        $stderr = if (Test-Path $stderrPath) { [System.IO.File]::ReadAllText($stderrPath) } else { "" }
+        $output = (@($stdout.TrimEnd(), $stderr.TrimEnd()) | Where-Object { $_ }) -join "`n"
+
+        if ($process.ExitCode -ne 0) {
+            throw "Remote command failed [$Label]`n$output"
+        }
     }
-    return ($output -join "`n").Trim()
+    finally {
+        Remove-Item -Force -ErrorAction SilentlyContinue $stdoutPath, $stderrPath
+    }
+
+    return ([string]$output).Trim()
 }
 
 Write-Host "== Post-merge deploy verify =="
