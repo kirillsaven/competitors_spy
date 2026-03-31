@@ -1077,7 +1077,7 @@ def test_build_report_preview_keeps_main_sections_unchanged_when_supplemental_co
 
 def test_build_report_preview_renders_youtube_supplemental_section_without_main_duplicates(db, monkeypatch, settings):
     settings.ENABLE_YOUTUBE_SUPPLEMENTAL_TOPIC_VIDEO_COLLECTION = True
-    settings.REPORT_YOUTUBE_SUPPLEMENTAL_MAX_ITEMS = 2
+    settings.REPORT_YOUTUBE_SUPPLEMENTAL_MAX_ITEMS = 10
     user = TgUser.objects.create(tg_user_id=182, tg_chat_id=182, timezone_str="UTC")
     competitor = Competitor.objects.create(
         platform=Platform.YOUTUBE,

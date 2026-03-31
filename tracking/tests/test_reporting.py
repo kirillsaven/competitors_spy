@@ -286,8 +286,8 @@ def test_render_report_text_renders_compact_youtube_supplemental_section_separat
     assert "Просмотры: 4200" in text
 
 
-@override_settings(REPORT_YOUTUBE_SUPPLEMENTAL_MAX_ITEMS=2)
-def test_render_report_text_limits_youtube_supplemental_items():
+@override_settings(REPORT_YOUTUBE_SUPPLEMENTAL_MAX_ITEMS=10)
+def test_render_report_text_limits_youtube_supplemental_items_to_ten():
     payload = build_report_payload(
         scored=[_make_scored_item(platform=Platform.YOUTUBE, suffix="1")],
         period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
@@ -296,18 +296,15 @@ def test_render_report_text_limits_youtube_supplemental_items():
             "youtube_topic_video": {
                 "source": "supplemental_topic_video",
                 "queries": ["spoken english"],
-                "diagnostics": {"final_candidates": 3},
-                "candidates": [
-                    _make_supplemental_candidate(suffix="2"),
-                    _make_supplemental_candidate(suffix="3"),
-                    _make_supplemental_candidate(suffix="4"),
-                ],
+                "diagnostics": {"final_candidates": 12},
+                "candidates": [_make_supplemental_candidate(suffix=str(idx)) for idx in range(2, 14)],
             }
         },
     )
 
     section_items = payload["supplemental"]["youtube_topic_video"]["section"]["items"]
-    assert [item["video_id"] for item in section_items] == ["supp-2", "supp-3"]
+    assert len(section_items) == 10
+    assert [item["video_id"] for item in section_items] == [f"supp-{idx}" for idx in range(2, 12)]
 
 
 def test_render_report_text_skips_empty_youtube_supplemental_section():
