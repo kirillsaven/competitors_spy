@@ -6,7 +6,7 @@ from typing import Any
 
 from django.conf import settings
 
-from tracking.models import Platform, Report, ReportStatus, TgUser, UserCompetitor
+from tracking.models import AddedBy, Platform, Report, ReportStatus, TgUser, UserCompetitor
 from tracking.services.competitor_service import get_active_user_competitor_counts, upsert_competitor
 from tracking.services.platform_onboarding import youtube_profile_recent_shorts_gate_status
 from tracking.services.seed_resolver import resolve_exact_seed
@@ -210,7 +210,7 @@ def activate_youtube_suggested_competitor(
     *,
     user: TgUser,
     suggestion: dict[str, Any],
-    added_by: str = "auto",
+    added_by: str = AddedBy.SUGGESTED,
 ) -> SuggestedCompetitorActivationResult:
     channel_id = str(suggestion.get("channel_id") or "").strip()
     if not channel_id:

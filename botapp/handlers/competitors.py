@@ -520,7 +520,7 @@ async def on_suggested_youtube_add(cb: CallbackQuery) -> None:
             activate_youtube_suggested_competitor,
             user=user,
             suggestion=suggestion,
-            added_by=AddedBy.AUTO,
+            added_by=AddedBy.SUGGESTED,
         )
     except Exception as exc:
         await cb.answer(str(exc), show_alert=True)

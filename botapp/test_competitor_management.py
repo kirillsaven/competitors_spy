@@ -579,6 +579,7 @@ def test_suggested_youtube_add_reactivates_competitor(monkeypatch):
 
     link = async_to_sync(sync_to_async(UserCompetitor.objects.get, thread_sensitive=True))(user=user, competitor=competitor_obj)
     assert link.is_active is True
+    assert link.added_by == "suggested"
     assert "Добавил конкурента в YouTube: Suggested Reactivate." in message.answers[-1]
 
 
@@ -643,6 +644,13 @@ def test_suggested_youtube_add_is_idempotent_and_can_grow_active_list_beyond_twe
     async_to_sync(competitors.on_suggested_youtube_add)(callback)
 
     count = async_to_sync(sync_to_async(UserCompetitor.objects.filter(user=user, is_active=True).count, thread_sensitive=True))()
+    link = async_to_sync(
+        sync_to_async(
+            UserCompetitor.objects.select_related("competitor").get,
+            thread_sensitive=True,
+        )
+    )(user=user, competitor__external_id="yt-suggested-21")
     assert count == 21
+    assert link.added_by == "suggested"
     assert any("Активных YouTube-конкурентов: 21" in answer for answer in message.answers)
     assert message.answers[-1] == "Suggested 21 уже есть в активных YouTube-конкурентах."
