@@ -12,7 +12,7 @@ class TelegramApiError(RuntimeError):
     pass
 
 
-def send_message(*, chat_id: int, text: str, disable_preview: bool = True) -> dict:
+def send_message(*, chat_id: int, text: str, disable_preview: bool = True, reply_markup: dict | None = None) -> dict:
     token = getattr(settings, "TELEGRAM_BOT_TOKEN", "") or ""
     if not token:
         raise TelegramApiError("TELEGRAM_BOT_TOKEN is not set")
@@ -22,6 +22,8 @@ def send_message(*, chat_id: int, text: str, disable_preview: bool = True) -> di
         "text": text,
         "disable_web_page_preview": disable_preview,
     }
+    if isinstance(reply_markup, dict) and reply_markup:
+        payload["reply_markup"] = reply_markup
     r = httpx.post(url, json=payload, timeout=15.0)
     try:
         data = r.json()

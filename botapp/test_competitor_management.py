@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
@@ -8,8 +9,8 @@ from asgiref.sync import async_to_sync, sync_to_async
 from botapp.handlers import common, competitors
 from botapp.state import CompetitorManagementStates
 from tracking.adapters.base import SeedResolution
-from tracking.models import Competitor, Platform, Schedule, TgUser, UserCompetitor
-from tracking.services import report_pipeline
+from tracking.models import Competitor, Platform, Report, Schedule, TgUser, UserCompetitor
+from tracking.services import report_pipeline, suggested_competitors
 
 
 class DummyState:
@@ -64,6 +65,7 @@ class DummyCallbackQuery:
     def __init__(self, *, data: str, message: DummyMessage) -> None:
         self.data = data
         self.message = message
+        self.from_user = message.from_user
         self.answers: list[tuple[str | None, bool]] = []
 
     async def answer(self, text: str | None = None, show_alert: bool = False):
@@ -511,3 +513,136 @@ def test_competitors_remove_deactivates_only_user_link_and_updates_report_active
     assert "Пропущено: 0" in message.answers[-1]
     assert "YouTube: 0" in message.answers[-1]
     assert "Instagram: 1" in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_suggested_youtube_add_reactivates_competitor(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=331, tg_chat_id=331)
+    competitor_obj = async_to_sync(sync_to_async(Competitor.objects.create, thread_sensitive=True))(
+        platform=Platform.YOUTUBE,
+        external_id="yt-suggested-reactivate",
+        handle="suggested_reactivate",
+        display_name="Suggested Reactivate",
+        url="https://www.youtube.com/@suggested_reactivate",
+        meta={"uploads_playlist_id": "UUreactivate"},
+    )
+    async_to_sync(sync_to_async(UserCompetitor.objects.create, thread_sensitive=True))(
+        user=user,
+        competitor=competitor_obj,
+        is_active=False,
+        added_by="auto",
+    )
+    report = async_to_sync(sync_to_async(Report.objects.create, thread_sensitive=True))(
+        user=user,
+        period_start=datetime(2026, 3, 30, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 31, 0, 0, tzinfo=UTC),
+        status="sent",
+        payload={
+            "sections": [],
+            "suggested_competitors": {
+                "youtube": {
+                    "items": [
+                        {
+                            "channel_id": "yt-suggested-reactivate",
+                            "channel_title": "Suggested Reactivate",
+                            "channel_url": "https://www.youtube.com/channel/yt-suggested-reactivate",
+                            "appearance_count": 2,
+                        }
+                    ]
+                }
+            },
+        },
+    )
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+
+    def fake_resolve_exact_seed(raw_input, *, context=None):
+        assert context is not None
+        assert raw_input == "https://www.youtube.com/channel/yt-suggested-reactivate"
+        return SeedResolution(
+            platform=Platform.YOUTUBE,
+            external_id="yt-suggested-reactivate",
+            handle="suggested_reactivate",
+            url="https://www.youtube.com/@suggested_reactivate",
+            title="Suggested Reactivate",
+            description="desc",
+            uploads_playlist_id="UUreactivate",
+        )
+
+    monkeypatch.setattr(suggested_competitors, "resolve_exact_seed", fake_resolve_exact_seed)
+    monkeypatch.setattr(suggested_competitors, "youtube_profile_recent_shorts_gate_status", lambda **kwargs: (True, 3))
+
+    message = DummyMessage(user_id=331)
+    callback = DummyCallbackQuery(data=f"suggytadd:{report.id}:0", message=message)
+    async_to_sync(competitors.on_suggested_youtube_add)(callback)
+
+    link = async_to_sync(sync_to_async(UserCompetitor.objects.get, thread_sensitive=True))(user=user, competitor=competitor_obj)
+    assert link.is_active is True
+    assert "Добавил конкурента в YouTube: Suggested Reactivate." in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_suggested_youtube_add_is_idempotent_and_can_grow_active_list_beyond_twenty(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=332, tg_chat_id=332)
+    for idx in range(20):
+        competitor_obj = async_to_sync(sync_to_async(Competitor.objects.create, thread_sensitive=True))(
+            platform=Platform.YOUTUBE,
+            external_id=f"yt-existing-suggested-{idx}",
+            handle=f"existing_suggested_{idx}",
+            display_name=f"Existing Suggested {idx}",
+            url=f"https://www.youtube.com/@existing_suggested_{idx}",
+            meta={"uploads_playlist_id": f"UUexisting{idx}"},
+        )
+        async_to_sync(sync_to_async(UserCompetitor.objects.create, thread_sensitive=True))(user=user, competitor=competitor_obj, is_active=True)
+
+    report = async_to_sync(sync_to_async(Report.objects.create, thread_sensitive=True))(
+        user=user,
+        period_start=datetime(2026, 3, 30, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 31, 0, 0, tzinfo=UTC),
+        status="sent",
+        payload={
+            "sections": [],
+            "suggested_competitors": {
+                "youtube": {
+                    "items": [
+                        {
+                            "channel_id": "yt-suggested-21",
+                            "channel_title": "Suggested 21",
+                            "channel_url": "https://www.youtube.com/channel/yt-suggested-21",
+                            "appearance_count": 3,
+                        }
+                    ]
+                }
+            },
+        },
+    )
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+
+    def fake_resolve_exact_seed(raw_input, *, context=None):
+        assert context is not None
+        assert raw_input == "https://www.youtube.com/channel/yt-suggested-21"
+        return SeedResolution(
+            platform=Platform.YOUTUBE,
+            external_id="yt-suggested-21",
+            handle="suggested_21",
+            url="https://www.youtube.com/@suggested_21",
+            title="Suggested 21",
+            description="desc",
+            uploads_playlist_id="UUsuggested21",
+        )
+
+    monkeypatch.setattr(suggested_competitors, "resolve_exact_seed", fake_resolve_exact_seed)
+    monkeypatch.setattr(suggested_competitors, "youtube_profile_recent_shorts_gate_status", lambda **kwargs: (True, 3))
+
+    message = DummyMessage(user_id=332)
+    callback = DummyCallbackQuery(data=f"suggytadd:{report.id}:0", message=message)
+    async_to_sync(competitors.on_suggested_youtube_add)(callback)
+    async_to_sync(competitors.on_suggested_youtube_add)(callback)
+
+    count = async_to_sync(sync_to_async(UserCompetitor.objects.filter(user=user, is_active=True).count, thread_sensitive=True))()
+    assert count == 21
+    assert any("Активных YouTube-конкурентов: 21" in answer for answer in message.answers)
+    assert message.answers[-1] == "Suggested 21 уже есть в активных YouTube-конкурентах."
