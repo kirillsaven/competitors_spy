@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 from statistics import mean
 from typing import Any
 
@@ -71,6 +71,16 @@ class SentReportResult:
     report: Report
     preview: ReportPreview
     telegram_result: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class PreparedYoutubeSuggestionDelivery:
+    items_to_send: list[dict[str, Any]]
+    message_cap: int
+    cooldown_hours: int
+    suppressed_by_run_cap: int
+    suppressed_by_cooldown: int
+    suppressed_items: list[dict[str, Any]]
 
 
 SETUP_REPORT_MAX_COMPETITORS_PER_PLATFORM = 20
@@ -339,11 +349,151 @@ def _attach_suggested_competitors_payload(
     )
 
 
+def _youtube_suggestion_delivery_defaults() -> dict[str, Any]:
+    return {
+        "message_cap": 1,
+        "cooldown_hours": 72,
+        "sent_items": [],
+        "suppressed_items": [],
+    }
+
+
+def _set_youtube_suggestion_delivery(
+    *,
+    payload: dict[str, Any],
+    delivery: dict[str, Any],
+) -> None:
+    suggested_payload = dict(payload.get("suggested_competitors") or {})
+    youtube_payload = dict(suggested_payload.get("youtube") or {})
+    current_delivery = _youtube_suggestion_delivery_defaults()
+    current_delivery.update(dict(youtube_payload.get("delivery") or {}))
+    current_delivery.update(dict(delivery or {}))
+    youtube_payload["delivery"] = current_delivery
+    suggested_payload["youtube"] = youtube_payload
+    payload["suggested_competitors"] = suggested_payload
+
+
 def _set_youtube_suggestions_sent_count(*, payload: dict[str, Any], suggestions_sent: int) -> None:
     suggested_payload = dict(payload.get("suggested_competitors") or {})
     youtube_payload = dict(suggested_payload.get("youtube") or {})
     diagnostics = dict(youtube_payload.get("diagnostics") or {})
     diagnostics["suggestions_sent"] = int(suggestions_sent or 0)
+    youtube_payload["diagnostics"] = diagnostics
+    suggested_payload["youtube"] = youtube_payload
+    payload["suggested_competitors"] = suggested_payload
+
+
+def _parse_iso_datetime(raw_value: Any):
+    if not isinstance(raw_value, str) or not raw_value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(raw_value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _prepare_youtube_suggested_competitor_delivery(
+    *,
+    user: TgUser,
+    report: Report,
+) -> PreparedYoutubeSuggestionDelivery:
+    message_cap = max(
+        1,
+        int(getattr(settings, "REPORT_YOUTUBE_SUGGESTED_COMPETITORS_MESSAGE_CAP", 1) or 1),
+    )
+    cooldown_hours = max(
+        1,
+        int(getattr(settings, "REPORT_YOUTUBE_SUGGESTED_COMPETITORS_RESEND_COOLDOWN_HOURS", 72) or 72),
+    )
+    cutoff = timezone.now() - timedelta(hours=cooldown_hours)
+    payload = (((report.payload or {}).get("suggested_competitors") or {}).get("youtube") or {})
+    suggestions = [item for item in list(payload.get("items") or []) if isinstance(item, dict)]
+    recently_sent_by_channel: dict[str, Any] = {}
+
+    prior_reports = (
+        Report.objects.filter(user=user, status=ReportStatus.SENT)
+        .exclude(id=report.id)
+        .order_by("-sent_at", "-id")
+    )
+    for prior_report in prior_reports:
+        youtube_payload = ((((prior_report.payload or {}).get("suggested_competitors") or {}).get("youtube")) or {})
+        delivery = dict(youtube_payload.get("delivery") or {})
+        for sent_item in list(delivery.get("sent_items") or []):
+            if not isinstance(sent_item, dict):
+                continue
+            channel_id = str(sent_item.get("channel_id") or "").strip()
+            if not channel_id or channel_id in recently_sent_by_channel:
+                continue
+            sent_at = _parse_iso_datetime(sent_item.get("sent_at")) or prior_report.sent_at or prior_report.created_at
+            if sent_at is None or sent_at < cutoff:
+                continue
+            recently_sent_by_channel[channel_id] = sent_at
+
+    eligible_items: list[dict[str, Any]] = []
+    suppressed_items: list[dict[str, Any]] = []
+    suppressed_by_cooldown = 0
+    for suggestion in suggestions:
+        channel_id = str(suggestion.get("channel_id") or "").strip()
+        if channel_id and channel_id in recently_sent_by_channel:
+            suppressed_by_cooldown += 1
+            suppressed_items.append(
+                {
+                    "channel_id": channel_id,
+                    "channel_title": str(suggestion.get("channel_title") or channel_id).strip(),
+                    "suppression_reason": "cooldown",
+                    "last_sent_at": recently_sent_by_channel[channel_id].isoformat(),
+                }
+            )
+            continue
+        eligible_items.append(dict(suggestion))
+
+    items_to_send = eligible_items[:message_cap]
+    suppressed_by_run_cap = max(len(eligible_items) - len(items_to_send), 0)
+    for suggestion in eligible_items[message_cap:]:
+        suppressed_items.append(
+            {
+                "channel_id": str(suggestion.get("channel_id") or "").strip(),
+                "channel_title": str(
+                    suggestion.get("channel_title") or suggestion.get("channel_id") or "YouTube"
+                ).strip(),
+                "suppression_reason": "run_cap",
+            }
+        )
+
+    return PreparedYoutubeSuggestionDelivery(
+        items_to_send=items_to_send,
+        message_cap=message_cap,
+        cooldown_hours=cooldown_hours,
+        suppressed_by_run_cap=suppressed_by_run_cap,
+        suppressed_by_cooldown=suppressed_by_cooldown,
+        suppressed_items=suppressed_items,
+    )
+
+
+def _build_youtube_suggestion_delivery_payload(
+    *,
+    prepared: PreparedYoutubeSuggestionDelivery,
+    sent_items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    return {
+        "message_cap": prepared.message_cap,
+        "cooldown_hours": prepared.cooldown_hours,
+        "sent_items": sent_items,
+        "suppressed_items": list(prepared.suppressed_items),
+    }
+
+
+def _set_youtube_suggestion_guardrail_diagnostics(
+    *,
+    payload: dict[str, Any],
+    suppressed_by_run_cap: int,
+    suppressed_by_cooldown: int,
+) -> None:
+    suggested_payload = dict(payload.get("suggested_competitors") or {})
+    youtube_payload = dict(suggested_payload.get("youtube") or {})
+    diagnostics = dict(youtube_payload.get("diagnostics") or {})
+    diagnostics["suppressed_by_run_cap"] = int(suppressed_by_run_cap or 0)
+    diagnostics["suppressed_by_cooldown"] = int(suppressed_by_cooldown or 0)
     youtube_payload["diagnostics"] = diagnostics
     suggested_payload["youtube"] = youtube_payload
     payload["suggested_competitors"] = suggested_payload
@@ -361,7 +511,8 @@ def _log_youtube_suggested_competitors_observability(
     logger.info(
         "report_suggested_competitors_observability user_id=%s report_id=%s stage=%s "
         "suggestions_considered=%s suggestions_generated=%s suggestions_sent=%s "
-        "dropped_already_active=%s dropped_not_repeated=%s dropped_dedup=%s dropped_limit=%s",
+        "dropped_already_active=%s dropped_not_repeated=%s dropped_dedup=%s dropped_limit=%s "
+        "suppressed_by_run_cap=%s suppressed_by_cooldown=%s",
         user.id,
         report_id,
         stage,
@@ -372,18 +523,33 @@ def _log_youtube_suggested_competitors_observability(
         diagnostics.get("dropped_not_repeated", 0),
         diagnostics.get("dropped_dedup", 0),
         diagnostics.get("dropped_limit", 0),
+        diagnostics.get("suppressed_by_run_cap", 0),
+        diagnostics.get("suppressed_by_cooldown", 0),
     )
 
 
-def _send_youtube_suggested_competitors_message(*, user: TgUser, report: Report) -> dict[str, Any] | None:
+def _send_youtube_suggested_competitors_message(*, user: TgUser, report: Report) -> dict[str, Any]:
     suggestions_payload = (((report.payload or {}).get("suggested_competitors") or {}).get("youtube") or {})
-    text = render_youtube_suggested_competitors_text(suggestion_payload=suggestions_payload)
+    diagnostics = dict(suggestions_payload.get("diagnostics") or {})
+    prepared = _prepare_youtube_suggested_competitor_delivery(user=user, report=report)
+    diagnostics["suppressed_by_run_cap"] = prepared.suppressed_by_run_cap
+    diagnostics["suppressed_by_cooldown"] = prepared.suppressed_by_cooldown
+    suggestions_payload = dict(suggestions_payload)
+    suggestions_payload["diagnostics"] = diagnostics
+    guardrailed_payload = {**suggestions_payload, "items": list(prepared.items_to_send)}
+    text = render_youtube_suggested_competitors_text(suggestion_payload=guardrailed_payload)
     if not text:
-        return None
+        return {
+            "suggestions_sent": 0,
+            "delivery": _build_youtube_suggestion_delivery_payload(prepared=prepared, sent_items=[]),
+        }
 
-    suggestions = [item for item in list(suggestions_payload.get("items") or []) if isinstance(item, dict)]
+    suggestions = [item for item in list(guardrailed_payload.get("items") or []) if isinstance(item, dict)]
     if not suggestions:
-        return None
+        return {
+            "suggestions_sent": 0,
+            "delivery": _build_youtube_suggestion_delivery_payload(prepared=prepared, sent_items=[]),
+        }
 
     reply_markup = kb_youtube_suggested_competitors(report_id=report.id, suggestions=suggestions).model_dump(exclude_none=True)
     result = send_message(
@@ -391,7 +557,13 @@ def _send_youtube_suggested_competitors_message(*, user: TgUser, report: Report)
         text=text,
         reply_markup=reply_markup,
     )
-    return {**result, "suggestions_sent": len(suggestions)}
+    sent_at = timezone.now().isoformat()
+    sent_items = [{**dict(item), "sent_at": sent_at, "message_id": result.get("message_id")} for item in suggestions]
+    return {
+        **result,
+        "suggestions_sent": len(suggestions),
+        "delivery": _build_youtube_suggestion_delivery_payload(prepared=prepared, sent_items=sent_items),
+    }
 
 
 def _log_adaptation_relevance(*, user: TgUser, scored: list[object]) -> None:
@@ -996,7 +1168,44 @@ def create_and_send_report(
             user.id,
             report.id,
         )
-        suggestion_message_result = None
+        suggestion_message_result = {}
+    suggestion_delivery = dict((suggestion_message_result or {}).get("delivery") or {})
+    _set_youtube_suggestion_delivery(payload=preview.payload, delivery=suggestion_delivery)
+    _set_youtube_suggestion_delivery(payload=report.payload, delivery=suggestion_delivery)
+    _set_youtube_suggestion_guardrail_diagnostics(
+        payload=preview.payload,
+        suppressed_by_run_cap=len(
+            [
+                item
+                for item in list(suggestion_delivery.get("suppressed_items") or [])
+                if isinstance(item, dict) and str(item.get("suppression_reason") or "") == "run_cap"
+            ]
+        ),
+        suppressed_by_cooldown=len(
+            [
+                item
+                for item in list(suggestion_delivery.get("suppressed_items") or [])
+                if isinstance(item, dict) and str(item.get("suppression_reason") or "") == "cooldown"
+            ]
+        ),
+    )
+    _set_youtube_suggestion_guardrail_diagnostics(
+        payload=report.payload,
+        suppressed_by_run_cap=len(
+            [
+                item
+                for item in list(suggestion_delivery.get("suppressed_items") or [])
+                if isinstance(item, dict) and str(item.get("suppression_reason") or "") == "run_cap"
+            ]
+        ),
+        suppressed_by_cooldown=len(
+            [
+                item
+                for item in list(suggestion_delivery.get("suppressed_items") or [])
+                if isinstance(item, dict) and str(item.get("suppression_reason") or "") == "cooldown"
+            ]
+        ),
+    )
     suggestions_sent = int((suggestion_message_result or {}).get("suggestions_sent") or 0)
     _set_youtube_suggestions_sent_count(payload=preview.payload, suggestions_sent=suggestions_sent)
     _set_youtube_suggestions_sent_count(payload=report.payload, suggestions_sent=suggestions_sent)
@@ -1006,7 +1215,7 @@ def create_and_send_report(
         stage="send",
         report_id=report.id,
     )
-    if suggestion_message_result is not None:
+    if suggestion_message_result.get("message_id") is not None:
         telegram_result["suggestion_message_id"] = suggestion_message_result.get("message_id")
         telegram_result["suggestion_message_ids"] = [suggestion_message_result.get("message_id")]
 

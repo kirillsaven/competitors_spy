@@ -208,6 +208,9 @@ def test_create_and_send_report_sends_youtube_suggestion_message_when_present(db
     assert sent[1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == f"suggytadd:{result.report.id}:0"
     assert result.telegram_result["suggestion_message_id"] == 2
     assert result.report.payload["suggested_competitors"]["youtube"]["diagnostics"]["suggestions_sent"] == 1
+    assert result.report.payload["suggested_competitors"]["youtube"]["delivery"]["sent_items"][0]["channel_id"] == "chan-1"
+    assert result.report.payload["suggested_competitors"]["youtube"]["diagnostics"]["suppressed_by_run_cap"] == 0
+    assert result.report.payload["suggested_competitors"]["youtube"]["diagnostics"]["suppressed_by_cooldown"] == 0
 
 
 def test_create_and_send_report_skips_youtube_suggestion_message_when_none(db, monkeypatch):
@@ -231,6 +234,184 @@ def test_create_and_send_report_skips_youtube_suggestion_message_when_none(db, m
     assert len(sent) == 1
     assert "suggestion_message_id" not in result.telegram_result
     assert result.report.payload["suggested_competitors"]["youtube"]["diagnostics"]["suggestions_sent"] == 0
+
+
+def test_create_and_send_report_caps_youtube_suggestion_follow_up_to_one_item_per_run(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=1131, tg_chat_id=1131, timezone_str="UTC")
+    preview = ReportPreview(
+        payload={
+            "sections": [],
+            "suggested_competitors": {
+                "youtube": {
+                    "items": [
+                        {"channel_id": "chan-1", "channel_title": "Topic Coach 1", "appearance_count": 3},
+                        {"channel_id": "chan-2", "channel_title": "Topic Coach 2", "appearance_count": 3},
+                        {"channel_id": "chan-3", "channel_title": "Topic Coach 3", "appearance_count": 2},
+                    ]
+                }
+            },
+        },
+        text="Обычный отчет",
+        section_counts={},
+    )
+    monkeypatch.setattr(report_pipeline, "build_report_preview", lambda **kwargs: preview)
+    sent: list[dict] = []
+
+    def fake_send_message(**kwargs):
+        sent.append(kwargs)
+        return {"message_id": len(sent)}
+
+    monkeypatch.setattr(report_pipeline, "send_message", fake_send_message)
+
+    result = create_and_send_report(
+        user=user,
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+    )
+
+    result.report.refresh_from_db()
+    youtube_payload = result.report.payload["suggested_competitors"]["youtube"]
+    assert len(sent) == 2
+    assert "Topic Coach 1" in sent[1]["text"]
+    assert "Topic Coach 2" not in sent[1]["text"]
+    assert youtube_payload["diagnostics"]["suggestions_sent"] == 1
+    assert youtube_payload["diagnostics"]["suppressed_by_run_cap"] == 2
+    assert youtube_payload["diagnostics"]["suppressed_by_cooldown"] == 0
+    assert youtube_payload["delivery"]["sent_items"][0]["channel_id"] == "chan-1"
+    assert [item["channel_id"] for item in youtube_payload["delivery"]["suppressed_items"]] == ["chan-2", "chan-3"]
+    assert all(item["suppression_reason"] == "run_cap" for item in youtube_payload["delivery"]["suppressed_items"])
+
+
+@override_settings(REPORT_YOUTUBE_SUGGESTED_COMPETITORS_RESEND_COOLDOWN_HOURS=72)
+def test_create_and_send_report_suppresses_recently_sent_youtube_suggestion_by_cooldown(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=1132, tg_chat_id=1132, timezone_str="UTC")
+    Report.objects.create(
+        user=user,
+        period_start=datetime(2026, 3, 21, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 22, 0, 0, tzinfo=UTC),
+        status="sent",
+        sent_at=datetime(2026, 3, 23, 23, 0, tzinfo=UTC),
+        payload={
+            "sections": [],
+            "suggested_competitors": {
+                "youtube": {
+                    "items": [{"channel_id": "chan-1", "channel_title": "Recent Coach"}],
+                    "delivery": {
+                        "message_cap": 1,
+                        "cooldown_hours": 72,
+                        "sent_items": [
+                            {
+                                "channel_id": "chan-1",
+                                "channel_title": "Recent Coach",
+                                "sent_at": "2026-03-23T23:00:00+00:00",
+                            }
+                        ],
+                        "suppressed_items": [],
+                    },
+                }
+            },
+        },
+    )
+    preview = ReportPreview(
+        payload={
+            "sections": [],
+            "suggested_competitors": {
+                "youtube": {
+                    "items": [
+                        {"channel_id": "chan-1", "channel_title": "Recent Coach", "appearance_count": 3},
+                        {"channel_id": "chan-2", "channel_title": "Fresh Coach", "appearance_count": 2},
+                    ]
+                }
+            },
+        },
+        text="Обычный отчет",
+        section_counts={},
+    )
+    monkeypatch.setattr(report_pipeline, "build_report_preview", lambda **kwargs: preview)
+    monkeypatch.setattr(report_pipeline.timezone, "now", lambda: datetime(2026, 3, 24, 0, 0, tzinfo=UTC))
+    sent: list[dict] = []
+    monkeypatch.setattr(report_pipeline, "send_message", lambda **kwargs: sent.append(kwargs) or {"message_id": len(sent)})
+
+    result = create_and_send_report(
+        user=user,
+        period_start=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 25, 0, 0, tzinfo=UTC),
+    )
+
+    result.report.refresh_from_db()
+    youtube_payload = result.report.payload["suggested_competitors"]["youtube"]
+    assert len(sent) == 2
+    assert "Fresh Coach" in sent[1]["text"]
+    assert "Recent Coach" not in sent[1]["text"]
+    assert youtube_payload["diagnostics"]["suggestions_sent"] == 1
+    assert youtube_payload["diagnostics"]["suppressed_by_cooldown"] == 1
+    assert youtube_payload["diagnostics"]["suppressed_by_run_cap"] == 0
+    assert youtube_payload["delivery"]["sent_items"][0]["channel_id"] == "chan-2"
+    assert youtube_payload["delivery"]["suppressed_items"][0]["channel_id"] == "chan-1"
+    assert youtube_payload["delivery"]["suppressed_items"][0]["suppression_reason"] == "cooldown"
+
+
+@override_settings(REPORT_YOUTUBE_SUGGESTED_COMPETITORS_RESEND_COOLDOWN_HOURS=72)
+def test_create_and_send_report_allows_youtube_suggestion_after_cooldown_expires(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=1133, tg_chat_id=1133, timezone_str="UTC")
+    Report.objects.create(
+        user=user,
+        period_start=datetime(2026, 3, 18, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 19, 0, 0, tzinfo=UTC),
+        status="sent",
+        sent_at=datetime(2026, 3, 20, 0, 0, tzinfo=UTC),
+        payload={
+            "sections": [],
+            "suggested_competitors": {
+                "youtube": {
+                    "items": [{"channel_id": "chan-1", "channel_title": "Repeat Coach"}],
+                    "delivery": {
+                        "message_cap": 1,
+                        "cooldown_hours": 72,
+                        "sent_items": [
+                            {
+                                "channel_id": "chan-1",
+                                "channel_title": "Repeat Coach",
+                                "sent_at": "2026-03-20T00:00:00+00:00",
+                            }
+                        ],
+                        "suppressed_items": [],
+                    },
+                }
+            },
+        },
+    )
+    preview = ReportPreview(
+        payload={
+            "sections": [],
+            "suggested_competitors": {
+                "youtube": {
+                    "items": [{"channel_id": "chan-1", "channel_title": "Repeat Coach", "appearance_count": 4}]
+                }
+            },
+        },
+        text="Обычный отчет",
+        section_counts={},
+    )
+    monkeypatch.setattr(report_pipeline, "build_report_preview", lambda **kwargs: preview)
+    monkeypatch.setattr(report_pipeline.timezone, "now", lambda: datetime(2026, 3, 24, 12, 0, tzinfo=UTC))
+    sent: list[dict] = []
+    monkeypatch.setattr(report_pipeline, "send_message", lambda **kwargs: sent.append(kwargs) or {"message_id": len(sent)})
+
+    result = create_and_send_report(
+        user=user,
+        period_start=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 25, 0, 0, tzinfo=UTC),
+    )
+
+    result.report.refresh_from_db()
+    youtube_payload = result.report.payload["suggested_competitors"]["youtube"]
+    assert len(sent) == 2
+    assert "Repeat Coach" in sent[1]["text"]
+    assert youtube_payload["diagnostics"]["suggestions_sent"] == 1
+    assert youtube_payload["diagnostics"]["suppressed_by_cooldown"] == 0
+    assert youtube_payload["diagnostics"]["suppressed_by_run_cap"] == 0
+    assert youtube_payload["delivery"]["sent_items"][0]["channel_id"] == "chan-1"
 
 
 def test_build_setup_verification_preview_prefetches_ig_and_tt_provider_payloads(db, monkeypatch):

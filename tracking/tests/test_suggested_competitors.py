@@ -165,4 +165,6 @@ def test_suggested_competitor_diagnostics_include_observability_counters(db):
     assert diagnostics["dropped_not_repeated"] == 1
     assert diagnostics["dropped_dedup"] == 1
     assert diagnostics["dropped_limit"] == 1
+    assert diagnostics["suppressed_by_run_cap"] == 0
+    assert diagnostics["suppressed_by_cooldown"] == 0
     assert payload["acceptance"] == {"clicked_add": 0, "added": 0, "already_active": 0, "events": []}
