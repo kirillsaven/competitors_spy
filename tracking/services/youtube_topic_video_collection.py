@@ -558,6 +558,129 @@ def _compute_supplemental_candidate_ranking(
     )
 
 
+def _candidate_title_signature(candidate: YouTubeSupplementalVideoCandidate) -> str:
+    title = _normalized_text(candidate.title)
+    if title:
+        return title[:180]
+    return _normalized_text(candidate.description)[:180]
+
+
+def _candidate_meaningful_stems(candidate: YouTubeSupplementalVideoCandidate) -> set[str]:
+    stems = _text_stems(candidate.title, candidate.description)
+    return stems - _GENERIC_QUERY_STEMS - _SHORT_QUERY_STEMS
+
+
+def _candidate_theme_key(candidate: YouTubeSupplementalVideoCandidate) -> str:
+    best_query = ""
+    best_specificity = -1
+    for query in candidate.matched_queries:
+        normalized_query = _normalize_query(query)
+        if not normalized_query:
+            continue
+        specificity = len((_query_stems(normalized_query) - _GENERIC_QUERY_STEMS - _SHORT_QUERY_STEMS))
+        if specificity > best_specificity:
+            best_specificity = specificity
+            best_query = normalized_query
+    if best_query:
+        return best_query
+    stems = sorted(_candidate_meaningful_stems(candidate))
+    return " ".join(stems[:3]).strip()
+
+
+def _candidate_format_bucket(candidate: YouTubeSupplementalVideoCandidate) -> str:
+    stems = _text_stems(candidate.title, candidate.description)
+    if stems & _ADAPTABLE_MARKER_STEMS:
+        return "adaptable_format"
+    if stems & _INSTRUCTIONAL_MARKER_STEMS:
+        return "instructional"
+    if "?" in str(candidate.title or ""):
+        return "question_hook"
+    return "general"
+
+
+def _is_near_duplicate_candidate(
+    *,
+    candidate: YouTubeSupplementalVideoCandidate,
+    selected: list[YouTubeSupplementalVideoCandidate],
+) -> bool:
+    candidate_signature = _candidate_title_signature(candidate)
+    candidate_stems = _candidate_meaningful_stems(candidate)
+    for existing in selected:
+        if candidate_signature and candidate_signature == _candidate_title_signature(existing):
+            return True
+        if candidate.channel_id and existing.channel_id and candidate.channel_id == existing.channel_id:
+            overlap = candidate_stems & _candidate_meaningful_stems(existing)
+            if candidate_stems and len(overlap) >= min(len(candidate_stems), 3):
+                return True
+        existing_stems = _candidate_meaningful_stems(existing)
+        union = candidate_stems | existing_stems
+        if union and len(candidate_stems & existing_stems) / len(union) >= 0.8:
+            return True
+    return False
+
+
+def _shape_ranked_candidates(
+    *,
+    candidates: list[YouTubeSupplementalVideoCandidate],
+    diagnostics: dict[str, Any],
+) -> list[YouTubeSupplementalVideoCandidate]:
+    max_final_candidates = max(1, int(getattr(settings, "YT_SUPPLEMENTAL_MAX_FINAL_CANDIDATES", 8) or 8))
+    max_per_theme = max(1, int(getattr(settings, "YT_SUPPLEMENTAL_MAX_PER_THEME", 2) or 2))
+    max_per_channel = max(1, int(getattr(settings, "YT_SUPPLEMENTAL_MAX_PER_CHANNEL", 2) or 2))
+    max_consecutive_same_format = max(1, int(getattr(settings, "YT_SUPPLEMENTAL_MAX_CONSECUTIVE_FORMAT_BUCKET", 2) or 2))
+
+    diagnostics["ranked_candidates_before_shaping"] = len(candidates)
+    diagnostics["max_final_candidates"] = max_final_candidates
+    diagnostics["max_per_theme"] = max_per_theme
+    diagnostics["max_per_channel"] = max_per_channel
+    diagnostics["max_consecutive_format_bucket"] = max_consecutive_same_format
+    diagnostics["dropped_by_near_duplicate"] = 0
+    diagnostics["dropped_by_same_theme_oversupply"] = 0
+    diagnostics["dropped_by_per_channel_cap"] = 0
+    diagnostics["dropped_by_format_bucket_run"] = 0
+
+    selected: list[YouTubeSupplementalVideoCandidate] = []
+    theme_counts: dict[str, int] = {}
+    channel_counts: dict[str, int] = {}
+
+    for candidate in candidates:
+        if len(selected) >= max_final_candidates:
+            break
+        if _is_near_duplicate_candidate(candidate=candidate, selected=selected):
+            diagnostics["dropped_by_near_duplicate"] += 1
+            continue
+
+        theme_key = _candidate_theme_key(candidate)
+        if theme_key:
+            if int(theme_counts.get(theme_key, 0) or 0) >= max_per_theme:
+                diagnostics["dropped_by_same_theme_oversupply"] += 1
+                continue
+
+        channel_key = str(candidate.channel_id or candidate.channel_title or "").strip().lower()
+        if channel_key:
+            if int(channel_counts.get(channel_key, 0) or 0) >= max_per_channel:
+                diagnostics["dropped_by_per_channel_cap"] += 1
+                continue
+
+        format_bucket = _candidate_format_bucket(candidate)
+        if (
+            theme_key
+            and format_bucket
+            and len(selected) >= max_consecutive_same_format
+            and all(_candidate_format_bucket(existing) == format_bucket for existing in selected[-max_consecutive_same_format:])
+            and all(_candidate_theme_key(existing) == theme_key for existing in selected[-max_consecutive_same_format:])
+        ):
+            diagnostics["dropped_by_format_bucket_run"] += 1
+            continue
+
+        selected.append(candidate)
+        if theme_key:
+            theme_counts[theme_key] = int(theme_counts.get(theme_key, 0) or 0) + 1
+        if channel_key:
+            channel_counts[channel_key] = int(channel_counts.get(channel_key, 0) or 0) + 1
+    return selected
+
+
 def collect_youtube_topic_video_candidates(
     *,
     niche_keywords: list[str] | tuple[str, ...] | None,
@@ -707,7 +830,6 @@ def collect_youtube_topic_video_candidates(
         diagnostics["dropped_by_low_supplemental_score"] = 0
 
         candidates: list[YouTubeSupplementalVideoCandidate] = []
-        query_final_counts: dict[str, int] = {entry["query"]: 0 for entry in diagnostics["query_stats"]}
         for item in hydrated_items:
             video_id = str(item.get("id") or "").strip()
             if not video_id:
@@ -800,9 +922,6 @@ def collect_youtube_topic_video_candidates(
                 supplemental_survival_reason=ranking.survival_reason or "deterministic_rank_pass",
             )
             candidates.append(candidate)
-            for matched_query in candidate.matched_queries:
-                if matched_query in query_final_counts:
-                    query_final_counts[matched_query] += 1
 
         candidates.sort(
             key=lambda item: (
@@ -811,7 +930,13 @@ def collect_youtube_topic_video_candidates(
                 item.first_seen_rank if item.first_seen_rank is not None else 10**9,
             )
         )
+        candidates = _shape_ranked_candidates(candidates=candidates, diagnostics=diagnostics)
         diagnostics["final_candidates"] = len(candidates)
+        query_final_counts: dict[str, int] = {entry["query"]: 0 for entry in diagnostics["query_stats"]}
+        for candidate in candidates:
+            for matched_query in candidate.matched_queries:
+                if matched_query in query_final_counts:
+                    query_final_counts[matched_query] += 1
         for entry in diagnostics["query_stats"]:
             query = str(entry.get("query") or "")
             entry["final_candidates"] = int(query_final_counts.get(query, 0) or 0)
@@ -822,7 +947,9 @@ def collect_youtube_topic_video_candidates(
             "dropped_by_hydration_budget=%s filtered_missing_published_at=%s filtered_missing_metrics=%s "
             "filtered_too_old=%s filtered_non_short=%s raw_candidates_before_ranking=%s "
             "dropped_by_generic_query_weakness=%s dropped_by_off_topic_penalty=%s "
-            "dropped_by_low_supplemental_score=%s final_candidates=%s",
+            "dropped_by_low_supplemental_score=%s ranked_candidates_before_shaping=%s "
+            "dropped_by_near_duplicate=%s dropped_by_same_theme_oversupply=%s "
+            "dropped_by_per_channel_cap=%s dropped_by_format_bucket_run=%s final_candidates=%s",
             diagnostics["queries_built"],
             diagnostics["queries_executed"],
             diagnostics["search_hits_total"],
@@ -839,6 +966,11 @@ def collect_youtube_topic_video_candidates(
             diagnostics["dropped_by_generic_query_weakness"],
             diagnostics["dropped_by_off_topic_penalty"],
             diagnostics["dropped_by_low_supplemental_score"],
+            diagnostics["ranked_candidates_before_shaping"],
+            diagnostics["dropped_by_near_duplicate"],
+            diagnostics["dropped_by_same_theme_oversupply"],
+            diagnostics["dropped_by_per_channel_cap"],
+            diagnostics["dropped_by_format_bucket_run"],
             diagnostics["final_candidates"],
         )
         return YouTubeSupplementalCollectionResult(

@@ -449,3 +449,277 @@ def test_off_topic_candidate_rejected():
 
     assert result.candidates == ()
     assert result.diagnostics["dropped_by_off_topic_penalty"] == 1
+
+
+@override_settings(
+    YT_SUPPLEMENTAL_MAX_QUERIES=1,
+    YT_SUPPLEMENTAL_MAX_RESULTS_PER_QUERY=4,
+    YT_SUPPLEMENTAL_MAX_SEARCH_PAGES_PER_QUERY=1,
+    YT_SUPPLEMENTAL_MAX_HYDRATED_VIDEOS=4,
+    YT_SUPPLEMENTAL_MAX_AGE_DAYS=30,
+    YT_SUPPLEMENTAL_SHORTS_ONLY=True,
+    YT_SUPPLEMENTAL_MAX_FINAL_CANDIDATES=4,
+    YT_SUPPLEMENTAL_MAX_PER_THEME=3,
+    YT_SUPPLEMENTAL_MAX_PER_CHANNEL=3,
+    YT_SUPPLEMENTAL_MAX_CONSECUTIVE_FORMAT_BUCKET=3,
+)
+def test_near_duplicate_supplemental_candidates_collapse():
+    class FakeClient:
+        def search_videos_page(self, *, q, max_results, page_token=None, published_after=None, short_duration_only=False):
+            return [
+                {"id": {"videoId": "dup-1"}, "snippet": {"channelId": "chan-1", "channelTitle": "Coach One"}},
+                {"id": {"videoId": "dup-2"}, "snippet": {"channelId": "chan-1", "channelTitle": "Coach One"}},
+                {"id": {"videoId": "uniq-1"}, "snippet": {"channelId": "chan-2", "channelTitle": "Coach Two"}},
+            ], None
+
+        def videos_list(self, *, ids, part):
+            mapping = {
+                "dup-1": {
+                    "id": "dup-1",
+                    "snippet": {
+                        "title": "Разговорный английский для взрослых: 5 фраз для small talk",
+                        "description": "урок и диалог для практики",
+                        "publishedAt": "2026-03-28T12:00:00Z",
+                    },
+                    "statistics": {"viewCount": "5300"},
+                    "contentDetails": {"duration": "PT45S"},
+                },
+                "dup-2": {
+                    "id": "dup-2",
+                    "snippet": {
+                        "title": "Разговорный английский для взрослых: 5 фраз для small talk",
+                        "description": "урок и диалог для практики",
+                        "publishedAt": "2026-03-28T12:05:00Z",
+                    },
+                    "statistics": {"viewCount": "5200"},
+                    "contentDetails": {"duration": "PT45S"},
+                },
+                "uniq-1": {
+                    "id": "uniq-1",
+                    "snippet": {
+                        "title": "Small talk на работе: полезные фразы",
+                        "description": "пример диалога для офиса",
+                        "publishedAt": "2026-03-28T13:00:00Z",
+                    },
+                    "statistics": {"viewCount": "4100"},
+                    "contentDetails": {"duration": "PT38S"},
+                },
+            }
+            return [mapping[video_id] for video_id in ids]
+
+    result = collection.collect_youtube_topic_video_candidates(
+        niche_keywords=["разговорный английский для взрослых", "small talk"],
+        now=datetime(2026, 3, 30, 12, 0, tzinfo=UTC),
+        client=FakeClient(),
+    )
+
+    assert [candidate.video_id for candidate in result.candidates] == ["dup-1", "uniq-1"]
+    assert result.diagnostics["dropped_by_near_duplicate"] == 1
+
+
+@override_settings(
+    YT_SUPPLEMENTAL_MAX_QUERIES=1,
+    YT_SUPPLEMENTAL_MAX_RESULTS_PER_QUERY=3,
+    YT_SUPPLEMENTAL_MAX_SEARCH_PAGES_PER_QUERY=1,
+    YT_SUPPLEMENTAL_MAX_HYDRATED_VIDEOS=3,
+    YT_SUPPLEMENTAL_MAX_AGE_DAYS=30,
+    YT_SUPPLEMENTAL_SHORTS_ONLY=True,
+    YT_SUPPLEMENTAL_MAX_FINAL_CANDIDATES=6,
+    YT_SUPPLEMENTAL_MAX_PER_THEME=2,
+    YT_SUPPLEMENTAL_MAX_PER_CHANNEL=3,
+    YT_SUPPLEMENTAL_MAX_CONSECUTIVE_FORMAT_BUCKET=3,
+)
+def test_same_theme_candidates_get_shaped_down():
+    class FakeClient:
+        def search_videos_page(self, *, q, max_results, page_token=None, published_after=None, short_duration_only=False):
+            return [
+                {"id": {"videoId": "theme-1"}, "snippet": {"channelId": "chan-1", "channelTitle": "Coach 1"}},
+                {"id": {"videoId": "theme-2"}, "snippet": {"channelId": "chan-2", "channelTitle": "Coach 2"}},
+                {"id": {"videoId": "theme-3"}, "snippet": {"channelId": "chan-3", "channelTitle": "Coach 3"}},
+            ], None
+
+        def videos_list(self, *, ids, part):
+            mapping = {
+                "theme-1": {
+                    "id": "theme-1",
+                    "snippet": {
+                        "title": "Разговорный английский для взрослых: фразы для small talk",
+                        "description": "урок и примеры",
+                        "publishedAt": "2026-03-28T12:00:00Z",
+                    },
+                    "statistics": {"viewCount": "5000"},
+                    "contentDetails": {"duration": "PT40S"},
+                },
+                "theme-2": {
+                    "id": "theme-2",
+                    "snippet": {
+                        "title": "Разговорный английский для взрослых: фразы для работы",
+                        "description": "урок и примеры",
+                        "publishedAt": "2026-03-28T13:00:00Z",
+                    },
+                    "statistics": {"viewCount": "4900"},
+                    "contentDetails": {"duration": "PT40S"},
+                },
+                "theme-3": {
+                    "id": "theme-3",
+                    "snippet": {
+                        "title": "Разговорный английский для взрослых: фразы для переписки",
+                        "description": "урок и примеры",
+                        "publishedAt": "2026-03-28T14:00:00Z",
+                    },
+                    "statistics": {"viewCount": "4800"},
+                    "contentDetails": {"duration": "PT40S"},
+                },
+            }
+            return [mapping[video_id] for video_id in ids]
+
+    result = collection.collect_youtube_topic_video_candidates(
+        niche_keywords=["разговорный английский для взрослых"],
+        now=datetime(2026, 3, 30, 12, 0, tzinfo=UTC),
+        client=FakeClient(),
+    )
+
+    assert len(result.candidates) == 2
+    assert result.diagnostics["dropped_by_same_theme_oversupply"] >= 1
+
+
+@override_settings(
+    YT_SUPPLEMENTAL_MAX_QUERIES=2,
+    YT_SUPPLEMENTAL_MAX_RESULTS_PER_QUERY=4,
+    YT_SUPPLEMENTAL_MAX_SEARCH_PAGES_PER_QUERY=1,
+    YT_SUPPLEMENTAL_MAX_HYDRATED_VIDEOS=8,
+    YT_SUPPLEMENTAL_MAX_AGE_DAYS=30,
+    YT_SUPPLEMENTAL_SHORTS_ONLY=True,
+    YT_SUPPLEMENTAL_MAX_FINAL_CANDIDATES=6,
+    YT_SUPPLEMENTAL_MAX_PER_THEME=3,
+    YT_SUPPLEMENTAL_MAX_PER_CHANNEL=1,
+    YT_SUPPLEMENTAL_MAX_CONSECUTIVE_FORMAT_BUCKET=3,
+)
+def test_one_channel_cannot_dominate_final_pool():
+    class FakeClient:
+        def search_videos_page(self, *, q, max_results, page_token=None, published_after=None, short_duration_only=False):
+            return [
+                {"id": {"videoId": "chan1-a"}, "snippet": {"channelId": "chan-1", "channelTitle": "Coach One"}},
+                {"id": {"videoId": "chan1-b"}, "snippet": {"channelId": "chan-1", "channelTitle": "Coach One"}},
+                {"id": {"videoId": "chan2-a"}, "snippet": {"channelId": "chan-2", "channelTitle": "Coach Two"}},
+            ], None
+
+        def videos_list(self, *, ids, part):
+            mapping = {
+                "chan1-a": {
+                    "id": "chan1-a",
+                    "snippet": {
+                        "title": "Разговорный английский: ошибки small talk",
+                        "description": "урок и примеры",
+                        "publishedAt": "2026-03-28T12:00:00Z",
+                    },
+                    "statistics": {"viewCount": "6000"},
+                    "contentDetails": {"duration": "PT35S"},
+                },
+                "chan1-b": {
+                    "id": "chan1-b",
+                    "snippet": {
+                        "title": "Разговорный английский: полезные фразы для офиса",
+                        "description": "диалог и практика",
+                        "publishedAt": "2026-03-28T13:00:00Z",
+                    },
+                    "statistics": {"viewCount": "5900"},
+                    "contentDetails": {"duration": "PT35S"},
+                },
+                "chan2-a": {
+                    "id": "chan2-a",
+                    "snippet": {
+                        "title": "Как звучать естественно на английском",
+                        "description": "пример и чеклист",
+                        "publishedAt": "2026-03-28T14:00:00Z",
+                    },
+                    "statistics": {"viewCount": "5500"},
+                    "contentDetails": {"duration": "PT32S"},
+                },
+            }
+            return [mapping[video_id] for video_id in ids]
+
+    result = collection.collect_youtube_topic_video_candidates(
+        niche_keywords=["разговорный английский", "small talk english"],
+        now=datetime(2026, 3, 30, 12, 0, tzinfo=UTC),
+        client=FakeClient(),
+    )
+
+    assert [candidate.video_id for candidate in result.candidates] == ["chan1-a", "chan2-a"]
+    assert result.diagnostics["dropped_by_per_channel_cap"] == 1
+
+
+@override_settings(
+    YT_SUPPLEMENTAL_MAX_QUERIES=3,
+    YT_SUPPLEMENTAL_MAX_RESULTS_PER_QUERY=3,
+    YT_SUPPLEMENTAL_MAX_SEARCH_PAGES_PER_QUERY=1,
+    YT_SUPPLEMENTAL_MAX_HYDRATED_VIDEOS=9,
+    YT_SUPPLEMENTAL_MAX_AGE_DAYS=30,
+    YT_SUPPLEMENTAL_SHORTS_ONLY=True,
+    YT_SUPPLEMENTAL_MAX_FINAL_CANDIDATES=6,
+    YT_SUPPLEMENTAL_MAX_PER_THEME=2,
+    YT_SUPPLEMENTAL_MAX_PER_CHANNEL=2,
+    YT_SUPPLEMENTAL_MAX_CONSECUTIVE_FORMAT_BUCKET=2,
+)
+def test_strong_diverse_candidates_survive_shaping():
+    class FakeClient:
+        def search_videos_page(self, *, q, max_results, page_token=None, published_after=None, short_duration_only=False):
+            mapping = {
+                "small talk english": [
+                    {"id": {"videoId": "talk-1"}, "snippet": {"channelId": "chan-1", "channelTitle": "Coach One"}},
+                ],
+                "english for travel": [
+                    {"id": {"videoId": "travel-1"}, "snippet": {"channelId": "chan-2", "channelTitle": "Coach Two"}},
+                ],
+                "english grammar": [
+                    {"id": {"videoId": "grammar-1"}, "snippet": {"channelId": "chan-3", "channelTitle": "Coach Three"}},
+                ],
+            }
+            return mapping.get(q, []), None
+
+        def videos_list(self, *, ids, part):
+            mapping = {
+                "talk-1": {
+                    "id": "talk-1",
+                    "snippet": {
+                        "title": "Small talk English: 5 phrases for work",
+                        "description": "dialogue and examples",
+                        "publishedAt": "2026-03-28T12:00:00Z",
+                    },
+                    "statistics": {"viewCount": "6100"},
+                    "contentDetails": {"duration": "PT35S"},
+                },
+                "travel-1": {
+                    "id": "travel-1",
+                    "snippet": {
+                        "title": "English for travel: useful airport phrases",
+                        "description": "checklist and pronunciation tips",
+                        "publishedAt": "2026-03-28T13:00:00Z",
+                    },
+                    "statistics": {"viewCount": "5800"},
+                    "contentDetails": {"duration": "PT41S"},
+                },
+                "grammar-1": {
+                    "id": "grammar-1",
+                    "snippet": {
+                        "title": "English grammar: 3 mistakes adults make",
+                        "description": "lesson with examples",
+                        "publishedAt": "2026-03-28T14:00:00Z",
+                    },
+                    "statistics": {"viewCount": "5600"},
+                    "contentDetails": {"duration": "PT39S"},
+                },
+            }
+            return [mapping[video_id] for video_id in ids]
+
+    result = collection.collect_youtube_topic_video_candidates(
+        niche_keywords=["small talk english", "english for travel", "english grammar"],
+        now=datetime(2026, 3, 30, 12, 0, tzinfo=UTC),
+        client=FakeClient(),
+    )
+
+    assert len(result.candidates) == 3
+    assert {candidate.video_id for candidate in result.candidates} == {"talk-1", "travel-1", "grammar-1"}
+    assert result.diagnostics["dropped_by_near_duplicate"] == 0
+    assert result.diagnostics["dropped_by_same_theme_oversupply"] == 0
+    assert result.diagnostics["dropped_by_per_channel_cap"] == 0
