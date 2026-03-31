@@ -64,6 +64,8 @@ def build_youtube_suggested_competitors_payload(
         "dropped_not_repeated": 0,
         "dropped_dedup": 0,
         "dropped_limit": 0,
+        "suppressed_by_run_cap": 0,
+        "suppressed_by_cooldown": 0,
         "dropped_low_average_score": 0,
         "final_suggestions": 0,
     }

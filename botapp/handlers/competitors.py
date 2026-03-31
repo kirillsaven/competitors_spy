@@ -512,7 +512,9 @@ async def on_suggested_youtube_add(cb: CallbackQuery) -> None:
         return
 
     youtube_suggestions = ((((report.payload or {}).get("suggested_competitors") or {}).get("youtube")) or {})
-    items = [item for item in list(youtube_suggestions.get("items") or []) if isinstance(item, dict)]
+    delivery = dict(youtube_suggestions.get("delivery") or {})
+    delivered_items = [item for item in list(delivery.get("sent_items") or []) if isinstance(item, dict)]
+    items = delivered_items or [item for item in list(youtube_suggestions.get("items") or []) if isinstance(item, dict)]
     if suggestion_idx < 0 or suggestion_idx >= len(items):
         await cb.answer("Не нашел эту подсказку в отчете.", show_alert=True)
         return
