@@ -37,7 +37,10 @@ from tracking.services.competitor_service import (
 from tracking.services.platform_onboarding import discover_competitors_for_onboarding
 from tracking.services.platform_onboarding import youtube_profile_recent_shorts_gate_status
 from tracking.services.seed_resolver import resolve_exact_seed
-from tracking.services.suggested_competitors import activate_youtube_suggested_competitor
+from tracking.services.suggested_competitors import (
+    activate_youtube_suggested_competitor,
+    record_youtube_suggested_competitor_acceptance,
+)
 from tracking.services.setup_runtime import SetupRunContext
 
 router = Router()
@@ -523,10 +526,48 @@ async def on_suggested_youtube_add(cb: CallbackQuery) -> None:
             added_by=AddedBy.SUGGESTED,
         )
     except Exception as exc:
+        acceptance = await db_call(
+            record_youtube_suggested_competitor_acceptance,
+            report=report,
+            suggestion=suggestion,
+            status="error",
+        )
+        logger.info(
+            "suggested_competitor_click_observability user_id=%s report_id=%s channel_id=%s status=%s "
+            "clicked_add=%s added=%s already_active=%s suggestion_source=%s suggestion_reason=%s",
+            user.id,
+            report.id,
+            str(suggestion.get("channel_id") or "").strip(),
+            "error",
+            acceptance.get("clicked_add", 0),
+            acceptance.get("added", 0),
+            acceptance.get("already_active", 0),
+            ((((report.payload or {}).get("suggested_competitors") or {}).get("youtube") or {}).get("source")),
+            suggestion.get("suggestion_reason"),
+        )
         await cb.answer(str(exc), show_alert=True)
         return
 
     channel_id = str(suggestion.get("channel_id") or "").strip()
+    acceptance = await db_call(
+        record_youtube_suggested_competitor_acceptance,
+        report=report,
+        suggestion=suggestion,
+        status=result.status,
+    )
+    logger.info(
+        "suggested_competitor_click_observability user_id=%s report_id=%s channel_id=%s status=%s "
+        "clicked_add=%s added=%s already_active=%s suggestion_source=%s suggestion_reason=%s",
+        user.id,
+        report.id,
+        channel_id,
+        result.status,
+        acceptance.get("clicked_add", 0),
+        acceptance.get("added", 0),
+        acceptance.get("already_active", 0),
+        ((((report.payload or {}).get("suggested_competitors") or {}).get("youtube") or {}).get("source")),
+        suggestion.get("suggestion_reason"),
+    )
     if result.status == "already_active":
         await cb.message.answer(f"{result.display_name} уже есть в активных YouTube-конкурентах.")
         await cb.answer("Уже в активном списке.")

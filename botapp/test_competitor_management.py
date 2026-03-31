@@ -578,8 +578,15 @@ def test_suggested_youtube_add_reactivates_competitor(monkeypatch):
     async_to_sync(competitors.on_suggested_youtube_add)(callback)
 
     link = async_to_sync(sync_to_async(UserCompetitor.objects.get, thread_sensitive=True))(user=user, competitor=competitor_obj)
+    report = async_to_sync(sync_to_async(Report.objects.get, thread_sensitive=True))(id=report.id)
+    acceptance = report.payload["suggested_competitors"]["youtube"]["acceptance"]
     assert link.is_active is True
     assert link.added_by == "suggested"
+    assert acceptance["clicked_add"] == 1
+    assert acceptance["added"] == 1
+    assert acceptance["already_active"] == 0
+    assert acceptance["events"][0]["status"] == "reactivated"
+    assert acceptance["events"][0]["suggestion_source"] == ""
     assert "Добавил конкурента в YouTube: Suggested Reactivate." in message.answers[-1]
 
 
@@ -644,6 +651,8 @@ def test_suggested_youtube_add_is_idempotent_and_can_grow_active_list_beyond_twe
     async_to_sync(competitors.on_suggested_youtube_add)(callback)
 
     count = async_to_sync(sync_to_async(UserCompetitor.objects.filter(user=user, is_active=True).count, thread_sensitive=True))()
+    report = async_to_sync(sync_to_async(Report.objects.get, thread_sensitive=True))(id=report.id)
+    acceptance = report.payload["suggested_competitors"]["youtube"]["acceptance"]
     link = async_to_sync(
         sync_to_async(
             UserCompetitor.objects.select_related("competitor").get,
@@ -652,5 +661,10 @@ def test_suggested_youtube_add_is_idempotent_and_can_grow_active_list_beyond_twe
     )(user=user, competitor__external_id="yt-suggested-21")
     assert count == 21
     assert link.added_by == "suggested"
+    assert acceptance["clicked_add"] == 2
+    assert acceptance["added"] == 1
+    assert acceptance["already_active"] == 1
+    assert [event["status"] for event in acceptance["events"]] == ["added", "already_active"]
+    assert acceptance["events"][0]["channel_id"] == "yt-suggested-21"
     assert any("Активных YouTube-конкурентов: 21" in answer for answer in message.answers)
     assert message.answers[-1] == "Suggested 21 уже есть в активных YouTube-конкурентах."

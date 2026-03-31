@@ -203,9 +203,11 @@ def test_create_and_send_report_sends_youtube_suggestion_message_when_present(db
         period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
     )
 
+    result.report.refresh_from_db()
     assert len(sent) == 2
     assert sent[1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == f"suggytadd:{result.report.id}:0"
     assert result.telegram_result["suggestion_message_id"] == 2
+    assert result.report.payload["suggested_competitors"]["youtube"]["diagnostics"]["suggestions_sent"] == 1
 
 
 def test_create_and_send_report_skips_youtube_suggestion_message_when_none(db, monkeypatch):
@@ -225,8 +227,10 @@ def test_create_and_send_report_skips_youtube_suggestion_message_when_none(db, m
         period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
     )
 
+    result.report.refresh_from_db()
     assert len(sent) == 1
     assert "suggestion_message_id" not in result.telegram_result
+    assert result.report.payload["suggested_competitors"]["youtube"]["diagnostics"]["suggestions_sent"] == 0
 
 
 def test_build_setup_verification_preview_prefetches_ig_and_tt_provider_payloads(db, monkeypatch):

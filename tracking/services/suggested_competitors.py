@@ -5,6 +5,7 @@ from statistics import mean
 from typing import Any
 
 from django.conf import settings
+from django.utils import timezone
 
 from tracking.models import AddedBy, Platform, Report, ReportStatus, TgUser, UserCompetitor
 from tracking.services.competitor_service import get_active_user_competitor_counts, upsert_competitor
@@ -19,6 +20,15 @@ class SuggestedCompetitorActivationResult:
     counts: dict[str, int]
     competitor_external_id: str
     display_name: str
+
+
+def _base_acceptance_payload() -> dict[str, Any]:
+    return {
+        "clicked_add": 0,
+        "added": 0,
+        "already_active": 0,
+        "events": [],
+    }
 
 
 def build_youtube_suggested_competitors_payload(
@@ -46,9 +56,14 @@ def build_youtube_suggested_competitors_payload(
         "current_candidates": 0,
         "current_unique_creators": 0,
         "history_reports_considered": 0,
+        "suggestions_considered": 0,
+        "suggestions_generated": 0,
+        "suggestions_sent": 0,
         "dropped_missing_channel_id": 0,
         "dropped_already_active": 0,
         "dropped_not_repeated": 0,
+        "dropped_dedup": 0,
+        "dropped_limit": 0,
         "dropped_low_average_score": 0,
         "final_suggestions": 0,
     }
@@ -110,6 +125,9 @@ def build_youtube_suggested_competitors_payload(
         creator["matched_queries"].update(str(query).strip() for query in list(candidate.get("matched_queries") or []) if str(query).strip())
 
     diagnostics["current_unique_creators"] = len(current_creator_stats)
+    valid_candidates = diagnostics["current_candidates"] - diagnostics["dropped_missing_channel_id"]
+    diagnostics["suggestions_considered"] = len(current_creator_stats)
+    diagnostics["dropped_dedup"] = max(valid_candidates - diagnostics["suggestions_considered"], 0)
 
     history_by_channel: dict[str, dict[int, float]] = defaultdict(dict)
     prior_reports = list(
@@ -164,6 +182,7 @@ def build_youtube_suggested_competitors_payload(
             }
         )
 
+    diagnostics["suggestions_generated"] = len(suggestions)
     suggestions.sort(
         key=lambda item: (
             -int(item.get("appearance_count") or 0),
@@ -172,6 +191,7 @@ def build_youtube_suggested_competitors_payload(
             str(item.get("channel_title") or "").lower(),
         )
     )
+    diagnostics["dropped_limit"] = max(len(suggestions) - max_items, 0)
     suggestions = suggestions[:max_items]
     diagnostics["final_suggestions"] = len(suggestions)
 
@@ -180,6 +200,7 @@ def build_youtube_suggested_competitors_payload(
         "diagnostics": diagnostics,
         "items": suggestions,
         "section": section,
+        "acceptance": _base_acceptance_payload(),
     }
 
 
@@ -204,6 +225,47 @@ def render_youtube_suggested_competitors_text(*, suggestion_payload: dict | None
         lines.append("")
     lines.append("Нажми «Добавить», если хочешь включить канал в отслеживание.")
     return "\n".join(lines).rstrip()
+
+
+def record_youtube_suggested_competitor_acceptance(
+    *,
+    report: Report,
+    suggestion: dict[str, Any],
+    status: str,
+) -> dict[str, Any]:
+    payload = dict(report.payload or {})
+    suggested_payload = dict(payload.get("suggested_competitors") or {})
+    youtube_payload = dict(suggested_payload.get("youtube") or {})
+    acceptance = _base_acceptance_payload()
+    acceptance.update(dict(youtube_payload.get("acceptance") or {}))
+    events = [item for item in list(acceptance.get("events") or []) if isinstance(item, dict)]
+
+    acceptance["clicked_add"] = int(acceptance.get("clicked_add") or 0) + 1
+    if status in {"added", "reactivated"}:
+        acceptance["added"] = int(acceptance.get("added") or 0) + 1
+    elif status == "already_active":
+        acceptance["already_active"] = int(acceptance.get("already_active") or 0) + 1
+
+    events.append(
+        {
+            "clicked_at": timezone.now().isoformat(),
+            "status": status,
+            "counted_status": "added" if status in {"added", "reactivated"} else status,
+            "channel_id": str(suggestion.get("channel_id") or "").strip(),
+            "channel_title": str(suggestion.get("channel_title") or "").strip(),
+            "suggestion_source": str(youtube_payload.get("source") or "").strip(),
+            "suggestion_reason": str(suggestion.get("suggestion_reason") or "").strip(),
+            "appearance_count": int(suggestion.get("appearance_count") or 0),
+        }
+    )
+    acceptance["events"] = events[-20:]
+
+    youtube_payload["acceptance"] = acceptance
+    suggested_payload["youtube"] = youtube_payload
+    payload["suggested_competitors"] = suggested_payload
+    report.payload = payload
+    report.save(update_fields=["payload"])
+    return acceptance
 
 
 def activate_youtube_suggested_competitor(
