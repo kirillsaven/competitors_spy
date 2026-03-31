@@ -42,6 +42,17 @@ router = Router()
 _PAGE_SIZE = 8
 
 
+def _discovery_target_per_platform() -> int:
+    return int(
+        getattr(
+            settings,
+            "DISCOVERY_TARGET_COMPETITORS_PER_PLATFORM",
+            getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20),
+        )
+        or 20
+    )
+
+
 def _format_competitor_name(link: UserCompetitor) -> str:
     competitor = link.competitor
     name = competitor.display_name or competitor.handle or competitor.external_id
@@ -173,7 +184,7 @@ def _load_add_candidates_for_user(*, user: TgUser) -> tuple[list[dict], list[str
         competitors=active_competitors,
         linked_accounts=linked_accounts,
         max_youtube_search_calls=int(getattr(settings, "YT_MAX_SEARCH_CALLS_PER_SETUP", 5) or 5),
-        max_candidates_per_platform=int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20) or 20),
+        max_candidates_per_platform=_discovery_target_per_platform(),
         context=context,
     )
     candidates: list[dict] = []
@@ -541,16 +552,12 @@ async def on_add_done(cb: CallbackQuery, state: FSMContext) -> None:
     added = 0
     skipped = 0
     errors: list[str] = []
-    limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
 
     for idx in sorted(selected_ids):
         if idx < 0 or idx >= len(candidates):
             continue
         candidate = candidates[idx]
         platform = str(candidate.get("platform") or "")
-        if counts.get(platform, 0) >= limit:
-            errors.append(f"{candidate.get('display_name') or candidate.get('external_id')}: достигнут лимит для {PLATFORM_LABELS.get(platform, platform)} ({limit})")
-            continue
         await db_call(
             upsert_competitor,
             user=user,
@@ -664,7 +671,6 @@ async def on_competitor_add_manual_input(message: Message, state: FSMContext) ->
         return
 
     counts = await db_run(lambda: get_active_user_competitor_counts(user=user))
-    limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
     added = 0
     errors: list[str] = []
     context = SetupRunContext()
@@ -677,11 +683,6 @@ async def on_competitor_add_manual_input(message: Message, state: FSMContext) ->
             continue
         if seed is None:
             errors.append(f"{raw_input}: не смог подтвердить профиль")
-            continue
-        if counts.get(seed.platform, 0) >= limit:
-            errors.append(
-                f"{seed.title or seed.external_id}: достигнут лимит для {PLATFORM_LABELS.get(seed.platform, seed.platform)} ({limit})"
-            )
             continue
         if seed.platform == Platform.YOUTUBE:
             passes_gate, recent_count = await asyncio.to_thread(

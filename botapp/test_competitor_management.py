@@ -263,6 +263,52 @@ def test_competitor_add_manual_adds_valid_resolved_seed(monkeypatch):
 
 
 @pytest.mark.django_db
+def test_competitor_add_manual_allows_competitor_over_twenty(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=223, tg_chat_id=223)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+    for idx in range(20):
+        competitor_obj = async_to_sync(sync_to_async(Competitor.objects.create, thread_sensitive=True))(
+            platform=Platform.YOUTUBE,
+            external_id=f"yt-existing-{idx}",
+            handle=f"existing_{idx}",
+            display_name=f"Existing {idx}",
+            url=f"https://www.youtube.com/@existing_{idx}",
+        )
+        async_to_sync(sync_to_async(UserCompetitor.objects.create, thread_sensitive=True))(user=user, competitor=competitor_obj, is_active=True)
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+
+    def fake_resolve_exact_seed(raw_input, *, context=None):
+        assert context is not None
+        return SeedResolution(
+            platform=Platform.YOUTUBE,
+            external_id="yt-manual-21",
+            handle="manual_21",
+            url="https://www.youtube.com/@manual_21",
+            title="Manual 21",
+            description="desc",
+            uploads_playlist_id="UUmanual21",
+        )
+
+    monkeypatch.setattr(competitors, "resolve_exact_seed", fake_resolve_exact_seed)
+    monkeypatch.setattr(competitors, "youtube_profile_recent_shorts_gate_status", lambda **kwargs: (True, 3))
+
+    state = DummyState()
+    async_to_sync(state.update_data)(user_id=user.id)
+    async_to_sync(state.set_state)(CompetitorManagementStates.WAIT_COMPETITORS_ADD_INPUT)
+    message = DummyMessage(user_id=223, text="https://www.youtube.com/@manual_21")
+
+    async_to_sync(competitors.on_competitor_add_manual_input)(message, state)
+
+    count = async_to_sync(sync_to_async(UserCompetitor.objects.filter(user=user, is_active=True).count, thread_sensitive=True))()
+    assert state.state is None
+    assert count == 21
+    assert "Добавлено вручную: 1" in message.answers[-1]
+    assert "YouTube: 21" in message.answers[-1]
+
+
+@pytest.mark.django_db
 def test_competitor_add_manual_rejects_youtube_without_recent_shorts(monkeypatch):
     user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=24, tg_chat_id=24)
     async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
@@ -297,6 +343,56 @@ def test_competitor_add_manual_rejects_youtube_without_recent_shorts(monkeypatch
     assert "Добавлено вручную: 0" in message.answers[-1]
     assert "Ошибки: 1" in message.answers[-1]
     assert "shorts за 60 дней: 1" in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_competitors_suggest_allows_add_over_twenty(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=224, tg_chat_id=224)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+    for idx in range(20):
+        competitor_obj = async_to_sync(sync_to_async(Competitor.objects.create, thread_sensitive=True))(
+            platform=Platform.YOUTUBE,
+            external_id=f"yt-existing-suggest-{idx}",
+            handle=f"existing_suggest_{idx}",
+            display_name=f"Existing Suggest {idx}",
+            url=f"https://www.youtube.com/@existing_suggest_{idx}",
+        )
+        async_to_sync(sync_to_async(UserCompetitor.objects.create, thread_sensitive=True))(user=user, competitor=competitor_obj, is_active=True)
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+    monkeypatch.setattr(
+        competitors,
+        "_load_add_candidates_for_user",
+        lambda **kwargs: (
+            [
+                {
+                    "platform": Platform.YOUTUBE,
+                    "external_id": "yt-suggest-21",
+                    "handle": "suggest_21",
+                    "url": "https://www.youtube.com/@suggest_21",
+                    "display_name": "Suggest 21",
+                    "added_by": "auto",
+                    "meta": {},
+                }
+            ],
+            [],
+        ),
+    )
+
+    state = DummyState()
+    message = DummyMessage(user_id=224)
+    async_to_sync(competitors.cmd_competitors_suggest)(message, state)
+    toggle = DummyCallbackQuery(data="compadd_toggle:0", message=message)
+    async_to_sync(competitors.on_add_toggle)(toggle, state)
+    done = DummyCallbackQuery(data="compadd_done", message=message)
+    async_to_sync(competitors.on_add_done)(done, state)
+
+    count = async_to_sync(sync_to_async(UserCompetitor.objects.filter(user=user, is_active=True).count, thread_sensitive=True))()
+    assert state.state is None
+    assert count == 21
+    assert "Добавлено: 1" in message.answers[-1]
+    assert "YouTube: 21" in message.answers[-1]
 
 
 @pytest.mark.django_db
@@ -337,6 +433,30 @@ def test_competitor_add_manual_adds_instagram_share_url_with_keyword_context(mon
     assert "Добавлено вручную: 1" in message.answers[-1]
     assert "Ошибки: 0" in message.answers[-1]
     assert "Instagram: 1" in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_competitors_command_shows_more_than_twenty_active_competitors(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=227, tg_chat_id=227)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+    for idx in range(21):
+        competitor_obj = async_to_sync(sync_to_async(Competitor.objects.create, thread_sensitive=True))(
+            platform=Platform.YOUTUBE,
+            external_id=f"yt-list-{idx}",
+            handle=f"ytlist{idx}",
+            display_name=f"YT List {idx}",
+            url=f"https://www.youtube.com/@ytlist{idx}",
+        )
+        async_to_sync(sync_to_async(UserCompetitor.objects.create, thread_sensitive=True))(user=user, competitor=competitor_obj, is_active=True)
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+
+    message = DummyMessage(user_id=227)
+    async_to_sync(competitors.cmd_competitors)(message)
+
+    assert "YouTube (21):" in message.answers[-1]
+    assert "21. YT List 20 (@ytlist20)" in message.answers[-1]
 
 
 @pytest.mark.django_db

@@ -29,7 +29,7 @@ def test_get_active_competitors_returns_platform_ordered_list(db):
 
 
 @override_settings(MAX_COMPETITORS_PER_PLATFORM=1)
-def test_get_active_competitors_respects_per_platform_cap(db):
+def test_get_active_competitors_ignores_legacy_per_platform_cap_for_active_list(db):
     user = TgUser.objects.create(tg_user_id=2, tg_chat_id=2)
     youtube_1 = Competitor.objects.create(platform=Platform.YOUTUBE, external_id="yt-1")
     youtube_2 = Competitor.objects.create(platform=Platform.YOUTUBE, external_id="yt-2")
@@ -45,7 +45,9 @@ def test_get_active_competitors_respects_per_platform_cap(db):
 
     assert [(competitor.platform, competitor.external_id) for competitor in competitors] == [
         (Platform.YOUTUBE, "yt-1"),
+        (Platform.YOUTUBE, "yt-2"),
         (Platform.TIKTOK, "tt-1"),
+        (Platform.TIKTOK, "tt-2"),
     ]
 
 

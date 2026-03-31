@@ -501,6 +501,45 @@ def test_build_report_preview_reports_no_active_competitors_reason(db):
     assert "Причина: Нет активных конкурентов для этой платформы." in preview.text
 
 
+@override_settings(MAX_COMPETITORS_PER_PLATFORM=1, ENABLE_YOUTUBE_SUPPLEMENTAL_TOPIC_VIDEO_COLLECTION=False)
+def test_build_report_preview_uses_all_active_competitors_without_truncation(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=171, tg_chat_id=171, timezone_str="UTC")
+    competitors = [
+        Competitor.objects.create(
+            platform=Platform.YOUTUBE,
+            external_id=f"yt-{idx}",
+            handle=f"yt_{idx}",
+            url=f"https://www.youtube.com/@yt_{idx}",
+            display_name=f"YT {idx}",
+        )
+        for idx in range(21)
+    ]
+    for competitor in competitors:
+        UserCompetitor.objects.create(user=user, competitor=competitor, is_active=True)
+
+    seen_refreshes: list[str] = []
+
+    monkeypatch.setattr(report_pipeline, "_prefetch_provider_data_for_competitors", lambda **kwargs: None)
+    monkeypatch.setattr(report_pipeline, "youtube_profile_recent_shorts_gate_status", lambda **kwargs: (True, 2))
+    monkeypatch.setattr(
+        report_pipeline,
+        "refresh_competitor",
+        lambda **kwargs: (seen_refreshes.append(kwargs["competitor"].external_id) or []),
+    )
+    monkeypatch.setattr(report_pipeline, "compute_competitor_baseline", lambda **kwargs: None)
+    monkeypatch.setattr(report_pipeline, "score_items_for_period", lambda **kwargs: [])
+
+    preview = build_report_preview(
+        user=user,
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+    )
+
+    youtube_diag = next(section["diagnostics"] for section in preview.payload["sections"] if section["platform"] == Platform.YOUTUBE)
+    assert len(seen_refreshes) == 21
+    assert youtube_diag["active_competitors"] == 21
+
+
 def test_build_report_preview_includes_youtube_collection_depth_diagnostics(db, monkeypatch):
     user = TgUser.objects.create(tg_user_id=1431, tg_chat_id=1431, timezone_str="UTC")
     competitor = Competitor.objects.create(

@@ -87,6 +87,17 @@ router = Router()
 _SETUP_RUNTIMES: dict[str, SetupRunContext] = {}
 
 
+def _discovery_target_per_platform() -> int:
+    return int(
+        getattr(
+            settings,
+            "DISCOVERY_TARGET_COMPETITORS_PER_PLATFORM",
+            getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20),
+        )
+        or 20
+    )
+
+
 def _candidate_key(seed: SeedResolution | dict) -> str:
     if isinstance(seed, dict):
         platform = str(seed.get("platform") or "")
@@ -1043,7 +1054,7 @@ async def on_competitor_list(message: Message, state: FSMContext) -> None:
     existing_ids = {_candidate_key(d) for d in existing}
 
     lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-    max_manual = 20
+    max_manual = _discovery_target_per_platform()
     added = 0
     skipped = 0
     errors: list[str] = []
@@ -1355,7 +1366,7 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
             competitors=comp_seeds,
             linked_accounts=linked_accounts,
             max_youtube_search_calls=int(getattr(settings, "YT_MAX_SEARCH_CALLS_PER_SETUP", 3)),
-            max_candidates_per_platform=int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20)),
+            max_candidates_per_platform=_discovery_target_per_platform(),
             context=runtime,
         )
     except PlatformOnboardingError as e:
@@ -1428,7 +1439,7 @@ async def _start_discovery(message: Message, state: FSMContext) -> None:
             prefer=False,
         )
 
-    limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
+    limit = _discovery_target_per_platform()
     candidates, trim_notes = _cap_candidates_per_platform(candidates=list(candidates_by_id.values()), limit=limit)
     if trim_notes:
         discovery_notes = [*discovery_notes, *trim_notes]
@@ -1527,7 +1538,7 @@ async def on_prune_done(cb: CallbackQuery, state: FSMContext) -> None:
         await cb.answer("Нужно оставить хотя бы одного конкурента.", show_alert=True)
         return
 
-    limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
+    limit = _discovery_target_per_platform()
     selected_by_platform = _selected_counts_by_platform(candidates=candidates, excluded=excluded)
     quota_error = _quota_error_text(selected_by_platform=selected_by_platform, limit=limit)
     if quota_error:
@@ -1560,7 +1571,7 @@ async def _render_prune(message: Message, state: FSMContext) -> None:
     page = int(data.get("prune_page") or 0)
     discovery_notes = [str(item) for item in (data.get("discovery_notes") or []) if str(item).strip()]
 
-    limit = int(getattr(settings, "MAX_COMPETITORS_PER_PLATFORM", 20))
+    limit = _discovery_target_per_platform()
     competitor_rows = [(i, _candidate_display_name(c), str(c.get("url") or "").strip() or None) for i, c in enumerate(candidates)]
     selected_total = len(candidates) - len(excluded)
     selected_by_platform = _selected_counts_by_platform(candidates=candidates, excluded=excluded)
