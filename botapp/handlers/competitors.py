@@ -46,8 +46,12 @@ from tracking.services.competitor_suggest_cache import (
     CompetitorSuggestCacheLoadResult,
     build_competitor_suggest_candidates,
     load_competitor_suggest_cache,
+    peek_competitor_suggest_cache,
 )
-from tracking.services.picker_snapshot_cache import load_competitor_remove_picker_snapshot
+from tracking.services.picker_snapshot_cache import (
+    load_competitor_remove_picker_snapshot,
+    peek_competitor_remove_picker_snapshot,
+)
 from tracking.services.platform_onboarding import youtube_profile_recent_shorts_gate_status
 from tracking.services.seed_resolver import (
     candidate_platforms_for_exact_seed,
@@ -100,6 +104,13 @@ def _load_add_candidates_for_user_cached(*, user: TgUser) -> CompetitorSuggestCa
     return load_competitor_suggest_cache(user=user, builder=_load_add_candidates_for_user)
 
 
+def _peek_add_candidates_for_user_cached(*, user: TgUser) -> CompetitorSuggestCacheLoadResult | None:
+    try:
+        return peek_competitor_suggest_cache(user=user)
+    except Exception:
+        return None
+
+
 def _counts_lines(counts: dict[str, int]) -> list[str]:
     return [f"{PLATFORM_LABELS[platform]}: {counts.get(platform, 0)}" for platform in PLATFORM_ORDER]
 
@@ -138,6 +149,10 @@ def _active_link_rows(*, user: TgUser) -> list[dict]:
 
 def _load_remove_picker_snapshot_for_user_cached(*, user: TgUser):
     return load_competitor_remove_picker_snapshot(user=user)
+
+
+def _peek_remove_picker_snapshot_for_user_cached(*, user: TgUser):
+    return peek_competitor_remove_picker_snapshot(user=user)
 
 
 def _load_add_candidates_for_user(*, user: TgUser) -> tuple[list[dict], list[str]]:
@@ -297,6 +312,31 @@ async def _render_add_picker(
     callback_info: dict | None = None,
 ) -> None:
     data = data if data is not None else await state.get_data()
+    text, kb, keyboard_render_ms, metrics, rows_count = _build_add_picker_view(data)
+    edit = await safe_edit_message(
+        message,
+        text=text,
+        reply_markup=kb,
+        edit_mode=edit_mode,
+    )
+    if edit.failure_reason:
+        logger.warning("competitor_add_picker_render_failed edit_path=%s error=%s", edit.path, edit.failure_reason)
+    if callback_info:
+        ack = callback_info["ack"]
+        _log_picker_callback(
+            ack=ack,
+            edit=edit,
+            page_before=int(callback_info.get("page_before") or 0),
+            page_after=int(data.get("competitor_add_page") or 0),
+            candidate_count=rows_count,
+            keyboard_render_ms=keyboard_render_ms,
+            status="failure" if edit.failure_reason else "success",
+            rows_count=metrics.rows_count,
+            rendered_button_count=metrics.rendered_button_count,
+        )
+
+
+def _build_add_picker_view(data: dict) -> tuple[str, object, float, object, int]:
     candidates = list(data.get("competitor_add_candidates") or [])
     selected_ids = {int(item) for item in (data.get("competitor_add_selected_ids") or [])}
     page = _clamp_picker_page(int(data.get("competitor_add_page") or 0), total=len(candidates), page_size=_PAGE_SIZE)
@@ -325,27 +365,8 @@ async def _render_add_picker(
     )
     keyboard_render_ms = (callback_started() - keyboard_started) * 1000
     metrics = keyboard_metrics(kb)
-    edit = await safe_edit_message(
-        message,
-        text=text,
-        reply_markup=kb,
-        edit_mode=edit_mode,
-    )
-    if edit.failure_reason:
-        logger.warning("competitor_add_picker_render_failed edit_path=%s error=%s", edit.path, edit.failure_reason)
-    if callback_info:
-        ack = callback_info["ack"]
-        _log_picker_callback(
-            ack=ack,
-            edit=edit,
-            page_before=int(callback_info.get("page_before") or 0),
-            page_after=page,
-            candidate_count=len(rows),
-            keyboard_render_ms=keyboard_render_ms,
-            status="failure" if edit.failure_reason else "success",
-            rows_count=metrics.rows_count,
-            rendered_button_count=metrics.rendered_button_count,
-        )
+    data["competitor_add_page"] = page
+    return text, kb, keyboard_render_ms, metrics, len(rows)
 
 
 async def _render_remove_picker(
@@ -357,6 +378,31 @@ async def _render_remove_picker(
     callback_info: dict | None = None,
 ) -> None:
     data = data if data is not None else await state.get_data()
+    text, kb, keyboard_render_ms, metrics, rows_count = _build_remove_picker_view(data)
+    edit = await safe_edit_message(
+        message,
+        text=text,
+        reply_markup=kb,
+        edit_mode=edit_mode,
+    )
+    if edit.failure_reason:
+        logger.warning("competitor_remove_picker_render_failed edit_path=%s error=%s", edit.path, edit.failure_reason)
+    if callback_info:
+        ack = callback_info["ack"]
+        _log_picker_callback(
+            ack=ack,
+            edit=edit,
+            page_before=int(callback_info.get("page_before") or 0),
+            page_after=int(data.get("competitor_remove_page") or 0),
+            candidate_count=rows_count,
+            keyboard_render_ms=keyboard_render_ms,
+            status="failure" if edit.failure_reason else "success",
+            rows_count=metrics.rows_count,
+            rendered_button_count=metrics.rendered_button_count,
+        )
+
+
+def _build_remove_picker_view(data: dict) -> tuple[str, object, float, object, int]:
     rows = list(data.get("competitor_remove_rows") or [])
     selected_ids = {int(item) for item in (data.get("competitor_remove_selected_ids") or [])}
     kb_rows = _picker_rows_from_state(data.get("competitor_remove_picker_rows"))
@@ -383,27 +429,8 @@ async def _render_remove_picker(
     )
     keyboard_render_ms = (callback_started() - keyboard_started) * 1000
     metrics = keyboard_metrics(kb)
-    edit = await safe_edit_message(
-        message,
-        text=text,
-        reply_markup=kb,
-        edit_mode=edit_mode,
-    )
-    if edit.failure_reason:
-        logger.warning("competitor_remove_picker_render_failed edit_path=%s error=%s", edit.path, edit.failure_reason)
-    if callback_info:
-        ack = callback_info["ack"]
-        _log_picker_callback(
-            ack=ack,
-            edit=edit,
-            page_before=int(callback_info.get("page_before") or 0),
-            page_after=page,
-            candidate_count=len(kb_rows),
-            keyboard_render_ms=keyboard_render_ms,
-            status="failure" if edit.failure_reason else "success",
-            rows_count=metrics.rows_count,
-            rendered_button_count=metrics.rendered_button_count,
-        )
+    data["competitor_remove_page"] = page
+    return text, kb, keyboard_render_ms, metrics, len(kb_rows)
 
 
 @router.message(Command("competitors"))
@@ -459,16 +486,21 @@ async def cmd_competitors_suggest(message: Message, state: FSMContext) -> None:
         await message.answer("Сначала заверши /setup.")
         return
 
-    loading_message = await message.answer("Ищу кандидатов для добавления...")
     open_started = perf_counter()
+    load_result = await asyncio.to_thread(_peek_add_candidates_for_user_cached, user=user)
+    open_path = "single_send" if load_result is not None else "placeholder_edit"
+    loading_message = None
     try:
-        load_result = await asyncio.to_thread(_load_add_candidates_for_user_cached, user=user)
+        if load_result is None:
+            loading_message = await message.answer("Ищу кандидатов для добавления...")
+            load_result = await asyncio.to_thread(_load_add_candidates_for_user_cached, user=user)
     except Exception as exc:
         await state.clear()
         logger.info(
-            "competitor_suggest_open_observability user_id=%s cache_hit=%s cache_source=%s discovery_build_ms=%.1f total_open_ms=%.1f "
+            "competitor_suggest_open_observability user_id=%s open_path=%s cache_hit=%s cache_source=%s discovery_build_ms=%.1f total_open_ms=%.1f "
             "candidate_count=%s status=%s failure_reason=%s",
             user.id,
+            open_path,
             False,
             "cold_build",
             0.0,
@@ -477,7 +509,10 @@ async def cmd_competitors_suggest(message: Message, state: FSMContext) -> None:
             "failure",
             exc,
         )
-        await loading_message.edit_text(f"Не смог подготовить список кандидатов: {exc}")
+        if loading_message is not None:
+            await loading_message.edit_text(f"Не смог подготовить список кандидатов: {exc}")
+        else:
+            await message.answer(f"Не смог подготовить список кандидатов: {exc}")
         return
     candidates = load_result.candidates
     notes = load_result.notes
@@ -487,11 +522,15 @@ async def cmd_competitors_suggest(message: Message, state: FSMContext) -> None:
         text = "Не нашел новых кандидатов для добавления."
         if details:
             text = f"{text}\n\n{details}"
-        await loading_message.edit_text(text)
+        if loading_message is not None:
+            await loading_message.edit_text(text)
+        else:
+            await message.answer(text)
         logger.info(
-            "competitor_suggest_open_observability user_id=%s cache_hit=%s cache_source=%s discovery_build_ms=%.1f total_open_ms=%.1f "
+            "competitor_suggest_open_observability user_id=%s open_path=%s cache_hit=%s cache_source=%s discovery_build_ms=%.1f total_open_ms=%.1f "
             "candidate_count=%s status=%s",
             user.id,
+            open_path,
             load_result.cache_hit,
             load_result.cache_source,
             load_result.discovery_build_ms,
@@ -511,16 +550,23 @@ async def cmd_competitors_suggest(message: Message, state: FSMContext) -> None:
         competitor_add_notes=notes,
     )
     await state.set_state(CompetitorManagementStates.PICK_COMPETITORS_ADD)
-    await _render_add_picker(loading_message, state)
+    if open_path == "single_send":
+        data = await state.get_data()
+        text, kb, _, _, row_count = _build_add_picker_view(data)
+        await message.answer(text, reply_markup=kb)
+    else:
+        await _render_add_picker(loading_message, state)
+        row_count = len(candidates)
     logger.info(
-        "competitor_suggest_open_observability user_id=%s cache_hit=%s cache_source=%s discovery_build_ms=%.1f total_open_ms=%.1f "
+        "competitor_suggest_open_observability user_id=%s open_path=%s cache_hit=%s cache_source=%s discovery_build_ms=%.1f total_open_ms=%.1f "
         "candidate_count=%s status=%s",
         user.id,
+        open_path,
         load_result.cache_hit,
         load_result.cache_source,
         load_result.discovery_build_ms,
         (perf_counter() - open_started) * 1000,
-        len(candidates),
+        row_count,
         "success",
     )
 
@@ -570,15 +616,20 @@ async def cmd_competitors_remove(message: Message, state: FSMContext) -> None:
         await message.answer("Сначала заверши /setup.")
         return
 
-    picker = await message.answer("Готовлю список активных конкурентов...")
     open_started = perf_counter()
+    load_result = await db_run(lambda: _peek_remove_picker_snapshot_for_user_cached(user=user))
+    open_path = "single_send" if load_result is not None else "placeholder_edit"
+    picker = None
     try:
-        load_result = await db_run(lambda: _load_remove_picker_snapshot_for_user_cached(user=user))
+        if load_result is None:
+            picker = await message.answer("Готовлю список активных конкурентов...")
+            load_result = await db_run(lambda: _load_remove_picker_snapshot_for_user_cached(user=user))
     except Exception as exc:
         await state.clear()
         logger.info(
-            "competitor_remove_open_observability user_id=%s cache_hit=%s cache_source=%s open_ms=%.1f row_count=%s status=%s failure_reason=%s",
+            "competitor_remove_open_observability user_id=%s open_path=%s cache_hit=%s cache_source=%s total_open_ms=%.1f row_count=%s status=%s failure_reason=%s",
             user.id,
+            open_path,
             False,
             "cold_build",
             (perf_counter() - open_started) * 1000,
@@ -586,7 +637,10 @@ async def cmd_competitors_remove(message: Message, state: FSMContext) -> None:
             "failure",
             exc,
         )
-        await picker.edit_text(f"Не смог подготовить список активных конкурентов: {exc}")
+        if picker is not None:
+            await picker.edit_text(f"Не смог подготовить список активных конкурентов: {exc}")
+        else:
+            await message.answer(f"Не смог подготовить список активных конкурентов: {exc}")
         return
 
     snapshot = dict(load_result.payload or {})
@@ -594,15 +648,19 @@ async def cmd_competitors_remove(message: Message, state: FSMContext) -> None:
     if not rows:
         await state.clear()
         logger.info(
-            "competitor_remove_open_observability user_id=%s cache_hit=%s cache_source=%s open_ms=%.1f row_count=%s status=%s",
+            "competitor_remove_open_observability user_id=%s open_path=%s cache_hit=%s cache_source=%s total_open_ms=%.1f row_count=%s status=%s",
             user.id,
+            open_path,
             load_result.cache_hit,
             load_result.cache_source,
             (perf_counter() - open_started) * 1000,
             0,
             "empty",
         )
-        await picker.edit_text("Активных конкурентов для удаления сейчас нет.")
+        if picker is not None:
+            await picker.edit_text("Активных конкурентов для удаления сейчас нет.")
+        else:
+            await message.answer("Активных конкурентов для удаления сейчас нет.")
         return
 
     await state.update_data(
@@ -614,14 +672,21 @@ async def cmd_competitors_remove(message: Message, state: FSMContext) -> None:
         competitor_remove_page=0,
     )
     await state.set_state(CompetitorManagementStates.PICK_COMPETITORS_REMOVE)
-    await _render_remove_picker(picker, state)
+    if open_path == "single_send":
+        data = await state.get_data()
+        text, kb, _, _, row_count = _build_remove_picker_view(data)
+        await message.answer(text, reply_markup=kb)
+    else:
+        await _render_remove_picker(picker, state)
+        row_count = len(rows)
     logger.info(
-        "competitor_remove_open_observability user_id=%s cache_hit=%s cache_source=%s open_ms=%.1f row_count=%s status=%s",
+        "competitor_remove_open_observability user_id=%s open_path=%s cache_hit=%s cache_source=%s total_open_ms=%.1f row_count=%s status=%s",
         user.id,
+        open_path,
         load_result.cache_hit,
         load_result.cache_source,
         (perf_counter() - open_started) * 1000,
-        len(rows),
+        row_count,
         "success",
     )
 

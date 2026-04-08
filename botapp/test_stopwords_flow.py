@@ -190,6 +190,39 @@ def test_stopwords_add_toggle_uses_markup_only():
 
 
 @pytest.mark.django_db
+def test_stopwords_add_cache_hit_uses_single_send(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(
+        tg_user_id=148,
+        tg_chat_id=148,
+        report_stopwords=["spoiler"],
+    )
+
+    monkeypatch.setattr(stopwords, "db_call", _db_call)
+    monkeypatch.setattr(stopwords, "_peek_stopword_add_picker_snapshot_cached", lambda **kwargs: SimpleNamespace(
+        payload={"items": ["promo post", "launch teaser"]},
+        cache_hit=True,
+        cache_source=PICKER_SNAPSHOT_CACHE_SOURCE_SNAPSHOT_HIT,
+        build_ms=0.0,
+    ))
+    monkeypatch.setattr(
+        stopwords,
+        "_load_stopword_add_picker_snapshot_cached",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("cold load should not run")),
+    )
+
+    state = DummyState()
+    message = DummyMessage(user_id=148)
+    async_to_sync(stopwords.cmd_stopwords_add)(message, state)
+
+    assert state.state == StopwordManagementStates.PICK_STOPWORDS_ADD
+    assert len(message.answers) == 1
+    assert message.answers[0].startswith("Выбери фразы")
+    assert message.edit_text_calls == 0
+    assert message.edit_reply_markup_calls == 0
+    assert message.reply_markups[0] is not None
+
+
+@pytest.mark.django_db
 def test_stopwords_add_second_open_reuses_snapshot_cache():
     user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(
         tg_user_id=145,
@@ -213,6 +246,33 @@ def test_stopwords_add_second_open_reuses_snapshot_cache():
     assert second.cache_source == PICKER_SNAPSHOT_CACHE_SOURCE_SNAPSHOT_HIT
     assert first.payload == second.payload
     clear_retry_cache()
+
+
+@pytest.mark.django_db
+def test_stopwords_add_cold_open_keeps_placeholder_edit(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(
+        tg_user_id=149,
+        tg_chat_id=149,
+        report_stopwords=["spoiler"],
+    )
+
+    monkeypatch.setattr(stopwords, "db_call", _db_call)
+    monkeypatch.setattr(stopwords, "_peek_stopword_add_picker_snapshot_cached", lambda **kwargs: None)
+    monkeypatch.setattr(stopwords, "_load_stopword_add_picker_snapshot_cached", lambda **kwargs: SimpleNamespace(
+        payload={"items": ["promo post"]},
+        cache_hit=False,
+        cache_source=PICKER_SNAPSHOT_CACHE_SOURCE_COLD_BUILD,
+        build_ms=10.0,
+    ))
+
+    state = DummyState()
+    message = DummyMessage(user_id=149)
+    async_to_sync(stopwords.cmd_stopwords_add)(message, state)
+
+    assert state.state == StopwordManagementStates.PICK_STOPWORDS_ADD
+    assert message.answers[0] == "Подбираю фразы для stopwords..."
+    assert message.edit_text_calls == 1
+    assert message.edit_reply_markup_calls == 0
 
 
 @pytest.mark.django_db
@@ -265,6 +325,39 @@ def test_stopwords_add_selection_persists_across_pages():
     assert message.edit_reply_markup_calls == 4
     assert any(text.startswith("✅ word 0") for text in _button_texts(message.reply_markups[-1]))
     assert "Добавить (2)" in _button_texts(message.reply_markups[-1])
+
+
+@pytest.mark.django_db
+def test_stopwords_remove_cache_hit_uses_single_send(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(
+        tg_user_id=150,
+        tg_chat_id=150,
+        report_stopwords=["spoiler", "promo post"],
+    )
+
+    monkeypatch.setattr(stopwords, "db_call", _db_call)
+    monkeypatch.setattr(stopwords, "_peek_stopword_remove_picker_snapshot_cached", lambda **kwargs: SimpleNamespace(
+        payload={"items": ["spoiler", "promo post"]},
+        cache_hit=True,
+        cache_source=PICKER_SNAPSHOT_CACHE_SOURCE_SNAPSHOT_HIT,
+        build_ms=0.0,
+    ))
+    monkeypatch.setattr(
+        stopwords,
+        "_load_stopword_remove_picker_snapshot_cached",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("cold load should not run")),
+    )
+
+    state = DummyState()
+    message = DummyMessage(user_id=150)
+    async_to_sync(stopwords.cmd_stopwords_remove)(message, state)
+
+    assert state.state == StopwordManagementStates.PICK_STOPWORDS_REMOVE
+    assert len(message.answers) == 1
+    assert message.answers[0].startswith("Выбери stopwords")
+    assert message.edit_text_calls == 0
+    assert message.edit_reply_markup_calls == 0
+    assert message.reply_markups[0] is not None
 
 
 @pytest.mark.django_db

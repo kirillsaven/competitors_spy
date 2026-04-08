@@ -372,6 +372,42 @@ def test_competitors_suggest_cache_invalidates_when_seed_changes(monkeypatch):
 
 
 @pytest.mark.django_db
+def test_competitors_suggest_cache_hit_uses_single_send(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=126, tg_chat_id=126)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+    monkeypatch.setattr(
+        competitors,
+        "_peek_add_candidates_for_user_cached",
+        lambda **kwargs: CompetitorSuggestCacheLoadResult(
+            candidates=[_candidate(0)],
+            notes=["cached"],
+            cache_hit=True,
+            cache_source=COMPETITOR_SUGGEST_CACHE_SOURCE_SNAPSHOT_HIT,
+            discovery_build_ms=0.0,
+        ),
+    )
+    monkeypatch.setattr(
+        competitors,
+        "_load_add_candidates_for_user_cached",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("cold load should not run")),
+    )
+
+    state = DummyState()
+    message = DummyMessage(user_id=126)
+    async_to_sync(competitors.cmd_competitors_suggest)(message, state)
+
+    assert state.state == CompetitorManagementStates.PICK_COMPETITORS_ADD
+    assert len(message.answers) == 1
+    assert message.answers[0].startswith("Нашел кандидатов для добавления.")
+    assert message.edit_text_calls == 0
+    assert message.edit_reply_markup_calls == 0
+    assert message.reply_markups[0] is not None
+
+
+@pytest.mark.django_db
 def test_competitors_remove_second_open_reuses_snapshot_cache(monkeypatch):
     user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=124, tg_chat_id=124)
     async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
@@ -403,6 +439,78 @@ def test_competitors_remove_second_open_reuses_snapshot_cache(monkeypatch):
     assert first.payload == second.payload
     assert len(first.payload["rows"]) == 2
     clear_retry_cache()
+
+
+@pytest.mark.django_db
+def test_competitors_remove_cache_hit_uses_single_send(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=127, tg_chat_id=127)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+    monkeypatch.setattr(
+        competitors,
+        "_peek_remove_picker_snapshot_for_user_cached",
+        lambda **kwargs: SimpleNamespace(
+            payload={
+                "rows": [{"competitor_id": 10, "platform": Platform.YOUTUBE, "display_name": "Cached Remove", "url": "https://example.com/remove"}],
+                "picker_rows": [{"id": 10, "name": "Cached Remove", "url": "https://example.com/remove"}],
+                "platform_by_id": {"10": Platform.YOUTUBE},
+            },
+            cache_hit=True,
+            cache_source=PICKER_SNAPSHOT_CACHE_SOURCE_SNAPSHOT_HIT,
+            build_ms=0.0,
+        ),
+    )
+    monkeypatch.setattr(
+        competitors,
+        "_load_remove_picker_snapshot_for_user_cached",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("cold load should not run")),
+    )
+
+    state = DummyState()
+    message = DummyMessage(user_id=127)
+    async_to_sync(competitors.cmd_competitors_remove)(message, state)
+
+    assert state.state == CompetitorManagementStates.PICK_COMPETITORS_REMOVE
+    assert len(message.answers) == 1
+    assert message.answers[0].startswith("Выбери конкурентов")
+    assert message.edit_text_calls == 0
+    assert message.edit_reply_markup_calls == 0
+    assert message.reply_markups[0] is not None
+
+
+@pytest.mark.django_db
+def test_competitors_remove_cold_open_keeps_placeholder_edit(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=128, tg_chat_id=128)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+    monkeypatch.setattr(competitors, "_peek_remove_picker_snapshot_for_user_cached", lambda **kwargs: None)
+    monkeypatch.setattr(
+        competitors,
+        "_load_remove_picker_snapshot_for_user_cached",
+        lambda **kwargs: SimpleNamespace(
+            payload={
+                "rows": [{"competitor_id": 11, "platform": Platform.YOUTUBE, "display_name": "Cold Remove", "url": "https://example.com/cold"}],
+                "picker_rows": [{"id": 11, "name": "Cold Remove", "url": "https://example.com/cold"}],
+                "platform_by_id": {"11": Platform.YOUTUBE},
+            },
+            cache_hit=False,
+            cache_source=PICKER_SNAPSHOT_CACHE_SOURCE_COLD_BUILD,
+            build_ms=5.0,
+        ),
+    )
+
+    state = DummyState()
+    message = DummyMessage(user_id=128)
+    async_to_sync(competitors.cmd_competitors_remove)(message, state)
+
+    assert state.state == CompetitorManagementStates.PICK_COMPETITORS_REMOVE
+    assert message.answers[0] == "Готовлю список активных конкурентов..."
+    assert message.edit_text_calls == 1
+    assert message.edit_reply_markup_calls == 0
 
 
 @pytest.mark.django_db

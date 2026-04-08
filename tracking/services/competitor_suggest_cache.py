@@ -230,29 +230,40 @@ def store_competitor_suggest_cache(
     )
 
 
+def _cached_competitor_suggest_result(*, cache_key: str) -> CompetitorSuggestCacheLoadResult | None:
+    cached, cache_hit = get_cached_retry_value(cache_key)
+    if not cache_hit or not isinstance(cached, dict):
+        return None
+    candidates = deepcopy(list(cached.get("candidates") or []))
+    notes = [str(item) for item in (cached.get("notes") or []) if str(item).strip()]
+    stored_source = str(cached.get("cache_source") or "").strip()
+    cache_source = (
+        COMPETITOR_SUGGEST_CACHE_SOURCE_SETUP_WARM
+        if stored_source == COMPETITOR_SUGGEST_CACHE_SOURCE_SETUP_WARM
+        else COMPETITOR_SUGGEST_CACHE_SOURCE_SNAPSHOT_HIT
+    )
+    return CompetitorSuggestCacheLoadResult(
+        candidates=candidates,
+        notes=notes,
+        cache_hit=True,
+        cache_source=cache_source,
+        discovery_build_ms=0.0,
+    )
+
+
+def peek_competitor_suggest_cache(*, user: TgUser) -> CompetitorSuggestCacheLoadResult | None:
+    return _cached_competitor_suggest_result(cache_key=build_competitor_suggest_cache_key(user=user))
+
+
 def load_competitor_suggest_cache(
     *,
     user: TgUser,
     builder: Callable[..., tuple[list[dict], list[str]]],
 ) -> CompetitorSuggestCacheLoadResult:
     cache_key = build_competitor_suggest_cache_key(user=user)
-    cached, cache_hit = get_cached_retry_value(cache_key)
-    if cache_hit and isinstance(cached, dict):
-        candidates = deepcopy(list(cached.get("candidates") or []))
-        notes = [str(item) for item in (cached.get("notes") or []) if str(item).strip()]
-        stored_source = str(cached.get("cache_source") or "").strip()
-        cache_source = (
-            COMPETITOR_SUGGEST_CACHE_SOURCE_SETUP_WARM
-            if stored_source == COMPETITOR_SUGGEST_CACHE_SOURCE_SETUP_WARM
-            else COMPETITOR_SUGGEST_CACHE_SOURCE_SNAPSHOT_HIT
-        )
-        return CompetitorSuggestCacheLoadResult(
-            candidates=candidates,
-            notes=notes,
-            cache_hit=True,
-            cache_source=cache_source,
-            discovery_build_ms=0.0,
-        )
+    cached_result = _cached_competitor_suggest_result(cache_key=cache_key)
+    if cached_result is not None:
+        return cached_result
 
     discovery_started = perf_counter()
     candidates, notes = builder(user=user)
@@ -278,13 +289,11 @@ def warm_competitor_suggest_cache(
     builder: Callable[..., tuple[list[dict], list[str]]],
 ) -> CompetitorSuggestCacheLoadResult:
     cache_key = build_competitor_suggest_cache_key(user=user)
-    cached, cache_hit = get_cached_retry_value(cache_key)
-    if cache_hit and isinstance(cached, dict):
-        candidates = deepcopy(list(cached.get("candidates") or []))
-        notes = [str(item) for item in (cached.get("notes") or []) if str(item).strip()]
+    cached_result = _cached_competitor_suggest_result(cache_key=cache_key)
+    if cached_result is not None:
         return CompetitorSuggestCacheLoadResult(
-            candidates=candidates,
-            notes=notes,
+            candidates=cached_result.candidates,
+            notes=cached_result.notes,
             cache_hit=True,
             cache_source=COMPETITOR_SUGGEST_CACHE_SOURCE_SNAPSHOT_HIT,
             discovery_build_ms=0.0,
