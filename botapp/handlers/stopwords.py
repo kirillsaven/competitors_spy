@@ -12,10 +12,8 @@ from botapp.callback_safety import (
     CallbackAck,
     MessageEdit,
     callback_started,
-    keyboard_metrics,
     log_callback_observability,
     safe_callback_ack,
-    safe_edit_message,
 )
 from botapp.db import db_call, db_run
 from botapp.keyboards import GLOBAL_BACK_CALLBACK, kb_manage_stopwords
@@ -25,6 +23,13 @@ from botapp.picker_callback import (
     handle_picker_toggle_callback,
 )
 from botapp.picker_open import PreparedPickerOpen, open_picker_with_cache
+from botapp.picker_render import (
+    PickerRenderView,
+    build_picker_render_view,
+    picker_body_text,
+    picker_done_text,
+    render_picker_message,
+)
 from botapp.picker_session import (
     PickerSessionKeys,
     picker_page,
@@ -87,30 +92,6 @@ def _summary_lines(*, action: str, changed: int, skipped: int, total: int) -> st
     )
 
 
-def _picker_text(*, title: str) -> str:
-    return "\n".join(
-        [
-            title,
-            "Отметки сохраняются при переключении страниц.",
-            "Когда готово, нажми кнопку ниже.",
-        ]
-    )
-
-
-def _picker_done_text(action: str, selected_total: int) -> str:
-    if selected_total <= 0:
-        return action
-    return f"{action} ({selected_total})"
-
-
-def _picker_page_count(total: int, page_size: int) -> int:
-    return max(1, (max(0, total) + page_size - 1) // page_size)
-
-
-def _clamp_picker_page(page: int, *, total: int, page_size: int) -> int:
-    return min(max(0, page), _picker_page_count(total, page_size) - 1)
-
-
 def _log_picker_callback(
     *,
     ack: CallbackAck,
@@ -146,48 +127,44 @@ async def _render_add_picker(
     edit_mode: str = "text",
     callback_info: dict | None = None,
 ) -> None:
-    data = data if data is not None else await state.get_data()
-    text, kb, keyboard_render_ms, metrics, row_count = _build_add_picker_view(data)
-    edit = await safe_edit_message(message, text=text, reply_markup=kb, edit_mode=edit_mode)
-    if edit.failure_reason:
-        logger.warning("stopword_add_picker_render_failed edit_path=%s error=%s", edit.path, edit.failure_reason)
-    if callback_info:
-        _log_picker_callback(
-            ack=callback_info["ack"],
-            edit=edit,
-            page_before=int(callback_info.get("page_before") or 0),
-            page_after=int(data.get("stopword_add_page") or 0),
-            candidate_count=row_count,
-            keyboard_render_ms=keyboard_render_ms,
-            status="failure" if edit.failure_reason else "success",
-            rows_count=metrics.rows_count,
-            rendered_button_count=metrics.rendered_button_count,
-        )
+    await render_picker_message(
+        message,
+        state,
+        data=data,
+        edit_mode=edit_mode,
+        callback_info=callback_info,
+        build_view=_build_add_picker_view,
+        logger=logger,
+        render_failure_event="stopword_add_picker_render_failed",
+        log_callback=_log_picker_callback,
+        page_key="stopword_add_page",
+    )
 
 
-def _build_add_picker_view(data: dict) -> tuple[str, object, float, object, int]:
+def _build_add_picker_view(data: dict) -> PickerRenderView:
     suggestions = [str(item) for item in (data.get("stopword_add_candidates") or []) if str(item).strip()]
     selected = {int(item) for item in (data.get("stopword_add_selected_ids") or [])}
-    page = _clamp_picker_page(int(data.get("stopword_add_page") or 0), total=len(suggestions), page_size=_PAGE_SIZE)
-    text = _picker_text(
+    text = picker_body_text(
         title="Выбери фразы, которые нужно добавить в stopwords.",
     )
-    keyboard_started = callback_started()
-    kb = kb_manage_stopwords(
-        stopwords=suggestions,
-        selected_ids=selected,
-        page=page,
+    return build_picker_render_view(
+        data=data,
+        page_key="stopword_add_page",
+        total_count=len(suggestions),
         page_size=_PAGE_SIZE,
-        toggle_prefix="stopadd_toggle",
-        page_prefix="stopadd_page",
-        all_callback="stopadd_all",
-        done_callback="stopadd_done",
-        done_text=_picker_done_text("Добавить", len(selected)),
+        text=text,
+        keyboard_builder=lambda page: kb_manage_stopwords(
+            stopwords=suggestions,
+            selected_ids=selected,
+            page=page,
+            page_size=_PAGE_SIZE,
+            toggle_prefix="stopadd_toggle",
+            page_prefix="stopadd_page",
+            all_callback="stopadd_all",
+            done_callback="stopadd_done",
+            done_text=picker_done_text("Добавить", len(selected)),
+        ),
     )
-    keyboard_render_ms = (callback_started() - keyboard_started) * 1000
-    metrics = keyboard_metrics(kb)
-    data["stopword_add_page"] = page
-    return text, kb, keyboard_render_ms, metrics, len(suggestions)
 
 
 async def _render_remove_picker(
@@ -198,48 +175,44 @@ async def _render_remove_picker(
     edit_mode: str = "text",
     callback_info: dict | None = None,
 ) -> None:
-    data = data if data is not None else await state.get_data()
-    text, kb, keyboard_render_ms, metrics, row_count = _build_remove_picker_view(data)
-    edit = await safe_edit_message(message, text=text, reply_markup=kb, edit_mode=edit_mode)
-    if edit.failure_reason:
-        logger.warning("stopword_remove_picker_render_failed edit_path=%s error=%s", edit.path, edit.failure_reason)
-    if callback_info:
-        _log_picker_callback(
-            ack=callback_info["ack"],
-            edit=edit,
-            page_before=int(callback_info.get("page_before") or 0),
-            page_after=int(data.get("stopword_remove_page") or 0),
-            candidate_count=row_count,
-            keyboard_render_ms=keyboard_render_ms,
-            status="failure" if edit.failure_reason else "success",
-            rows_count=metrics.rows_count,
-            rendered_button_count=metrics.rendered_button_count,
-        )
+    await render_picker_message(
+        message,
+        state,
+        data=data,
+        edit_mode=edit_mode,
+        callback_info=callback_info,
+        build_view=_build_remove_picker_view,
+        logger=logger,
+        render_failure_event="stopword_remove_picker_render_failed",
+        log_callback=_log_picker_callback,
+        page_key="stopword_remove_page",
+    )
 
 
-def _build_remove_picker_view(data: dict) -> tuple[str, object, float, object, int]:
+def _build_remove_picker_view(data: dict) -> PickerRenderView:
     stopwords = [str(item) for item in (data.get("stopword_remove_items") or []) if str(item).strip()]
     selected = {int(item) for item in (data.get("stopword_remove_selected_ids") or [])}
-    page = _clamp_picker_page(int(data.get("stopword_remove_page") or 0), total=len(stopwords), page_size=_PAGE_SIZE)
-    text = _picker_text(
+    text = picker_body_text(
         title="Выбери stopwords, которые нужно удалить.",
     )
-    keyboard_started = callback_started()
-    kb = kb_manage_stopwords(
-        stopwords=stopwords,
-        selected_ids=selected,
-        page=page,
+    return build_picker_render_view(
+        data=data,
+        page_key="stopword_remove_page",
+        total_count=len(stopwords),
         page_size=_PAGE_SIZE,
-        toggle_prefix="stoprem_toggle",
-        page_prefix="stoprem_page",
-        all_callback="stoprem_all",
-        done_callback="stoprem_done",
-        done_text=_picker_done_text("Удалить", len(selected)),
+        text=text,
+        keyboard_builder=lambda page: kb_manage_stopwords(
+            stopwords=stopwords,
+            selected_ids=selected,
+            page=page,
+            page_size=_PAGE_SIZE,
+            toggle_prefix="stoprem_toggle",
+            page_prefix="stoprem_page",
+            all_callback="stoprem_all",
+            done_callback="stoprem_done",
+            done_text=picker_done_text("Удалить", len(selected)),
+        ),
     )
-    keyboard_render_ms = (callback_started() - keyboard_started) * 1000
-    metrics = keyboard_metrics(kb)
-    data["stopword_remove_page"] = page
-    return text, kb, keyboard_render_ms, metrics, len(stopwords)
 
 
 @router.message(Command("stopwords"))
@@ -303,8 +276,8 @@ async def cmd_stopwords_add(message: Message, state: FSMContext) -> None:
         )
         await state.set_state(StopwordManagementStates.PICK_STOPWORDS_ADD)
         data = await state.get_data()
-        text, kb, _, _, row_count = _build_add_picker_view(data)
-        return PreparedPickerOpen(text=text, reply_markup=kb, row_count=row_count)
+        view = _build_add_picker_view(data)
+        return PreparedPickerOpen(text=view.text, reply_markup=view.reply_markup, row_count=view.row_count)
 
     def _log_fields(load_result, row_count: int) -> dict[str, object]:
         return {
@@ -360,8 +333,8 @@ async def cmd_stopwords_remove(message: Message, state: FSMContext) -> None:
         )
         await state.set_state(StopwordManagementStates.PICK_STOPWORDS_REMOVE)
         data = await state.get_data()
-        text, kb, _, _, row_count = _build_remove_picker_view(data)
-        return PreparedPickerOpen(text=text, reply_markup=kb, row_count=row_count)
+        view = _build_remove_picker_view(data)
+        return PreparedPickerOpen(text=view.text, reply_markup=view.reply_markup, row_count=view.row_count)
 
     def _log_fields(load_result, row_count: int) -> dict[str, object]:
         return {

@@ -13,10 +13,8 @@ from botapp.callback_safety import (
     CallbackAck,
     MessageEdit,
     callback_started,
-    keyboard_metrics,
     log_callback_observability,
     safe_callback_ack,
-    safe_edit_message,
 )
 from botapp.db import db_call, db_run
 from botapp.keyboards import GLOBAL_BACK_CALLBACK, kb_manage_competitors
@@ -26,6 +24,13 @@ from botapp.picker_callback import (
     handle_picker_toggle_callback,
 )
 from botapp.picker_open import PreparedPickerOpen, open_picker_with_cache
+from botapp.picker_render import (
+    PickerRenderView,
+    build_picker_render_view,
+    picker_body_text,
+    picker_done_text,
+    render_picker_message,
+)
 from botapp.picker_session import (
     PickerSessionKeys,
     picker_page,
@@ -177,35 +182,6 @@ def _load_add_candidates_for_user(*, user: TgUser) -> tuple[list[dict], list[str
     return build_competitor_suggest_candidates(user=user)
 
 
-def _build_picker_text(
-    *,
-    action_label: str,
-    notes: list[str] | None = None,
-) -> str:
-    lines = [action_label]
-    extra = [str(item).strip() for item in (notes or []) if str(item).strip()]
-    if extra:
-        lines.append("")
-        lines.extend(extra[:5])
-    lines.append("Отметки сохраняются при переключении страниц.")
-    lines.append("Когда готово, нажми кнопку ниже.")
-    return "\n".join(lines)
-
-
-def _picker_done_text(action: str, selected_total: int) -> str:
-    if selected_total <= 0:
-        return action
-    return f"{action} ({selected_total})"
-
-
-def _picker_page_count(total: int, page_size: int) -> int:
-    return max(1, (max(0, total) + page_size - 1) // page_size)
-
-
-def _clamp_picker_page(page: int, *, total: int, page_size: int) -> int:
-    return min(max(0, page), _picker_page_count(total, page_size) - 1)
-
-
 def _make_add_picker_rows(candidates: list[dict]) -> list[dict]:
     return [
         {
@@ -329,62 +305,49 @@ async def _render_add_picker(
     edit_mode: str = "text",
     callback_info: dict | None = None,
 ) -> None:
-    data = data if data is not None else await state.get_data()
-    text, kb, keyboard_render_ms, metrics, rows_count = _build_add_picker_view(data)
-    edit = await safe_edit_message(
+    await render_picker_message(
         message,
-        text=text,
-        reply_markup=kb,
+        state,
+        data=data,
         edit_mode=edit_mode,
+        callback_info=callback_info,
+        build_view=_build_add_picker_view,
+        logger=logger,
+        render_failure_event="competitor_add_picker_render_failed",
+        log_callback=_log_picker_callback,
+        page_key="competitor_add_page",
     )
-    if edit.failure_reason:
-        logger.warning("competitor_add_picker_render_failed edit_path=%s error=%s", edit.path, edit.failure_reason)
-    if callback_info:
-        ack = callback_info["ack"]
-        _log_picker_callback(
-            ack=ack,
-            edit=edit,
-            page_before=int(callback_info.get("page_before") or 0),
-            page_after=int(data.get("competitor_add_page") or 0),
-            candidate_count=rows_count,
-            keyboard_render_ms=keyboard_render_ms,
-            status="failure" if edit.failure_reason else "success",
-            rows_count=metrics.rows_count,
-            rendered_button_count=metrics.rendered_button_count,
-        )
 
 
-def _build_add_picker_view(data: dict) -> tuple[str, object, float, object, int]:
+def _build_add_picker_view(data: dict) -> PickerRenderView:
     candidates = list(data.get("competitor_add_candidates") or [])
     selected_ids = {int(item) for item in (data.get("competitor_add_selected_ids") or [])}
-    page = _clamp_picker_page(int(data.get("competitor_add_page") or 0), total=len(candidates), page_size=_PAGE_SIZE)
     notes = [str(item) for item in (data.get("competitor_add_notes") or []) if str(item).strip()]
     rows = _picker_rows_from_state(data.get("competitor_add_picker_rows"))
     if not rows:
         rows = _picker_rows_from_state(_make_add_picker_rows(candidates))
-    platform_by_id = dict(data.get("competitor_add_platform_by_id") or {})
-    if not platform_by_id:
-        platform_by_id = _make_add_platform_by_id(candidates)
-    text = _build_picker_text(
-        action_label="Нашел кандидатов для добавления. Выбирай профили кнопками ниже.",
+    text = picker_body_text(
+        title="Нашел кандидатов для добавления. Выбирай профили кнопками ниже.",
         notes=notes,
     )
-    keyboard_started = callback_started()
-    kb = kb_manage_competitors(
-        competitor_rows=rows,
-        selected_ids=selected_ids,
-        page=page,
+    return build_picker_render_view(
+        data=data,
+        page_key="competitor_add_page",
+        total_count=len(rows),
         page_size=_PAGE_SIZE,
-        toggle_prefix="compadd_toggle",
-        page_prefix="compadd_page",
-        all_callback="compadd_all",
-        done_callback="compadd_done",
-        done_text=_picker_done_text("Добавить", len(selected_ids)),
+        text=text,
+        keyboard_builder=lambda page: kb_manage_competitors(
+            competitor_rows=rows,
+            selected_ids=selected_ids,
+            page=page,
+            page_size=_PAGE_SIZE,
+            toggle_prefix="compadd_toggle",
+            page_prefix="compadd_page",
+            all_callback="compadd_all",
+            done_callback="compadd_done",
+            done_text=picker_done_text("Добавить", len(selected_ids)),
+        ),
     )
-    keyboard_render_ms = (callback_started() - keyboard_started) * 1000
-    metrics = keyboard_metrics(kb)
-    data["competitor_add_page"] = page
-    return text, kb, keyboard_render_ms, metrics, len(rows)
 
 
 async def _render_remove_picker(
@@ -395,60 +358,47 @@ async def _render_remove_picker(
     edit_mode: str = "text",
     callback_info: dict | None = None,
 ) -> None:
-    data = data if data is not None else await state.get_data()
-    text, kb, keyboard_render_ms, metrics, rows_count = _build_remove_picker_view(data)
-    edit = await safe_edit_message(
+    await render_picker_message(
         message,
-        text=text,
-        reply_markup=kb,
+        state,
+        data=data,
         edit_mode=edit_mode,
+        callback_info=callback_info,
+        build_view=_build_remove_picker_view,
+        logger=logger,
+        render_failure_event="competitor_remove_picker_render_failed",
+        log_callback=_log_picker_callback,
+        page_key="competitor_remove_page",
     )
-    if edit.failure_reason:
-        logger.warning("competitor_remove_picker_render_failed edit_path=%s error=%s", edit.path, edit.failure_reason)
-    if callback_info:
-        ack = callback_info["ack"]
-        _log_picker_callback(
-            ack=ack,
-            edit=edit,
-            page_before=int(callback_info.get("page_before") or 0),
-            page_after=int(data.get("competitor_remove_page") or 0),
-            candidate_count=rows_count,
-            keyboard_render_ms=keyboard_render_ms,
-            status="failure" if edit.failure_reason else "success",
-            rows_count=metrics.rows_count,
-            rendered_button_count=metrics.rendered_button_count,
-        )
 
 
-def _build_remove_picker_view(data: dict) -> tuple[str, object, float, object, int]:
+def _build_remove_picker_view(data: dict) -> PickerRenderView:
     rows = list(data.get("competitor_remove_rows") or [])
     selected_ids = {int(item) for item in (data.get("competitor_remove_selected_ids") or [])}
     kb_rows = _picker_rows_from_state(data.get("competitor_remove_picker_rows"))
     if not kb_rows:
         kb_rows = _picker_rows_from_state(_make_remove_picker_rows(rows))
-    page = _clamp_picker_page(int(data.get("competitor_remove_page") or 0), total=len(kb_rows), page_size=_PAGE_SIZE)
-    platform_by_id = dict(data.get("competitor_remove_platform_by_id") or {})
-    if not platform_by_id:
-        platform_by_id = _make_remove_platform_by_id(rows)
-    text = _build_picker_text(
-        action_label="Выбери конкурентов, которых нужно убрать из активного списка.",
+    text = picker_body_text(
+        title="Выбери конкурентов, которых нужно убрать из активного списка.",
     )
-    keyboard_started = callback_started()
-    kb = kb_manage_competitors(
-        competitor_rows=kb_rows,
-        selected_ids=selected_ids,
-        page=page,
+    return build_picker_render_view(
+        data=data,
+        page_key="competitor_remove_page",
+        total_count=len(kb_rows),
         page_size=_PAGE_SIZE,
-        toggle_prefix="comprem_toggle",
-        page_prefix="comprem_page",
-        all_callback="comprem_all",
-        done_callback="comprem_done",
-        done_text=_picker_done_text("Убрать", len(selected_ids)),
+        text=text,
+        keyboard_builder=lambda page: kb_manage_competitors(
+            competitor_rows=kb_rows,
+            selected_ids=selected_ids,
+            page=page,
+            page_size=_PAGE_SIZE,
+            toggle_prefix="comprem_toggle",
+            page_prefix="comprem_page",
+            all_callback="comprem_all",
+            done_callback="comprem_done",
+            done_text=picker_done_text("Убрать", len(selected_ids)),
+        ),
     )
-    keyboard_render_ms = (callback_started() - keyboard_started) * 1000
-    metrics = keyboard_metrics(kb)
-    data["competitor_remove_page"] = page
-    return text, kb, keyboard_render_ms, metrics, len(kb_rows)
 
 
 @router.message(Command("competitors"))
@@ -525,8 +475,8 @@ async def cmd_competitors_suggest(message: Message, state: FSMContext) -> None:
         )
         await state.set_state(CompetitorManagementStates.PICK_COMPETITORS_ADD)
         data = await state.get_data()
-        text, kb, _, _, row_count = _build_add_picker_view(data)
-        return PreparedPickerOpen(text=text, reply_markup=kb, row_count=row_count)
+        view = _build_add_picker_view(data)
+        return PreparedPickerOpen(text=view.text, reply_markup=view.reply_markup, row_count=view.row_count)
 
     def _empty_text(load_result: CompetitorSuggestCacheLoadResult) -> str:
         details = "\n".join(load_result.notes[:5])
@@ -625,8 +575,8 @@ async def cmd_competitors_remove(message: Message, state: FSMContext) -> None:
         )
         await state.set_state(CompetitorManagementStates.PICK_COMPETITORS_REMOVE)
         data = await state.get_data()
-        text, kb, _, _, row_count = _build_remove_picker_view(data)
-        return PreparedPickerOpen(text=text, reply_markup=kb, row_count=row_count)
+        view = _build_remove_picker_view(data)
+        return PreparedPickerOpen(text=view.text, reply_markup=view.reply_markup, row_count=view.row_count)
 
     def _log_fields(load_result, row_count: int) -> dict[str, object]:
         return {
