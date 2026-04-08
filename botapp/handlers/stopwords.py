@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from time import perf_counter
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -22,6 +23,10 @@ from botapp.keyboards import GLOBAL_BACK_CALLBACK, kb_manage_stopwords
 from botapp.state import StopwordManagementStates
 from botapp.user_sync import upsert_tg_user
 from tracking.models import TgUser
+from tracking.services.picker_snapshot_cache import (
+    load_stopword_add_picker_snapshot,
+    load_stopword_remove_picker_snapshot,
+)
 from tracking.services.report_filters import get_user_report_stopwords
 from tracking.services.stopword_suggestions import build_user_stopword_suggestions
 
@@ -29,6 +34,14 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 _PAGE_SIZE = 10
+
+
+def _load_stopword_add_picker_snapshot_cached(*, user: TgUser):
+    return load_stopword_add_picker_snapshot(user=user, builder=build_user_stopword_suggestions)
+
+
+def _load_stopword_remove_picker_snapshot_cached(*, user: TgUser):
+    return load_stopword_remove_picker_snapshot(user=user)
 
 
 def _save_user_stopwords(*, user: TgUser, stopwords: list[str]) -> None:
@@ -233,14 +246,35 @@ async def cmd_stopwords_add(message: Message, state: FSMContext) -> None:
         language_code=message.from_user.language_code,
     )
     loading = await message.answer("Подбираю фразы для stopwords...")
+    open_started = perf_counter()
     try:
-        suggestions = await asyncio.to_thread(build_user_stopword_suggestions, user=user)
+        load_result = await asyncio.to_thread(_load_stopword_add_picker_snapshot_cached, user=user)
     except Exception as exc:
         await state.clear()
+        logger.info(
+            "stopword_add_open_observability user_id=%s cache_hit=%s cache_source=%s open_ms=%.1f row_count=%s status=%s failure_reason=%s",
+            user.id,
+            False,
+            "cold_build",
+            (perf_counter() - open_started) * 1000,
+            0,
+            "failure",
+            exc,
+        )
         await loading.edit_text(f"Не смог подготовить список stopwords: {exc}")
         return
+    suggestions = [str(item) for item in (load_result.payload.get("items") or []) if str(item).strip()]
     if not suggestions:
         await state.clear()
+        logger.info(
+            "stopword_add_open_observability user_id=%s cache_hit=%s cache_source=%s open_ms=%.1f row_count=%s status=%s",
+            user.id,
+            load_result.cache_hit,
+            load_result.cache_source,
+            (perf_counter() - open_started) * 1000,
+            0,
+            "empty",
+        )
         await loading.edit_text("Сейчас не нашел готовых фраз для добавления в stopwords.")
         return
     await state.update_data(
@@ -251,6 +285,15 @@ async def cmd_stopwords_add(message: Message, state: FSMContext) -> None:
     )
     await state.set_state(StopwordManagementStates.PICK_STOPWORDS_ADD)
     await _render_add_picker(loading, state)
+    logger.info(
+        "stopword_add_open_observability user_id=%s cache_hit=%s cache_source=%s open_ms=%.1f row_count=%s status=%s",
+        user.id,
+        load_result.cache_hit,
+        load_result.cache_source,
+        (perf_counter() - open_started) * 1000,
+        len(suggestions),
+        "success",
+    )
 
 
 @router.message(Command("stopwords_remove"))
@@ -266,12 +309,38 @@ async def cmd_stopwords_remove(message: Message, state: FSMContext) -> None:
         last_name=message.from_user.last_name,
         language_code=message.from_user.language_code,
     )
-    current = await db_run(lambda: get_user_report_stopwords(user=user))
+    picker = await message.answer("Готовлю список stopwords...")
+    open_started = perf_counter()
+    try:
+        load_result = await asyncio.to_thread(_load_stopword_remove_picker_snapshot_cached, user=user)
+    except Exception as exc:
+        await state.clear()
+        logger.info(
+            "stopword_remove_open_observability user_id=%s cache_hit=%s cache_source=%s open_ms=%.1f row_count=%s status=%s failure_reason=%s",
+            user.id,
+            False,
+            "cold_build",
+            (perf_counter() - open_started) * 1000,
+            0,
+            "failure",
+            exc,
+        )
+        await picker.edit_text(f"Не смог подготовить список stopwords: {exc}")
+        return
+    current = [str(item) for item in (load_result.payload.get("items") or []) if str(item).strip()]
     if not current:
         await state.clear()
-        await message.answer("Стоп-слов для удаления сейчас нет.")
+        logger.info(
+            "stopword_remove_open_observability user_id=%s cache_hit=%s cache_source=%s open_ms=%.1f row_count=%s status=%s",
+            user.id,
+            load_result.cache_hit,
+            load_result.cache_source,
+            (perf_counter() - open_started) * 1000,
+            0,
+            "empty",
+        )
+        await picker.edit_text("Стоп-слов для удаления сейчас нет.")
         return
-    picker = await message.answer("Готовлю список stopwords...")
     await state.update_data(
         user_id=user.id,
         stopword_remove_items=current,
@@ -280,6 +349,15 @@ async def cmd_stopwords_remove(message: Message, state: FSMContext) -> None:
     )
     await state.set_state(StopwordManagementStates.PICK_STOPWORDS_REMOVE)
     await _render_remove_picker(picker, state)
+    logger.info(
+        "stopword_remove_open_observability user_id=%s cache_hit=%s cache_source=%s open_ms=%.1f row_count=%s status=%s",
+        user.id,
+        load_result.cache_hit,
+        load_result.cache_source,
+        (perf_counter() - open_started) * 1000,
+        len(current),
+        "success",
+    )
 
 
 @router.callback_query(StopwordManagementStates.PICK_STOPWORDS_ADD, F.data == "noop")

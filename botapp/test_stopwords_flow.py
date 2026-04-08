@@ -8,6 +8,13 @@ from asgiref.sync import async_to_sync, sync_to_async
 from botapp.handlers import stopwords
 from botapp.state import StopwordManagementStates
 from tracking.models import TgUser
+from tracking.services.picker_snapshot_cache import (
+    PICKER_SNAPSHOT_CACHE_SOURCE_COLD_BUILD,
+    PICKER_SNAPSHOT_CACHE_SOURCE_SNAPSHOT_HIT,
+    load_stopword_add_picker_snapshot,
+    load_stopword_remove_picker_snapshot,
+)
+from tracking.services.setup_retry_cache import clear_retry_cache
 
 
 class DummyState:
@@ -182,6 +189,60 @@ def test_stopwords_add_toggle_uses_markup_only():
     assert "Добавить (1)" in _button_texts(message.reply_markups[-1])
 
 
+@pytest.mark.django_db
+def test_stopwords_add_second_open_reuses_snapshot_cache():
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(
+        tg_user_id=145,
+        tg_chat_id=145,
+        report_stopwords=["spoiler"],
+    )
+    calls = {"count": 0}
+
+    def fake_builder(*, user):
+        calls["count"] += 1
+        return ["promo post", "launch teaser"]
+
+    clear_retry_cache()
+    first = load_stopword_add_picker_snapshot(user=user, builder=fake_builder)
+    second = load_stopword_add_picker_snapshot(user=user, builder=fake_builder)
+
+    assert calls["count"] == 1
+    assert first.cache_hit is False
+    assert first.cache_source == PICKER_SNAPSHOT_CACHE_SOURCE_COLD_BUILD
+    assert second.cache_hit is True
+    assert second.cache_source == PICKER_SNAPSHOT_CACHE_SOURCE_SNAPSHOT_HIT
+    assert first.payload == second.payload
+    clear_retry_cache()
+
+
+@pytest.mark.django_db
+def test_stopwords_add_snapshot_cache_invalidates_when_stopwords_change():
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(
+        tg_user_id=146,
+        tg_chat_id=146,
+        report_stopwords=["spoiler"],
+    )
+    calls = {"count": 0}
+
+    def fake_builder(*, user):
+        calls["count"] += 1
+        return [f"promo post {calls['count']}"]
+
+    clear_retry_cache()
+    first = load_stopword_add_picker_snapshot(user=user, builder=fake_builder)
+
+    user.report_stopwords = ["spoiler", "launch"]
+    async_to_sync(sync_to_async(user.save, thread_sensitive=True))(update_fields=["report_stopwords", "updated_at"])
+
+    second = load_stopword_add_picker_snapshot(user=user, builder=fake_builder)
+
+    assert calls["count"] == 2
+    assert first.cache_hit is False
+    assert second.cache_hit is False
+    assert first.payload != second.payload
+    clear_retry_cache()
+
+
 def test_stopwords_add_selection_persists_across_pages():
     suggestions = [f"word {idx}" for idx in range(12)]
     state = DummyState()
@@ -204,6 +265,26 @@ def test_stopwords_add_selection_persists_across_pages():
     assert message.edit_reply_markup_calls == 4
     assert any(text.startswith("✅ word 0") for text in _button_texts(message.reply_markups[-1]))
     assert "Добавить (2)" in _button_texts(message.reply_markups[-1])
+
+
+@pytest.mark.django_db
+def test_stopwords_remove_second_open_reuses_snapshot_cache():
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(
+        tg_user_id=147,
+        tg_chat_id=147,
+        report_stopwords=["spoiler", "promo post"],
+    )
+
+    clear_retry_cache()
+    first = load_stopword_remove_picker_snapshot(user=user)
+    second = load_stopword_remove_picker_snapshot(user=user)
+
+    assert first.cache_hit is False
+    assert first.cache_source == PICKER_SNAPSHOT_CACHE_SOURCE_COLD_BUILD
+    assert second.cache_hit is True
+    assert second.cache_source == PICKER_SNAPSHOT_CACHE_SOURCE_SNAPSHOT_HIT
+    assert first.payload == second.payload
+    clear_retry_cache()
 
 
 @pytest.mark.django_db
