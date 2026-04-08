@@ -162,6 +162,26 @@ def test_stopwords_add_page_failed_ack_does_not_abort_render():
     assert any("word 10" in text for text in _button_texts(message.reply_markups[-1]))
 
 
+def test_stopwords_add_toggle_uses_markup_only():
+    suggestions = [f"word {idx}" for idx in range(12)]
+    state = DummyState()
+    async_to_sync(state.update_data)(
+        user_id=144,
+        stopword_add_candidates=suggestions,
+        stopword_add_selected_ids=[],
+        stopword_add_page=0,
+    )
+    message = DummyMessage(user_id=144)
+
+    async_to_sync(stopwords.on_add_toggle)(DummyCallbackQuery(data="stopadd_toggle:0", message=message), state)
+
+    assert state.data["stopword_add_selected_ids"] == [0]
+    assert message.edit_text_calls == 0
+    assert message.edit_reply_markup_calls == 1
+    assert any(text.startswith("✅ word 0") for text in _button_texts(message.reply_markups[-1]))
+    assert "Добавить (1)" in _button_texts(message.reply_markups[-1])
+
+
 def test_stopwords_add_selection_persists_across_pages():
     suggestions = [f"word {idx}" for idx in range(12)]
     state = DummyState()
@@ -180,7 +200,10 @@ def test_stopwords_add_selection_persists_across_pages():
 
     assert state.data["stopword_add_selected_ids"] == [0, 10]
     assert state.data["stopword_add_page"] == 0
+    assert message.edit_text_calls == 0
+    assert message.edit_reply_markup_calls == 4
     assert any(text.startswith("✅ word 0") for text in _button_texts(message.reply_markups[-1]))
+    assert "Добавить (2)" in _button_texts(message.reply_markups[-1])
 
 
 @pytest.mark.django_db
