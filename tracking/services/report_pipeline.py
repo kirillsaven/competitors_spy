@@ -929,6 +929,19 @@ def _load_previously_reported_content_keys(*, user: TgUser) -> set[tuple[str, st
                 )
                 if key is not None:
                     keys.add(key)
+        supplemental = payload.get("supplemental")
+        youtube_lane = supplemental.get("youtube_topic_video") if isinstance(supplemental, dict) else None
+        youtube_section = youtube_lane.get("section") if isinstance(youtube_lane, dict) else None
+        for item in list((youtube_section or {}).get("items") or []):
+            if not isinstance(item, dict):
+                continue
+            key = _reported_content_key(
+                platform=Platform.YOUTUBE,
+                external_id=str(item.get("video_id") or item.get("external_id") or "").strip(),
+                url=str(item.get("url") or "").strip(),
+            )
+            if key is not None:
+                keys.add(key)
     return keys
 
 
