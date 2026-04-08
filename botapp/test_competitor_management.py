@@ -17,6 +17,10 @@ from tracking.services.competitor_suggest_cache import (
     CompetitorSuggestCacheLoadResult,
     store_competitor_suggest_cache,
 )
+from tracking.services.picker_snapshot_cache import (
+    PICKER_SNAPSHOT_CACHE_SOURCE_COLD_BUILD,
+    PICKER_SNAPSHOT_CACHE_SOURCE_SNAPSHOT_HIT,
+)
 from tracking.services import report_pipeline, suggested_competitors
 from tracking.services.setup_retry_cache import clear_retry_cache
 
@@ -364,6 +368,87 @@ def test_competitors_suggest_cache_invalidates_when_seed_changes(monkeypatch):
     assert second.cache_hit is False
     assert second.cache_source == COMPETITOR_SUGGEST_CACHE_SOURCE_COLD_BUILD
     assert first.candidates != second.candidates
+    clear_retry_cache()
+
+
+@pytest.mark.django_db
+def test_competitors_remove_second_open_reuses_snapshot_cache(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=124, tg_chat_id=124)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+    for idx in range(2):
+        competitor_obj = async_to_sync(sync_to_async(Competitor.objects.create, thread_sensitive=True))(
+            platform=Platform.YOUTUBE,
+            external_id=f"yt-remove-cache-{idx}",
+            handle=f"remove_cache_{idx}",
+            display_name=f"Remove Cache {idx}",
+            url=f"https://www.youtube.com/@remove_cache_{idx}",
+        )
+        async_to_sync(sync_to_async(UserCompetitor.objects.create, thread_sensitive=True))(
+            user=user,
+            competitor=competitor_obj,
+            is_active=True,
+        )
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+    clear_retry_cache()
+
+    first = competitors._load_remove_picker_snapshot_for_user_cached(user=user)
+    second = competitors._load_remove_picker_snapshot_for_user_cached(user=user)
+
+    assert first.cache_hit is False
+    assert first.cache_source == PICKER_SNAPSHOT_CACHE_SOURCE_COLD_BUILD
+    assert second.cache_hit is True
+    assert second.cache_source == PICKER_SNAPSHOT_CACHE_SOURCE_SNAPSHOT_HIT
+    assert first.payload == second.payload
+    assert len(first.payload["rows"]) == 2
+    clear_retry_cache()
+
+
+@pytest.mark.django_db
+def test_competitors_remove_snapshot_cache_invalidates_when_active_list_changes(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=125, tg_chat_id=125)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+    first_competitor = async_to_sync(sync_to_async(Competitor.objects.create, thread_sensitive=True))(
+        platform=Platform.YOUTUBE,
+        external_id="yt-remove-cache-first",
+        handle="remove_cache_first",
+        display_name="Remove Cache First",
+        url="https://www.youtube.com/@remove_cache_first",
+    )
+    async_to_sync(sync_to_async(UserCompetitor.objects.create, thread_sensitive=True))(
+        user=user,
+        competitor=first_competitor,
+        is_active=True,
+    )
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+    clear_retry_cache()
+
+    first = competitors._load_remove_picker_snapshot_for_user_cached(user=user)
+
+    second_competitor = async_to_sync(sync_to_async(Competitor.objects.create, thread_sensitive=True))(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-remove-cache-second",
+        handle="remove_cache_second",
+        display_name="Remove Cache Second",
+        url="https://www.instagram.com/remove_cache_second/",
+    )
+    async_to_sync(sync_to_async(UserCompetitor.objects.create, thread_sensitive=True))(
+        user=user,
+        competitor=second_competitor,
+        is_active=True,
+    )
+
+    second = competitors._load_remove_picker_snapshot_for_user_cached(user=user)
+
+    assert first.cache_hit is False
+    assert second.cache_hit is False
+    assert first.cache_source == PICKER_SNAPSHOT_CACHE_SOURCE_COLD_BUILD
+    assert second.cache_source == PICKER_SNAPSHOT_CACHE_SOURCE_COLD_BUILD
+    assert len(first.payload["rows"]) == 1
+    assert len(second.payload["rows"]) == 2
     clear_retry_cache()
 
 

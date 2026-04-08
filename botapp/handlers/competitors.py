@@ -47,6 +47,7 @@ from tracking.services.competitor_suggest_cache import (
     build_competitor_suggest_candidates,
     load_competitor_suggest_cache,
 )
+from tracking.services.picker_snapshot_cache import load_competitor_remove_picker_snapshot
 from tracking.services.platform_onboarding import youtube_profile_recent_shorts_gate_status
 from tracking.services.seed_resolver import (
     candidate_platforms_for_exact_seed,
@@ -133,6 +134,10 @@ def _active_link_rows(*, user: TgUser) -> list[dict]:
             }
         )
     return rows
+
+
+def _load_remove_picker_snapshot_for_user_cached(*, user: TgUser):
+    return load_competitor_remove_picker_snapshot(user=user)
 
 
 def _load_add_candidates_for_user(*, user: TgUser) -> tuple[list[dict], list[str]]:
@@ -565,23 +570,60 @@ async def cmd_competitors_remove(message: Message, state: FSMContext) -> None:
         await message.answer("Сначала заверши /setup.")
         return
 
-    rows = await db_run(lambda: _active_link_rows(user=user))
-    if not rows:
+    picker = await message.answer("Готовлю список активных конкурентов...")
+    open_started = perf_counter()
+    try:
+        load_result = await db_run(lambda: _load_remove_picker_snapshot_for_user_cached(user=user))
+    except Exception as exc:
         await state.clear()
-        await message.answer("Активных конкурентов для удаления сейчас нет.")
+        logger.info(
+            "competitor_remove_open_observability user_id=%s cache_hit=%s cache_source=%s open_ms=%.1f row_count=%s status=%s failure_reason=%s",
+            user.id,
+            False,
+            "cold_build",
+            (perf_counter() - open_started) * 1000,
+            0,
+            "failure",
+            exc,
+        )
+        await picker.edit_text(f"Не смог подготовить список активных конкурентов: {exc}")
         return
 
-    picker = await message.answer("Готовлю список активных конкурентов...")
+    snapshot = dict(load_result.payload or {})
+    rows = list(snapshot.get("rows") or [])
+    if not rows:
+        await state.clear()
+        logger.info(
+            "competitor_remove_open_observability user_id=%s cache_hit=%s cache_source=%s open_ms=%.1f row_count=%s status=%s",
+            user.id,
+            load_result.cache_hit,
+            load_result.cache_source,
+            (perf_counter() - open_started) * 1000,
+            0,
+            "empty",
+        )
+        await picker.edit_text("Активных конкурентов для удаления сейчас нет.")
+        return
+
     await state.update_data(
         user_id=user.id,
         competitor_remove_rows=rows,
-        competitor_remove_picker_rows=_make_remove_picker_rows(rows),
-        competitor_remove_platform_by_id=_make_remove_platform_by_id(rows),
+        competitor_remove_picker_rows=list(snapshot.get("picker_rows") or _make_remove_picker_rows(rows)),
+        competitor_remove_platform_by_id=dict(snapshot.get("platform_by_id") or _make_remove_platform_by_id(rows)),
         competitor_remove_selected_ids=[],
         competitor_remove_page=0,
     )
     await state.set_state(CompetitorManagementStates.PICK_COMPETITORS_REMOVE)
     await _render_remove_picker(picker, state)
+    logger.info(
+        "competitor_remove_open_observability user_id=%s cache_hit=%s cache_source=%s open_ms=%.1f row_count=%s status=%s",
+        user.id,
+        load_result.cache_hit,
+        load_result.cache_source,
+        (perf_counter() - open_started) * 1000,
+        len(rows),
+        "success",
+    )
 
 
 @router.callback_query(F.data.startswith("suggytadd:"))
