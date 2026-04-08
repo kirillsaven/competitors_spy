@@ -34,6 +34,8 @@ class DummyMessage:
         self.text = text
         self.answers: list[str] = []
         self.reply_markups = []
+        self.edit_text_calls = 0
+        self.edit_reply_markup_calls = 0
         self.chat = SimpleNamespace(id=user_id)
         self.from_user = SimpleNamespace(
             id=user_id,
@@ -49,22 +51,28 @@ class DummyMessage:
         return self
 
     async def edit_text(self, text: str, reply_markup=None):
+        self.edit_text_calls += 1
         self.answers.append(text)
         self.reply_markups.append(reply_markup)
         return self
 
     async def edit_reply_markup(self, reply_markup=None):
+        self.edit_reply_markup_calls += 1
         self.reply_markups.append(reply_markup)
         return self
 
 
 class DummyCallbackQuery:
-    def __init__(self, *, data: str, message: DummyMessage) -> None:
+    def __init__(self, *, data: str, message: DummyMessage, fail_answer: bool = False) -> None:
         self.data = data
         self.message = message
+        self.from_user = message.from_user
+        self.fail_answer = fail_answer
         self.answers: list[tuple[str | None, bool]] = []
 
     async def answer(self, text: str | None = None, show_alert: bool = False):
+        if self.fail_answer:
+            raise RuntimeError("stale callback")
         self.answers.append((text, show_alert))
 
 
@@ -74,6 +82,10 @@ async def _db_call(func, *args, **kwargs):
 
 async def _db_run(func, *args, **kwargs):
     return await sync_to_async(func, thread_sensitive=True)(*args, **kwargs)
+
+
+def _button_texts(markup) -> list[str]:
+    return [button.text for row in markup.inline_keyboard for button in row]
 
 
 @pytest.mark.django_db
@@ -128,6 +140,47 @@ def test_stopwords_add_uses_picker_and_skips_existing(monkeypatch):
     assert "Добавлено: 1" in message.answers[-1]
     assert "Пропущено: 1" in message.answers[-1]
     assert "Всего стоп-слов: 2" in message.answers[-1]
+
+
+def test_stopwords_add_page_failed_ack_does_not_abort_render():
+    suggestions = [f"word {idx}" for idx in range(12)]
+    state = DummyState()
+    async_to_sync(state.update_data)(
+        user_id=142,
+        stopword_add_candidates=suggestions,
+        stopword_add_selected_ids=[],
+        stopword_add_page=0,
+    )
+    message = DummyMessage(user_id=142)
+
+    callback = DummyCallbackQuery(data="stopadd_page:1", message=message, fail_answer=True)
+    async_to_sync(stopwords.on_add_page)(callback, state)
+
+    assert state.data["stopword_add_page"] == 1
+    assert message.edit_text_calls == 0
+    assert message.edit_reply_markup_calls == 1
+    assert any("word 10" in text for text in _button_texts(message.reply_markups[-1]))
+
+
+def test_stopwords_add_selection_persists_across_pages():
+    suggestions = [f"word {idx}" for idx in range(12)]
+    state = DummyState()
+    async_to_sync(state.update_data)(
+        user_id=143,
+        stopword_add_candidates=suggestions,
+        stopword_add_selected_ids=[],
+        stopword_add_page=0,
+    )
+    message = DummyMessage(user_id=143)
+
+    async_to_sync(stopwords.on_add_toggle)(DummyCallbackQuery(data="stopadd_toggle:0", message=message), state)
+    async_to_sync(stopwords.on_add_page)(DummyCallbackQuery(data="stopadd_page:1", message=message), state)
+    async_to_sync(stopwords.on_add_toggle)(DummyCallbackQuery(data="stopadd_toggle:10", message=message), state)
+    async_to_sync(stopwords.on_add_page)(DummyCallbackQuery(data="stopadd_page:0", message=message), state)
+
+    assert state.data["stopword_add_selected_ids"] == [0, 10]
+    assert state.data["stopword_add_page"] == 0
+    assert any(text.startswith("✅ word 0") for text in _button_texts(message.reply_markups[-1]))
 
 
 @pytest.mark.django_db
