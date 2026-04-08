@@ -161,6 +161,24 @@ def kb_youtube_suggested_competitors(*, report_id: int, suggestions: list[dict])
     return b.as_markup()
 
 
+def kb_instagram_suggested_competitors(*, report_id: int, suggestions: list[dict]) -> InlineKeyboardMarkup:
+    b = InlineKeyboardBuilder()
+    for idx, suggestion in enumerate(list(suggestions or [])):
+        profile_name = str(
+            suggestion.get("competitor_display_name")
+            or suggestion.get("competitor_handle")
+            or suggestion.get("competitor_external_id")
+            or f"Instagram {idx + 1}"
+        ).strip()
+        b.row(
+            InlineKeyboardButton(
+                text=f"Добавить {idx + 1}. {profile_name}"[:64],
+                callback_data=f"sugigadd:{report_id}:{idx}",
+            )
+        )
+    return b.as_markup()
+
+
 def kb_competitors_next_or_ignore() -> InlineKeyboardMarkup:
     b = InlineKeyboardBuilder()
     b.add(InlineKeyboardButton(text="Дальше", callback_data="comp_done"))

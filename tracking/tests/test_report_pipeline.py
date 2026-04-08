@@ -236,6 +236,88 @@ def test_create_and_send_report_skips_youtube_suggestion_message_when_none(db, m
     assert result.report.payload["suggested_competitors"]["youtube"]["diagnostics"]["suggestions_sent"] == 0
 
 
+def test_create_and_send_report_sends_instagram_suggestion_message_when_present(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=1142, tg_chat_id=1142, timezone_str="UTC")
+    preview = ReportPreview(
+        payload={
+            "sections": [],
+            "suggested_competitors": {
+                "youtube": {"items": []},
+                "instagram": {
+                    "items": [
+                        {
+                            "competitor_external_id": "ig-1",
+                            "competitor_display_name": "IG Coach",
+                            "competitor_handle": "ig_coach",
+                            "competitor_url": "https://www.instagram.com/ig_coach/",
+                            "appearance_count": 2,
+                        }
+                    ]
+                },
+            },
+        },
+        text="Обычный отчет",
+        section_counts={},
+    )
+    monkeypatch.setattr(report_pipeline, "build_report_preview", lambda **kwargs: preview)
+    sent: list[dict] = []
+    monkeypatch.setattr(report_pipeline, "send_message", lambda **kwargs: sent.append(kwargs) or {"message_id": len(sent)})
+
+    result = create_and_send_report(
+        user=user,
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+    )
+
+    result.report.refresh_from_db()
+    assert len(sent) == 2
+    assert sent[1]["reply_markup"]["inline_keyboard"][0][0]["callback_data"] == f"sugigadd:{result.report.id}:0"
+    assert result.telegram_result["instagram_suggestion_message_id"] == 2
+    assert "suggestion_message_id" not in result.telegram_result
+    assert result.report.payload["suggested_competitors"]["instagram"]["diagnostics"]["suggestions_sent"] == 1
+    assert (
+        result.report.payload["suggested_competitors"]["instagram"]["delivery"]["sent_items"][0]["competitor_external_id"]
+        == "ig-1"
+    )
+
+
+def test_create_and_send_report_main_text_unchanged_with_instagram_suggestion_followup(db, monkeypatch):
+    user = TgUser.objects.create(tg_user_id=1143, tg_chat_id=1143, timezone_str="UTC")
+    preview = ReportPreview(
+        payload={
+            "sections": [],
+            "suggested_competitors": {
+                "youtube": {"items": []},
+                "instagram": {
+                    "items": [
+                        {
+                            "competitor_external_id": "ig-2",
+                            "competitor_display_name": "IG Compact",
+                            "competitor_handle": "ig_compact",
+                            "appearance_count": 2,
+                        }
+                    ]
+                },
+            },
+        },
+        text="Обычный отчет без блока подсказок",
+        section_counts={},
+    )
+    monkeypatch.setattr(report_pipeline, "build_report_preview", lambda **kwargs: preview)
+    sent: list[dict] = []
+    monkeypatch.setattr(report_pipeline, "send_message", lambda **kwargs: sent.append(kwargs) or {"message_id": len(sent)})
+
+    create_and_send_report(
+        user=user,
+        period_start=datetime(2026, 3, 23, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 24, 0, 0, tzinfo=UTC),
+    )
+
+    assert sent[0]["text"] == "Обычный отчет без блока подсказок"
+    assert "Instagram" in sent[1]["text"]
+    assert "Обычный отчет без блока подсказок" not in sent[1]["text"]
+
+
 def test_create_and_send_report_never_sends_blocked_youtube_suggestion(db, monkeypatch):
     user = TgUser.objects.create(tg_user_id=1141, tg_chat_id=1141, timezone_str="UTC")
     blocked = Competitor.objects.create(
@@ -1623,6 +1705,7 @@ def test_build_report_preview_attaches_youtube_suggested_competitors_payload(db,
     suggestions = preview.payload["suggested_competitors"]["youtube"]
     assert suggestions["diagnostics"]["final_suggestions"] == 1
     assert suggestions["items"][0]["channel_id"] == "chan-repeat"
+    assert "instagram" in preview.payload["suggested_competitors"]
 
 
 def test_build_report_preview_fallback_still_respects_already_reported_and_stopwords(db, monkeypatch, settings):
