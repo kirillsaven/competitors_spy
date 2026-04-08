@@ -1873,3 +1873,145 @@ def test_build_setup_verification_preview_reports_when_all_short_items_are_hidde
 
     first_entry = preview.payload["sections"][0]["entries"][0]
     assert first_entry["reason"] == "все подходящие короткие видео скрыты стоп-словами пользователя"
+
+
+def _scored_item_for_history_test(*, video_id: str, user: TgUser):
+    competitor = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id=f"comp-{video_id}-{user.id}",
+        handle=f"comp_{video_id}_{user.id}",
+        url=f"https://www.youtube.com/@comp_{video_id}_{user.id}",
+        display_name=f"Comp {video_id} {user.id}",
+    )
+    item = competitor.content_items.create(
+        platform=Platform.YOUTUBE,
+        external_id=video_id,
+        url=f"https://www.youtube.com/watch?v={video_id}",
+        title=f"Video {video_id}",
+        description="desc",
+        published_at=datetime(2026, 3, 24, 12, 0, tzinfo=UTC),
+        duration_seconds=30,
+        meta={"content_type": "short"},
+    )
+    return SimpleNamespace(content_item=item, competitor=competitor)
+
+
+def test_exclude_previously_reported_items_uses_supplemental_youtube_history(db):
+    user = TgUser.objects.create(tg_user_id=2101, tg_chat_id=2101, timezone_str="UTC")
+    Report.objects.create(
+        user=user,
+        period_start=datetime(2026, 3, 20, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 21, 0, 0, tzinfo=UTC),
+        status="sent",
+        payload={
+            "sections": [],
+            "supplemental": {
+                "youtube_topic_video": {
+                    "section": {
+                        "items": [
+                            {
+                                "video_id": "supp-yt-shown",
+                                "url": "https://www.youtube.com/watch?v=supp-yt-shown",
+                                "title": "Shown once via supplemental",
+                            }
+                        ]
+                    }
+                }
+            },
+        },
+    )
+    shown = _scored_item_for_history_test(video_id="supp-yt-shown", user=user)
+    unseen = _scored_item_for_history_test(video_id="supp-yt-new", user=user)
+
+    filtered = report_pipeline._exclude_previously_reported_items(user=user, scored=[shown, unseen])
+
+    assert [item.content_item.external_id for item in filtered] == ["supp-yt-new"]
+
+
+def test_exclude_previously_reported_items_uses_main_youtube_history(db):
+    user = TgUser.objects.create(tg_user_id=2102, tg_chat_id=2102, timezone_str="UTC")
+    Report.objects.create(
+        user=user,
+        period_start=datetime(2026, 3, 20, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 21, 0, 0, tzinfo=UTC),
+        status="sent",
+        payload={
+            "sections": [
+                {
+                    "platform": Platform.YOUTUBE,
+                    "items": [
+                        {
+                            "platform": Platform.YOUTUBE,
+                            "video_id": "main-yt-shown",
+                            "url": "https://www.youtube.com/watch?v=main-yt-shown",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    shown = _scored_item_for_history_test(video_id="main-yt-shown", user=user)
+    unseen = _scored_item_for_history_test(video_id="main-yt-new", user=user)
+
+    filtered = report_pipeline._exclude_previously_reported_items(user=user, scored=[shown, unseen])
+
+    assert [item.content_item.external_id for item in filtered] == ["main-yt-new"]
+
+
+def test_exclude_previously_reported_items_is_per_user(db):
+    user_a = TgUser.objects.create(tg_user_id=2103, tg_chat_id=2103, timezone_str="UTC")
+    user_b = TgUser.objects.create(tg_user_id=2104, tg_chat_id=2104, timezone_str="UTC")
+    Report.objects.create(
+        user=user_a,
+        period_start=datetime(2026, 3, 20, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 21, 0, 0, tzinfo=UTC),
+        status="sent",
+        payload={
+            "sections": [
+                {
+                    "platform": Platform.YOUTUBE,
+                    "items": [
+                        {
+                            "platform": Platform.YOUTUBE,
+                            "video_id": "shared-video-id",
+                            "url": "https://www.youtube.com/watch?v=shared-video-id",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    candidate_for_user_b = _scored_item_for_history_test(video_id="shared-video-id", user=user_b)
+
+    filtered = report_pipeline._exclude_previously_reported_items(user=user_b, scored=[candidate_for_user_b])
+
+    assert [item.content_item.external_id for item in filtered] == ["shared-video-id"]
+
+
+def test_exclude_previously_reported_items_keeps_unseen_youtube_video(db):
+    user = TgUser.objects.create(tg_user_id=2105, tg_chat_id=2105, timezone_str="UTC")
+    Report.objects.create(
+        user=user,
+        period_start=datetime(2026, 3, 20, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 21, 0, 0, tzinfo=UTC),
+        status="sent",
+        payload={
+            "sections": [
+                {
+                    "platform": Platform.YOUTUBE,
+                    "items": [
+                        {
+                            "platform": Platform.YOUTUBE,
+                            "video_id": "old-video-id",
+                            "url": "https://www.youtube.com/watch?v=old-video-id",
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+    unseen = _scored_item_for_history_test(video_id="fresh-video-id", user=user)
+
+    filtered = report_pipeline._exclude_previously_reported_items(user=user, scored=[unseen])
+
+    assert [item.content_item.external_id for item in filtered] == ["fresh-video-id"]
