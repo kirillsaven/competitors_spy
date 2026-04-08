@@ -19,14 +19,16 @@ from botapp.callback_safety import (
 )
 from botapp.db import db_call, db_run
 from botapp.keyboards import GLOBAL_BACK_CALLBACK, kb_manage_stopwords
+from botapp.picker_callback import (
+    handle_picker_page_callback,
+    handle_picker_select_all_callback,
+    handle_picker_toggle_callback,
+)
 from botapp.picker_open import PreparedPickerOpen, open_picker_with_cache
 from botapp.picker_session import (
     PickerSessionKeys,
     picker_page,
-    picker_select_all,
     picker_selected_set,
-    picker_set_page,
-    picker_toggle_selection,
 )
 from botapp.state import StopwordManagementStates
 from botapp.user_sync import upsert_tg_user
@@ -401,79 +403,50 @@ async def on_back(cb: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(StopwordManagementStates.PICK_STOPWORDS_ADD, F.data.startswith("stopadd_page:"))
 async def on_add_page(cb: CallbackQuery, state: FSMContext) -> None:
-    started_at = callback_started()
-    ack = await safe_callback_ack(cb, callback_type="stopadd_page", logger=logger, started_at=started_at)
-    if not cb.message:
-        return
     try:
         requested_page = int(str(cb.data).split(":", 1)[1])
     except Exception:
         return
-    data = await state.get_data()
-    suggestions = [str(item) for item in (data.get("stopword_add_candidates") or []) if str(item).strip()]
-    page_before, _ = await picker_set_page(
-        state,
-        data,
-        keys=_ADD_PICKER_SESSION_KEYS,
+    await handle_picker_page_callback(
+        cb=cb,
+        state=state,
+        logger=logger,
+        callback_type="stopadd_page",
+        session_keys=_ADD_PICKER_SESSION_KEYS,
         requested_page=requested_page,
-        total=len(suggestions),
+        total_count=lambda data: len([str(item) for item in (data.get("stopword_add_candidates") or []) if str(item).strip()]),
         page_size=_PAGE_SIZE,
-    )
-    await _render_add_picker(
-        cb.message,
-        state,
-        data=data,
-        edit_mode="markup",
-        callback_info={"ack": ack, "page_before": page_before},
+        render=_render_add_picker,
     )
 
 
 @router.callback_query(StopwordManagementStates.PICK_STOPWORDS_ADD, F.data.startswith("stopadd_toggle:"))
 async def on_add_toggle(cb: CallbackQuery, state: FSMContext) -> None:
-    started_at = callback_started()
-    ack = await safe_callback_ack(cb, callback_type="stopadd_toggle", logger=logger, started_at=started_at)
-    if not cb.message:
-        return
     try:
         idx = int(str(cb.data).split(":", 1)[1])
     except Exception:
         return
-    data = await state.get_data()
-    page_before, _ = await picker_toggle_selection(
-        state,
-        data,
-        keys=_ADD_PICKER_SESSION_KEYS,
+    await handle_picker_toggle_callback(
+        cb=cb,
+        state=state,
+        logger=logger,
+        callback_type="stopadd_toggle",
+        session_keys=_ADD_PICKER_SESSION_KEYS,
         item_id=idx,
-    )
-    await _render_add_picker(
-        cb.message,
-        state,
-        data=data,
-        edit_mode="markup",
-        callback_info={"ack": ack, "page_before": page_before},
+        render=_render_add_picker,
     )
 
 
 @router.callback_query(StopwordManagementStates.PICK_STOPWORDS_ADD, F.data == "stopadd_all")
 async def on_add_all(cb: CallbackQuery, state: FSMContext) -> None:
-    started_at = callback_started()
-    ack = await safe_callback_ack(cb, callback_type="stopadd_all", logger=logger, started_at=started_at)
-    if not cb.message:
-        return
-    data = await state.get_data()
-    suggestions = list(data.get("stopword_add_candidates") or [])
-    page_before, _ = await picker_select_all(
-        state,
-        data,
-        keys=_ADD_PICKER_SESSION_KEYS,
-        selected_ids=range(len(suggestions)),
-    )
-    await _render_add_picker(
-        cb.message,
-        state,
-        data=data,
-        edit_mode="markup",
-        callback_info={"ack": ack, "page_before": page_before},
+    await handle_picker_select_all_callback(
+        cb=cb,
+        state=state,
+        logger=logger,
+        callback_type="stopadd_all",
+        session_keys=_ADD_PICKER_SESSION_KEYS,
+        selected_ids=lambda data: range(len(list(data.get("stopword_add_candidates") or []))),
+        render=_render_add_picker,
     )
 
 
@@ -534,79 +507,50 @@ async def on_add_done(cb: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(StopwordManagementStates.PICK_STOPWORDS_REMOVE, F.data.startswith("stoprem_page:"))
 async def on_remove_page(cb: CallbackQuery, state: FSMContext) -> None:
-    started_at = callback_started()
-    ack = await safe_callback_ack(cb, callback_type="stoprem_page", logger=logger, started_at=started_at)
-    if not cb.message:
-        return
     try:
         requested_page = int(str(cb.data).split(":", 1)[1])
     except Exception:
         return
-    data = await state.get_data()
-    stopword_items = [str(item) for item in (data.get("stopword_remove_items") or []) if str(item).strip()]
-    page_before, _ = await picker_set_page(
-        state,
-        data,
-        keys=_REMOVE_PICKER_SESSION_KEYS,
+    await handle_picker_page_callback(
+        cb=cb,
+        state=state,
+        logger=logger,
+        callback_type="stoprem_page",
+        session_keys=_REMOVE_PICKER_SESSION_KEYS,
         requested_page=requested_page,
-        total=len(stopword_items),
+        total_count=lambda data: len([str(item) for item in (data.get("stopword_remove_items") or []) if str(item).strip()]),
         page_size=_PAGE_SIZE,
-    )
-    await _render_remove_picker(
-        cb.message,
-        state,
-        data=data,
-        edit_mode="markup",
-        callback_info={"ack": ack, "page_before": page_before},
+        render=_render_remove_picker,
     )
 
 
 @router.callback_query(StopwordManagementStates.PICK_STOPWORDS_REMOVE, F.data.startswith("stoprem_toggle:"))
 async def on_remove_toggle(cb: CallbackQuery, state: FSMContext) -> None:
-    started_at = callback_started()
-    ack = await safe_callback_ack(cb, callback_type="stoprem_toggle", logger=logger, started_at=started_at)
-    if not cb.message:
-        return
     try:
         idx = int(str(cb.data).split(":", 1)[1])
     except Exception:
         return
-    data = await state.get_data()
-    page_before, _ = await picker_toggle_selection(
-        state,
-        data,
-        keys=_REMOVE_PICKER_SESSION_KEYS,
+    await handle_picker_toggle_callback(
+        cb=cb,
+        state=state,
+        logger=logger,
+        callback_type="stoprem_toggle",
+        session_keys=_REMOVE_PICKER_SESSION_KEYS,
         item_id=idx,
-    )
-    await _render_remove_picker(
-        cb.message,
-        state,
-        data=data,
-        edit_mode="markup",
-        callback_info={"ack": ack, "page_before": page_before},
+        render=_render_remove_picker,
     )
 
 
 @router.callback_query(StopwordManagementStates.PICK_STOPWORDS_REMOVE, F.data == "stoprem_all")
 async def on_remove_all(cb: CallbackQuery, state: FSMContext) -> None:
-    started_at = callback_started()
-    ack = await safe_callback_ack(cb, callback_type="stoprem_all", logger=logger, started_at=started_at)
-    if not cb.message:
-        return
-    data = await state.get_data()
-    current = list(data.get("stopword_remove_items") or [])
-    page_before, _ = await picker_select_all(
-        state,
-        data,
-        keys=_REMOVE_PICKER_SESSION_KEYS,
-        selected_ids=range(len(current)),
-    )
-    await _render_remove_picker(
-        cb.message,
-        state,
-        data=data,
-        edit_mode="markup",
-        callback_info={"ack": ack, "page_before": page_before},
+    await handle_picker_select_all_callback(
+        cb=cb,
+        state=state,
+        logger=logger,
+        callback_type="stoprem_all",
+        session_keys=_REMOVE_PICKER_SESSION_KEYS,
+        selected_ids=lambda data: range(len(list(data.get("stopword_remove_items") or []))),
+        render=_render_remove_picker,
     )
 
 

@@ -20,14 +20,16 @@ from botapp.callback_safety import (
 )
 from botapp.db import db_call, db_run
 from botapp.keyboards import GLOBAL_BACK_CALLBACK, kb_manage_competitors
+from botapp.picker_callback import (
+    handle_picker_page_callback,
+    handle_picker_select_all_callback,
+    handle_picker_toggle_callback,
+)
 from botapp.picker_open import PreparedPickerOpen, open_picker_with_cache
 from botapp.picker_session import (
     PickerSessionKeys,
     picker_page,
-    picker_select_all,
     picker_selected_set,
-    picker_set_page,
-    picker_toggle_selection,
 )
 from botapp.state import CompetitorManagementStates
 from botapp.user_sync import upsert_tg_user
@@ -874,88 +876,50 @@ async def on_back(cb: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_ADD, F.data.startswith("compadd_page:"))
 async def on_add_page(cb: CallbackQuery, state: FSMContext) -> None:
-    started_at = callback_started()
-    ack = await safe_callback_ack(cb, callback_type="compadd_page", logger=logger, started_at=started_at)
-    if not cb.message:
-        return
     try:
         requested_page = int(str(cb.data).split(":", 1)[1])
     except Exception:
         return
-    data = await state.get_data()
-    candidates = list(data.get("competitor_add_candidates") or [])
-    page_before, _ = await picker_set_page(
-        state,
-        data,
-        keys=_ADD_PICKER_SESSION_KEYS,
+    await handle_picker_page_callback(
+        cb=cb,
+        state=state,
+        logger=logger,
+        callback_type="compadd_page",
+        session_keys=_ADD_PICKER_SESSION_KEYS,
         requested_page=requested_page,
-        total=len(candidates),
+        total_count=lambda data: len(list(data.get("competitor_add_candidates") or [])),
         page_size=_PAGE_SIZE,
-    )
-    await _render_add_picker(
-        cb.message,
-        state,
-        data=data,
-        edit_mode="markup",
-        callback_info={
-            "ack": ack,
-            "page_before": page_before,
-        },
+        render=_render_add_picker,
     )
 
 
 @router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_ADD, F.data.startswith("compadd_toggle:"))
 async def on_add_toggle(cb: CallbackQuery, state: FSMContext) -> None:
-    started_at = callback_started()
-    ack = await safe_callback_ack(cb, callback_type="compadd_toggle", logger=logger, started_at=started_at)
-    if not cb.message:
-        return
     try:
         idx = int(str(cb.data).split(":", 1)[1])
     except Exception:
         return
-    data = await state.get_data()
-    page_before, _ = await picker_toggle_selection(
-        state,
-        data,
-        keys=_ADD_PICKER_SESSION_KEYS,
+    await handle_picker_toggle_callback(
+        cb=cb,
+        state=state,
+        logger=logger,
+        callback_type="compadd_toggle",
+        session_keys=_ADD_PICKER_SESSION_KEYS,
         item_id=idx,
-    )
-    await _render_add_picker(
-        cb.message,
-        state,
-        data=data,
-        edit_mode="markup",
-        callback_info={
-            "ack": ack,
-            "page_before": page_before,
-        },
+        render=_render_add_picker,
     )
 
 
 @router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_ADD, F.data == "compadd_all")
 async def on_add_all(cb: CallbackQuery, state: FSMContext) -> None:
-    started_at = callback_started()
-    ack = await safe_callback_ack(cb, callback_type="compadd_all", logger=logger, started_at=started_at)
-    if not cb.message:
-        return
-    data = await state.get_data()
-    candidates = list(data.get("competitor_add_candidates") or [])
-    page_before, _ = await picker_select_all(
-        state,
-        data,
-        keys=_ADD_PICKER_SESSION_KEYS,
-        selected_ids=range(len(candidates)),
-    )
-    await _render_add_picker(
-        cb.message,
-        state,
-        data=data,
-        edit_mode="markup",
-        callback_info={
-            "ack": ack,
-            "page_before": page_before,
-        },
+    await handle_picker_select_all_callback(
+        cb=cb,
+        state=state,
+        logger=logger,
+        callback_type="compadd_all",
+        session_keys=_ADD_PICKER_SESSION_KEYS,
+        selected_ids=lambda data: range(len(list(data.get("competitor_add_candidates") or []))),
+        render=_render_add_picker,
     )
 
 
@@ -1036,94 +1000,57 @@ async def on_add_done(cb: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_REMOVE, F.data.startswith("comprem_page:"))
 async def on_remove_page(cb: CallbackQuery, state: FSMContext) -> None:
-    started_at = callback_started()
-    ack = await safe_callback_ack(cb, callback_type="comprem_page", logger=logger, started_at=started_at)
-    if not cb.message:
-        return
     try:
         requested_page = int(str(cb.data).split(":", 1)[1])
     except Exception:
         return
-    data = await state.get_data()
-    rows = _picker_rows_from_state(data.get("competitor_remove_picker_rows"))
-    if not rows:
-        rows = _picker_rows_from_state(_make_remove_picker_rows(list(data.get("competitor_remove_rows") or [])))
-    page_before, _ = await picker_set_page(
-        state,
-        data,
-        keys=_REMOVE_PICKER_SESSION_KEYS,
+    await handle_picker_page_callback(
+        cb=cb,
+        state=state,
+        logger=logger,
+        callback_type="comprem_page",
+        session_keys=_REMOVE_PICKER_SESSION_KEYS,
         requested_page=requested_page,
-        total=len(rows),
+        total_count=lambda data: len(
+            _picker_rows_from_state(data.get("competitor_remove_picker_rows"))
+            or _picker_rows_from_state(_make_remove_picker_rows(list(data.get("competitor_remove_rows") or [])))
+        ),
         page_size=_PAGE_SIZE,
-    )
-    await _render_remove_picker(
-        cb.message,
-        state,
-        data=data,
-        edit_mode="markup",
-        callback_info={
-            "ack": ack,
-            "page_before": page_before,
-        },
+        render=_render_remove_picker,
     )
 
 
 @router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_REMOVE, F.data.startswith("comprem_toggle:"))
 async def on_remove_toggle(cb: CallbackQuery, state: FSMContext) -> None:
-    started_at = callback_started()
-    ack = await safe_callback_ack(cb, callback_type="comprem_toggle", logger=logger, started_at=started_at)
-    if not cb.message:
-        return
     try:
         competitor_id = int(str(cb.data).split(":", 1)[1])
     except Exception:
         return
-    data = await state.get_data()
-    page_before, _ = await picker_toggle_selection(
-        state,
-        data,
-        keys=_REMOVE_PICKER_SESSION_KEYS,
+    await handle_picker_toggle_callback(
+        cb=cb,
+        state=state,
+        logger=logger,
+        callback_type="comprem_toggle",
+        session_keys=_REMOVE_PICKER_SESSION_KEYS,
         item_id=competitor_id,
-    )
-    await _render_remove_picker(
-        cb.message,
-        state,
-        data=data,
-        edit_mode="markup",
-        callback_info={
-            "ack": ack,
-            "page_before": page_before,
-        },
+        render=_render_remove_picker,
     )
 
 
 @router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_REMOVE, F.data == "comprem_all")
 async def on_remove_all(cb: CallbackQuery, state: FSMContext) -> None:
-    started_at = callback_started()
-    ack = await safe_callback_ack(cb, callback_type="comprem_all", logger=logger, started_at=started_at)
-    if not cb.message:
-        return
-    data = await state.get_data()
-    rows = list(data.get("competitor_remove_rows") or [])
-    page_before, _ = await picker_select_all(
-        state,
-        data,
-        keys=_REMOVE_PICKER_SESSION_KEYS,
-        selected_ids=[
+    await handle_picker_select_all_callback(
+        cb=cb,
+        state=state,
+        logger=logger,
+        callback_type="comprem_all",
+        session_keys=_REMOVE_PICKER_SESSION_KEYS,
+        selected_ids=lambda data: [
             int(row.get("competitor_id") or 0)
-            for row in rows
+            for row in list(data.get("competitor_remove_rows") or [])
             if int(row.get("competitor_id") or 0) > 0
         ],
-    )
-    await _render_remove_picker(
-        cb.message,
-        state,
-        data=data,
-        edit_mode="markup",
-        callback_info={
-            "ack": ack,
-            "page_before": page_before,
-        },
+        render=_render_remove_picker,
     )
 
 
