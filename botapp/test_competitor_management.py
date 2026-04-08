@@ -9,8 +9,9 @@ from asgiref.sync import async_to_sync, sync_to_async
 from botapp.handlers import common, competitors
 from botapp.state import CompetitorManagementStates
 from tracking.adapters.base import SeedResolution
-from tracking.models import Competitor, Platform, Report, Schedule, TgUser, UserCompetitor
+from tracking.models import Competitor, Platform, Report, Schedule, SeedProfile, SeedStatus, TgUser, UserCompetitor
 from tracking.services import report_pipeline, suggested_competitors
+from tracking.services.setup_retry_cache import clear_retry_cache
 
 
 class DummyState:
@@ -104,6 +105,17 @@ def _button_texts(markup) -> list[str]:
     return [button.text for row in markup.inline_keyboard for button in row]
 
 
+def _create_resolved_seed_profile(*, user: TgUser, raw_input: str = "@creator", canonical_url: str = "https://www.youtube.com/@creator", keywords: list[str] | None = None):
+    return async_to_sync(sync_to_async(SeedProfile.objects.create, thread_sensitive=True))(
+        user=user,
+        raw_input=raw_input,
+        canonical_url=canonical_url,
+        niche_keywords=list(keywords or ["finance"]),
+        status=SeedStatus.RESOLVED,
+        detected_platform=Platform.YOUTUBE,
+    )
+
+
 @pytest.mark.django_db
 def test_start_and_help_commands_describe_manual_add_and_suggestions(monkeypatch):
     monkeypatch.setattr(common, "db_call", _db_call)
@@ -177,9 +189,9 @@ def test_competitors_suggest_reactivates_from_picker(monkeypatch):
     monkeypatch.setattr(competitors, "db_run", _db_run)
     monkeypatch.setattr(
         competitors,
-        "_load_add_candidates_for_user",
-        lambda **kwargs: (
-            [
+        "_load_add_candidates_for_user_cached",
+        lambda **kwargs: competitors.AddCandidateLoadResult(
+            candidates=[
                 {
                     "platform": Platform.YOUTUBE,
                     "external_id": "yt-creator",
@@ -190,7 +202,9 @@ def test_competitors_suggest_reactivates_from_picker(monkeypatch):
                     "meta": {},
                 }
             ],
-            [],
+            notes=[],
+            cache_hit=False,
+            discovery_build_ms=0.0,
         ),
     )
 
@@ -215,6 +229,91 @@ def test_competitors_suggest_reactivates_from_picker(monkeypatch):
     assert "Пропущено: 0" in message.answers[-1]
     assert "Ошибки: 0" in message.answers[-1]
     assert "YouTube: 1" in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_competitors_suggest_second_open_reuses_cache(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=121, tg_chat_id=121)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+    _create_resolved_seed_profile(user=user, raw_input="@cached", canonical_url="https://www.youtube.com/@cached")
+
+    calls = {"count": 0}
+
+    def fake_load(*, user):
+        calls["count"] += 1
+        return (
+            [
+                {
+                    "platform": Platform.YOUTUBE,
+                    "external_id": "yt-cached",
+                    "handle": "cached",
+                    "url": "https://www.youtube.com/@cached",
+                    "display_name": "Cached",
+                    "added_by": "auto",
+                    "meta": {},
+                }
+            ],
+            ["note"],
+        )
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+    monkeypatch.setattr(competitors, "_load_add_candidates_for_user", fake_load)
+    clear_retry_cache()
+
+    first = competitors._load_add_candidates_for_user_cached(user=user)
+    second = competitors._load_add_candidates_for_user_cached(user=user)
+
+    assert calls["count"] == 1
+    assert first.cache_hit is False
+    assert second.cache_hit is True
+    assert first.candidates == second.candidates
+    assert first.notes == second.notes
+    clear_retry_cache()
+
+
+@pytest.mark.django_db
+def test_competitors_suggest_cache_invalidates_when_seed_changes(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=122, tg_chat_id=122)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+    _create_resolved_seed_profile(user=user, raw_input="@first", canonical_url="https://www.youtube.com/@first", keywords=["alpha"])
+
+    calls = {"count": 0}
+
+    def fake_load(*, user):
+        calls["count"] += 1
+        return (
+            [
+                {
+                    "platform": Platform.YOUTUBE,
+                    "external_id": f"yt-cached-{calls['count']}",
+                    "handle": f"cached_{calls['count']}",
+                    "url": f"https://www.youtube.com/@cached_{calls['count']}",
+                    "display_name": f"Cached {calls['count']}",
+                    "added_by": "auto",
+                    "meta": {},
+                }
+            ],
+            [],
+        )
+
+    monkeypatch.setattr(competitors, "_load_add_candidates_for_user", fake_load)
+    clear_retry_cache()
+
+    first = competitors._load_add_candidates_for_user_cached(user=user)
+    _create_resolved_seed_profile(
+        user=user,
+        raw_input="@second",
+        canonical_url="https://www.youtube.com/@second",
+        keywords=["beta"],
+    )
+    second = competitors._load_add_candidates_for_user_cached(user=user)
+
+    assert calls["count"] == 2
+    assert first.cache_hit is False
+    assert second.cache_hit is False
+    assert first.candidates != second.candidates
+    clear_retry_cache()
 
 
 def test_competitor_add_picker_page_forward_back_uses_markup_only():
@@ -492,9 +591,9 @@ def test_competitors_suggest_allows_add_over_twenty(monkeypatch):
     monkeypatch.setattr(competitors, "db_run", _db_run)
     monkeypatch.setattr(
         competitors,
-        "_load_add_candidates_for_user",
-        lambda **kwargs: (
-            [
+        "_load_add_candidates_for_user_cached",
+        lambda **kwargs: competitors.AddCandidateLoadResult(
+            candidates=[
                 {
                     "platform": Platform.YOUTUBE,
                     "external_id": "yt-suggest-21",
@@ -505,7 +604,9 @@ def test_competitors_suggest_allows_add_over_twenty(monkeypatch):
                     "meta": {},
                 }
             ],
-            [],
+            notes=[],
+            cache_hit=False,
+            discovery_build_ms=0.0,
         ),
     )
 
