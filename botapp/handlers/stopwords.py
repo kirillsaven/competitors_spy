@@ -20,6 +20,14 @@ from botapp.callback_safety import (
 from botapp.db import db_call, db_run
 from botapp.keyboards import GLOBAL_BACK_CALLBACK, kb_manage_stopwords
 from botapp.picker_open import PreparedPickerOpen, open_picker_with_cache
+from botapp.picker_session import (
+    PickerSessionKeys,
+    picker_page,
+    picker_select_all,
+    picker_selected_set,
+    picker_set_page,
+    picker_toggle_selection,
+)
 from botapp.state import StopwordManagementStates
 from botapp.user_sync import upsert_tg_user
 from tracking.models import TgUser
@@ -36,6 +44,14 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 _PAGE_SIZE = 10
+_ADD_PICKER_SESSION_KEYS = PickerSessionKeys(
+    page_key="stopword_add_page",
+    selected_key="stopword_add_selected_ids",
+)
+_REMOVE_PICKER_SESSION_KEYS = PickerSessionKeys(
+    page_key="stopword_remove_page",
+    selected_key="stopword_remove_selected_ids",
+)
 
 
 def _load_stopword_add_picker_snapshot_cached(*, user: TgUser):
@@ -395,10 +411,14 @@ async def on_add_page(cb: CallbackQuery, state: FSMContext) -> None:
         return
     data = await state.get_data()
     suggestions = [str(item) for item in (data.get("stopword_add_candidates") or []) if str(item).strip()]
-    page_before = int(data.get("stopword_add_page") or 0)
-    page_after = _clamp_picker_page(requested_page, total=len(suggestions), page_size=_PAGE_SIZE)
-    await state.update_data(stopword_add_page=page_after)
-    data["stopword_add_page"] = page_after
+    page_before, _ = await picker_set_page(
+        state,
+        data,
+        keys=_ADD_PICKER_SESSION_KEYS,
+        requested_page=requested_page,
+        total=len(suggestions),
+        page_size=_PAGE_SIZE,
+    )
     await _render_add_picker(
         cb.message,
         state,
@@ -419,15 +439,12 @@ async def on_add_toggle(cb: CallbackQuery, state: FSMContext) -> None:
     except Exception:
         return
     data = await state.get_data()
-    page_before = int(data.get("stopword_add_page") or 0)
-    selected = {int(item) for item in (data.get("stopword_add_selected_ids") or [])}
-    if idx in selected:
-        selected.remove(idx)
-    else:
-        selected.add(idx)
-    selected_sorted = sorted(selected)
-    await state.update_data(stopword_add_selected_ids=selected_sorted)
-    data["stopword_add_selected_ids"] = selected_sorted
+    page_before, _ = await picker_toggle_selection(
+        state,
+        data,
+        keys=_ADD_PICKER_SESSION_KEYS,
+        item_id=idx,
+    )
     await _render_add_picker(
         cb.message,
         state,
@@ -444,11 +461,13 @@ async def on_add_all(cb: CallbackQuery, state: FSMContext) -> None:
     if not cb.message:
         return
     data = await state.get_data()
-    page_before = int(data.get("stopword_add_page") or 0)
     suggestions = list(data.get("stopword_add_candidates") or [])
-    selected_ids = list(range(len(suggestions)))
-    await state.update_data(stopword_add_selected_ids=selected_ids)
-    data["stopword_add_selected_ids"] = selected_ids
+    page_before, _ = await picker_select_all(
+        state,
+        data,
+        keys=_ADD_PICKER_SESSION_KEYS,
+        selected_ids=range(len(suggestions)),
+    )
     await _render_add_picker(
         cb.message,
         state,
@@ -464,8 +483,8 @@ async def on_add_done(cb: CallbackQuery, state: FSMContext) -> None:
     if not cb.message:
         return
     data = await state.get_data()
-    page_before = int(data.get("stopword_add_page") or 0)
-    selected = {int(item) for item in (data.get("stopword_add_selected_ids") or [])}
+    page_before = picker_page(data, keys=_ADD_PICKER_SESSION_KEYS)
+    selected = picker_selected_set(data, keys=_ADD_PICKER_SESSION_KEYS)
     suggestions = [str(item) for item in (data.get("stopword_add_candidates") or []) if str(item).strip()]
     if not selected:
         ack = await safe_callback_ack(
@@ -525,10 +544,14 @@ async def on_remove_page(cb: CallbackQuery, state: FSMContext) -> None:
         return
     data = await state.get_data()
     stopword_items = [str(item) for item in (data.get("stopword_remove_items") or []) if str(item).strip()]
-    page_before = int(data.get("stopword_remove_page") or 0)
-    page_after = _clamp_picker_page(requested_page, total=len(stopword_items), page_size=_PAGE_SIZE)
-    await state.update_data(stopword_remove_page=page_after)
-    data["stopword_remove_page"] = page_after
+    page_before, _ = await picker_set_page(
+        state,
+        data,
+        keys=_REMOVE_PICKER_SESSION_KEYS,
+        requested_page=requested_page,
+        total=len(stopword_items),
+        page_size=_PAGE_SIZE,
+    )
     await _render_remove_picker(
         cb.message,
         state,
@@ -549,15 +572,12 @@ async def on_remove_toggle(cb: CallbackQuery, state: FSMContext) -> None:
     except Exception:
         return
     data = await state.get_data()
-    page_before = int(data.get("stopword_remove_page") or 0)
-    selected = {int(item) for item in (data.get("stopword_remove_selected_ids") or [])}
-    if idx in selected:
-        selected.remove(idx)
-    else:
-        selected.add(idx)
-    selected_sorted = sorted(selected)
-    await state.update_data(stopword_remove_selected_ids=selected_sorted)
-    data["stopword_remove_selected_ids"] = selected_sorted
+    page_before, _ = await picker_toggle_selection(
+        state,
+        data,
+        keys=_REMOVE_PICKER_SESSION_KEYS,
+        item_id=idx,
+    )
     await _render_remove_picker(
         cb.message,
         state,
@@ -574,11 +594,13 @@ async def on_remove_all(cb: CallbackQuery, state: FSMContext) -> None:
     if not cb.message:
         return
     data = await state.get_data()
-    page_before = int(data.get("stopword_remove_page") or 0)
     current = list(data.get("stopword_remove_items") or [])
-    selected_ids = list(range(len(current)))
-    await state.update_data(stopword_remove_selected_ids=selected_ids)
-    data["stopword_remove_selected_ids"] = selected_ids
+    page_before, _ = await picker_select_all(
+        state,
+        data,
+        keys=_REMOVE_PICKER_SESSION_KEYS,
+        selected_ids=range(len(current)),
+    )
     await _render_remove_picker(
         cb.message,
         state,
@@ -594,8 +616,8 @@ async def on_remove_done(cb: CallbackQuery, state: FSMContext) -> None:
     if not cb.message:
         return
     data = await state.get_data()
-    page_before = int(data.get("stopword_remove_page") or 0)
-    selected = {int(item) for item in (data.get("stopword_remove_selected_ids") or [])}
+    page_before = picker_page(data, keys=_REMOVE_PICKER_SESSION_KEYS)
+    selected = picker_selected_set(data, keys=_REMOVE_PICKER_SESSION_KEYS)
     current = [str(item) for item in (data.get("stopword_remove_items") or []) if str(item).strip()]
     if not selected:
         ack = await safe_callback_ack(

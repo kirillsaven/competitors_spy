@@ -21,6 +21,14 @@ from botapp.callback_safety import (
 from botapp.db import db_call, db_run
 from botapp.keyboards import GLOBAL_BACK_CALLBACK, kb_manage_competitors
 from botapp.picker_open import PreparedPickerOpen, open_picker_with_cache
+from botapp.picker_session import (
+    PickerSessionKeys,
+    picker_page,
+    picker_select_all,
+    picker_selected_set,
+    picker_set_page,
+    picker_toggle_selection,
+)
 from botapp.state import CompetitorManagementStates
 from botapp.user_sync import upsert_tg_user
 from tracking.adapters.base import SeedResolution
@@ -69,6 +77,14 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 _PAGE_SIZE = 8
+_ADD_PICKER_SESSION_KEYS = PickerSessionKeys(
+    page_key="competitor_add_page",
+    selected_key="competitor_add_selected_ids",
+)
+_REMOVE_PICKER_SESSION_KEYS = PickerSessionKeys(
+    page_key="competitor_remove_page",
+    selected_key="competitor_remove_selected_ids",
+)
 
 
 def _discovery_target_per_platform() -> int:
@@ -868,10 +884,14 @@ async def on_add_page(cb: CallbackQuery, state: FSMContext) -> None:
         return
     data = await state.get_data()
     candidates = list(data.get("competitor_add_candidates") or [])
-    page_before = int(data.get("competitor_add_page") or 0)
-    page_after = _clamp_picker_page(requested_page, total=len(candidates), page_size=_PAGE_SIZE)
-    await state.update_data(competitor_add_page=page_after)
-    data["competitor_add_page"] = page_after
+    page_before, _ = await picker_set_page(
+        state,
+        data,
+        keys=_ADD_PICKER_SESSION_KEYS,
+        requested_page=requested_page,
+        total=len(candidates),
+        page_size=_PAGE_SIZE,
+    )
     await _render_add_picker(
         cb.message,
         state,
@@ -895,15 +915,12 @@ async def on_add_toggle(cb: CallbackQuery, state: FSMContext) -> None:
     except Exception:
         return
     data = await state.get_data()
-    page_before = int(data.get("competitor_add_page") or 0)
-    selected = {int(item) for item in (data.get("competitor_add_selected_ids") or [])}
-    if idx in selected:
-        selected.remove(idx)
-    else:
-        selected.add(idx)
-    selected_sorted = sorted(selected)
-    await state.update_data(competitor_add_selected_ids=selected_sorted)
-    data["competitor_add_selected_ids"] = selected_sorted
+    page_before, _ = await picker_toggle_selection(
+        state,
+        data,
+        keys=_ADD_PICKER_SESSION_KEYS,
+        item_id=idx,
+    )
     await _render_add_picker(
         cb.message,
         state,
@@ -923,11 +940,13 @@ async def on_add_all(cb: CallbackQuery, state: FSMContext) -> None:
     if not cb.message:
         return
     data = await state.get_data()
-    page_before = int(data.get("competitor_add_page") or 0)
     candidates = list(data.get("competitor_add_candidates") or [])
-    selected_ids = list(range(len(candidates)))
-    await state.update_data(competitor_add_selected_ids=selected_ids)
-    data["competitor_add_selected_ids"] = selected_ids
+    page_before, _ = await picker_select_all(
+        state,
+        data,
+        keys=_ADD_PICKER_SESSION_KEYS,
+        selected_ids=range(len(candidates)),
+    )
     await _render_add_picker(
         cb.message,
         state,
@@ -946,8 +965,8 @@ async def on_add_done(cb: CallbackQuery, state: FSMContext) -> None:
     if not cb.message:
         return
     data = await state.get_data()
-    page_before = int(data.get("competitor_add_page") or 0)
-    selected_ids = {int(item) for item in (data.get("competitor_add_selected_ids") or [])}
+    page_before = picker_page(data, keys=_ADD_PICKER_SESSION_KEYS)
+    selected_ids = picker_selected_set(data, keys=_ADD_PICKER_SESSION_KEYS)
     candidates = list(data.get("competitor_add_candidates") or [])
     if not selected_ids:
         ack = await safe_callback_ack(
@@ -1029,10 +1048,14 @@ async def on_remove_page(cb: CallbackQuery, state: FSMContext) -> None:
     rows = _picker_rows_from_state(data.get("competitor_remove_picker_rows"))
     if not rows:
         rows = _picker_rows_from_state(_make_remove_picker_rows(list(data.get("competitor_remove_rows") or [])))
-    page_before = int(data.get("competitor_remove_page") or 0)
-    page_after = _clamp_picker_page(requested_page, total=len(rows), page_size=_PAGE_SIZE)
-    await state.update_data(competitor_remove_page=page_after)
-    data["competitor_remove_page"] = page_after
+    page_before, _ = await picker_set_page(
+        state,
+        data,
+        keys=_REMOVE_PICKER_SESSION_KEYS,
+        requested_page=requested_page,
+        total=len(rows),
+        page_size=_PAGE_SIZE,
+    )
     await _render_remove_picker(
         cb.message,
         state,
@@ -1056,15 +1079,12 @@ async def on_remove_toggle(cb: CallbackQuery, state: FSMContext) -> None:
     except Exception:
         return
     data = await state.get_data()
-    page_before = int(data.get("competitor_remove_page") or 0)
-    selected = {int(item) for item in (data.get("competitor_remove_selected_ids") or [])}
-    if competitor_id in selected:
-        selected.remove(competitor_id)
-    else:
-        selected.add(competitor_id)
-    selected_sorted = sorted(selected)
-    await state.update_data(competitor_remove_selected_ids=selected_sorted)
-    data["competitor_remove_selected_ids"] = selected_sorted
+    page_before, _ = await picker_toggle_selection(
+        state,
+        data,
+        keys=_REMOVE_PICKER_SESSION_KEYS,
+        item_id=competitor_id,
+    )
     await _render_remove_picker(
         cb.message,
         state,
@@ -1084,11 +1104,17 @@ async def on_remove_all(cb: CallbackQuery, state: FSMContext) -> None:
     if not cb.message:
         return
     data = await state.get_data()
-    page_before = int(data.get("competitor_remove_page") or 0)
     rows = list(data.get("competitor_remove_rows") or [])
-    selected = [int(row.get("competitor_id") or 0) for row in rows if int(row.get("competitor_id") or 0) > 0]
-    await state.update_data(competitor_remove_selected_ids=selected)
-    data["competitor_remove_selected_ids"] = selected
+    page_before, _ = await picker_select_all(
+        state,
+        data,
+        keys=_REMOVE_PICKER_SESSION_KEYS,
+        selected_ids=[
+            int(row.get("competitor_id") or 0)
+            for row in rows
+            if int(row.get("competitor_id") or 0) > 0
+        ],
+    )
     await _render_remove_picker(
         cb.message,
         state,
@@ -1107,8 +1133,8 @@ async def on_remove_done(cb: CallbackQuery, state: FSMContext) -> None:
     if not cb.message:
         return
     data = await state.get_data()
-    page_before = int(data.get("competitor_remove_page") or 0)
-    selected_ids = {int(item) for item in (data.get("competitor_remove_selected_ids") or [])}
+    page_before = picker_page(data, keys=_REMOVE_PICKER_SESSION_KEYS)
+    selected_ids = picker_selected_set(data, keys=_REMOVE_PICKER_SESSION_KEYS)
     if not selected_ids:
         rows = list(data.get("competitor_remove_rows") or [])
         ack = await safe_callback_ack(
