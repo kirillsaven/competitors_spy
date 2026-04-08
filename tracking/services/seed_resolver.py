@@ -4,7 +4,11 @@ from dataclasses import dataclass
 from django.conf import settings
 
 from tracking.adapters.base import SeedResolution
-from tracking.adapters.instagram import extract_handle as extract_instagram_handle, seed_from_profiles
+from tracking.adapters.instagram import (
+    extract_handle as extract_instagram_handle,
+    seed_from_profile as instagram_seed_from_profile,
+    seed_from_profiles,
+)
 from tracking.adapters.tiktok import extract_handle as extract_tiktok_handle, seed_from_feed_items
 from tracking.adapters.youtube import (
     extract_channel_id as extract_youtube_channel_id,
@@ -97,6 +101,62 @@ def _resolve_instagram_seed(raw_input: str, *, context: SetupRunContext | None =
         purpose="seed_resolution",
     )
     return seed_from_profiles(raw_input=raw_input, profiles=profiles)
+
+
+def _normalize_instagram_lookup(raw_input: str) -> tuple[str, str]:
+    lookup = str(raw_input or "").strip()
+    if not lookup:
+        return "", ""
+    if lookup.isdigit():
+        return "id", lookup
+    handle = extract_instagram_handle(lookup)
+    if handle:
+        return "handle", handle.lower()
+    return "url", lookup.rstrip("/").lower()
+
+
+def _match_instagram_profile_for_lookup(*, raw_input: str, profiles: list[dict]) -> dict | None:
+    lookup_kind, lookup_value = _normalize_instagram_lookup(raw_input)
+    if not lookup_kind:
+        return None
+    for profile in profiles:
+        username = str(profile.get("username") or "").strip().lower()
+        profile_id = str(profile.get("id") or "").strip()
+        profile_url = str(profile.get("url") or "").strip().rstrip("/").lower()
+        if lookup_kind == "id" and profile_id == lookup_value:
+            return profile
+        if lookup_kind == "handle" and username == lookup_value:
+            return profile
+        if lookup_kind == "url" and profile_url == lookup_value:
+            return profile
+        if lookup_kind == "url":
+            resolved_handle = extract_instagram_handle(raw_input)
+            if resolved_handle and username == resolved_handle.lower():
+                return profile
+    return None
+
+
+def resolve_instagram_seeds_batch(
+    raw_inputs: list[str],
+    *,
+    context: SetupRunContext | None = None,
+) -> list[SeedResolution | None]:
+    lookups = [str(item or "").strip() for item in raw_inputs]
+    sanitized_inputs = [lookup for lookup in lookups if lookup]
+    if not sanitized_inputs:
+        return []
+
+    profiles = fetch_instagram_profiles_cached(
+        inputs=sanitized_inputs,
+        context=context,
+        purpose="seed_resolution",
+    )
+
+    resolved_by_input: dict[str, SeedResolution | None] = {}
+    for lookup in sanitized_inputs:
+        matched = _match_instagram_profile_for_lookup(raw_input=lookup, profiles=profiles)
+        resolved_by_input[lookup] = instagram_seed_from_profile(matched) if matched else None
+    return [resolved_by_input.get(lookup) for lookup in sanitized_inputs]
 
 
 def candidate_platforms_for_exact_seed(raw_input: str) -> list[str]:

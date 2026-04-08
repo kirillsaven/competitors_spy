@@ -405,20 +405,22 @@ def test_competitor_add_manual_adds_instagram_share_url_with_keyword_context(mon
     monkeypatch.setattr(competitors, "db_call", _db_call)
     monkeypatch.setattr(competitors, "db_run", _db_run)
 
-    def fake_resolve_exact_seed(raw_input, *, context=None):
-        assert raw_input == "https://www.instagram.com/eng.lisaa?igsh=Ym5rMHRodGhvZ3oy"
+    def fake_resolve_instagram_seeds_batch(raw_inputs, *, context=None):
+        assert raw_inputs == ["https://www.instagram.com/eng.lisaa?igsh=Ym5rMHRodGhvZ3oy"]
         assert context is not None
-        return SeedResolution(
-            platform=Platform.INSTAGRAM,
-            external_id="ig-manual",
-            handle="eng.lisaa",
-            url="https://www.instagram.com/eng.lisaa/",
-            title="Eng Lisaa",
-            description="desc",
-            uploads_playlist_id=None,
-        )
+        return [
+            SeedResolution(
+                platform=Platform.INSTAGRAM,
+                external_id="ig-manual",
+                handle="eng.lisaa",
+                url="https://www.instagram.com/eng.lisaa/",
+                title="Eng Lisaa",
+                description="desc",
+                uploads_playlist_id=None,
+            )
+        ]
 
-    monkeypatch.setattr(competitors, "resolve_exact_seed", fake_resolve_exact_seed)
+    monkeypatch.setattr(competitors, "resolve_instagram_seeds_batch", fake_resolve_instagram_seeds_batch)
 
     state = DummyState()
     async_to_sync(state.update_data)(user_id=user.id)
@@ -435,6 +437,162 @@ def test_competitor_add_manual_adds_instagram_share_url_with_keyword_context(mon
     assert "Добавлено вручную: 1" in message.answers[-1]
     assert "Ошибки: 0" in message.answers[-1]
     assert "Instagram: 1" in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_competitor_add_manual_batches_multiple_instagram_inputs(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=228, tg_chat_id=228)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+
+    batched_calls: list[list[str]] = []
+
+    def fake_resolve_instagram_seeds_batch(raw_inputs, *, context=None):
+        assert context is not None
+        batched_calls.append(list(raw_inputs))
+        out: list[SeedResolution | None] = []
+        for idx, raw_input in enumerate(raw_inputs, start=1):
+            handle = f"batched_{idx}"
+            out.append(
+                SeedResolution(
+                    platform=Platform.INSTAGRAM,
+                    external_id=f"ig-batch-{idx}",
+                    handle=handle,
+                    url=f"https://www.instagram.com/{handle}/",
+                    title=f"IG Batch {idx}",
+                    description=raw_input,
+                    uploads_playlist_id=None,
+                )
+            )
+        return out
+
+    monkeypatch.setattr(competitors, "resolve_instagram_seeds_batch", fake_resolve_instagram_seeds_batch)
+    monkeypatch.setattr(
+        competitors,
+        "resolve_exact_seed",
+        lambda raw_input, *, context=None: pytest.fail(f"resolve_exact_seed should not run for pure IG batch: {raw_input}"),
+    )
+
+    state = DummyState()
+    async_to_sync(state.update_data)(user_id=user.id)
+    async_to_sync(state.set_state)(CompetitorManagementStates.WAIT_COMPETITORS_ADD_INPUT)
+    message = DummyMessage(
+        user_id=228,
+        text="\n".join(
+            [
+                "https://www.instagram.com/batch.one/?igsh=abc111",
+                "https://instagram.com/batch.two?igsh=abc222",
+                "https://www.instagram.com/batch.three/",
+                "https://instagram.com/batch.four?igsh=abc444",
+                "https://www.instagram.com/batch.five/?igsh=abc555",
+            ]
+        ),
+    )
+
+    async_to_sync(competitors.on_competitor_add_manual_input)(message, state)
+
+    count = async_to_sync(sync_to_async(UserCompetitor.objects.filter(user=user, is_active=True).count, thread_sensitive=True))()
+    assert state.state is None
+    assert len(batched_calls) == 1
+    assert len(batched_calls[0]) == 5
+    assert count == 5
+    assert "Проверяю профили..." in message.answers[0]
+    assert "Добавлено вручную: 5" in message.answers[-1]
+    assert "Ошибки: 0" in message.answers[-1]
+    assert "Instagram: 5" in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_competitor_add_manual_instagram_batch_mixed_success_and_failures(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=229, tg_chat_id=229)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+
+    def fake_resolve_instagram_seeds_batch(raw_inputs, *, context=None):
+        assert context is not None
+        return [
+            SeedResolution(
+                platform=Platform.INSTAGRAM,
+                external_id="ig-mixed-1",
+                handle="mixed_1",
+                url="https://www.instagram.com/mixed_1/",
+                title="Mixed 1",
+                description=None,
+                uploads_playlist_id=None,
+            ),
+            None,
+            SeedResolution(
+                platform=Platform.INSTAGRAM,
+                external_id="ig-mixed-3",
+                handle="mixed_3",
+                url="https://www.instagram.com/mixed_3/",
+                title="Mixed 3",
+                description=None,
+                uploads_playlist_id=None,
+            ),
+            None,
+        ]
+
+    monkeypatch.setattr(competitors, "resolve_instagram_seeds_batch", fake_resolve_instagram_seeds_batch)
+    monkeypatch.setattr(
+        competitors,
+        "resolve_exact_seed",
+        lambda raw_input, *, context=None: pytest.fail(f"resolve_exact_seed should not run for pure IG batch: {raw_input}"),
+    )
+
+    state = DummyState()
+    async_to_sync(state.update_data)(user_id=user.id)
+    async_to_sync(state.set_state)(CompetitorManagementStates.WAIT_COMPETITORS_ADD_INPUT)
+    message = DummyMessage(
+        user_id=229,
+        text="\n".join(
+            [
+                "https://www.instagram.com/mixed.one/?igsh=1",
+                "https://www.instagram.com/mixed.two/?igsh=2",
+                "https://www.instagram.com/mixed.three/?igsh=3",
+                "https://www.instagram.com/mixed.four/?igsh=4",
+            ]
+        ),
+    )
+
+    async_to_sync(competitors.on_competitor_add_manual_input)(message, state)
+
+    count = async_to_sync(sync_to_async(UserCompetitor.objects.filter(user=user, is_active=True).count, thread_sensitive=True))()
+    assert state.state is None
+    assert count == 2
+    assert "Добавлено вручную: 2" in message.answers[-1]
+    assert "Ошибки: 2" in message.answers[-1]
+    assert "Instagram: 2" in message.answers[-1]
+    assert "https://www.instagram.com/mixed.two/?igsh=2: не смог подтвердить профиль" in message.answers[-1]
+    assert "https://www.instagram.com/mixed.four/?igsh=4: не смог подтвердить профиль" in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_competitor_add_manual_shows_visible_failure_message_on_unexpected_exception(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=230, tg_chat_id=230)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+
+    async def failing_db_run(func, *args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(competitors, "db_run", failing_db_run)
+
+    state = DummyState()
+    async_to_sync(state.update_data)(user_id=user.id)
+    async_to_sync(state.set_state)(CompetitorManagementStates.WAIT_COMPETITORS_ADD_INPUT)
+    message = DummyMessage(user_id=230, text="https://www.instagram.com/failure.case/?igsh=fail")
+
+    async_to_sync(competitors.on_competitor_add_manual_input)(message, state)
+
+    assert state.state is None
+    assert "Проверяю профили..." in message.answers[0]
+    assert "Не удалось обработать список профилей. Попробуй еще раз позже." in message.answers[-1]
 
 
 @pytest.mark.django_db

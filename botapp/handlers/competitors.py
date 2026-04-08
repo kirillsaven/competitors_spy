@@ -36,7 +36,11 @@ from tracking.services.competitor_service import (
 )
 from tracking.services.platform_onboarding import discover_competitors_for_onboarding
 from tracking.services.platform_onboarding import youtube_profile_recent_shorts_gate_status
-from tracking.services.seed_resolver import resolve_exact_seed
+from tracking.services.seed_resolver import (
+    candidate_platforms_for_exact_seed,
+    resolve_exact_seed,
+    resolve_instagram_seeds_batch,
+)
 from tracking.services.suggested_competitors import (
     activate_youtube_suggested_competitor,
     record_youtube_suggested_competitor_acceptance,
@@ -784,61 +788,103 @@ async def on_competitor_add_manual_input(message: Message, state: FSMContext) ->
     if not raw_inputs:
         await message.answer("Не увидел ни одной ссылки или хэндла. Отправь хотя бы один профиль.")
         return
+    await message.answer("Проверяю профили...")
 
-    counts = await db_run(lambda: get_active_user_competitor_counts(user=user))
-    added = 0
-    errors: list[str] = []
-    context = SetupRunContext()
+    try:
+        counts = await db_run(lambda: get_active_user_competitor_counts(user=user))
+        added = 0
+        errors: list[str] = []
+        context = SetupRunContext()
 
-    for raw_input in raw_inputs:
-        try:
-            seed = await asyncio.to_thread(resolve_exact_seed, raw_input, context=context)
-        except Exception as exc:
-            errors.append(f"{raw_input}: не смог подтвердить профиль ({exc})")
-            continue
-        if seed is None:
-            errors.append(f"{raw_input}: не смог подтвердить профиль")
-            continue
-        if seed.platform == Platform.YOUTUBE:
-            passes_gate, recent_count = await asyncio.to_thread(
-                youtube_profile_recent_shorts_gate_status,
-                external_id=seed.external_id,
-                handle=seed.handle,
-                url=seed.url,
-                display_name=seed.title,
-                context=context,
-            )
-            if not passes_gate:
-                errors.append(
-                    f"{seed.title or seed.external_id}: YouTube-канал не прошел фильтр активности "
-                    f"(shorts за 60 дней: {recent_count}, нужно минимум 2)"
+        resolved: list[tuple[str, SeedResolution | None]] = [(raw_input, None) for raw_input in raw_inputs]
+        failed_resolution_indexes: set[int] = set()
+        instagram_batch_indexes: list[int] = []
+        instagram_batch_inputs: list[str] = []
+        for idx, raw_input in enumerate(raw_inputs):
+            if candidate_platforms_for_exact_seed(raw_input) == [Platform.INSTAGRAM]:
+                instagram_batch_indexes.append(idx)
+                instagram_batch_inputs.append(raw_input)
+        instagram_batch_index_set = set(instagram_batch_indexes)
+
+        if instagram_batch_inputs:
+            try:
+                instagram_seeds = await asyncio.to_thread(
+                    resolve_instagram_seeds_batch,
+                    instagram_batch_inputs,
+                    context=context,
                 )
-                continue
-        await db_call(
-            upsert_competitor,
-            user=user,
-            platform=seed.platform,
-            external_id=seed.external_id,
-            handle=seed.handle,
-            url=seed.url,
-            display_name=seed.title,
-            added_by=AddedBy.MANUAL,
-            meta=_seed_meta(seed),
-        )
-        counts[seed.platform] = counts.get(seed.platform, 0) + 1
-        added += 1
+            except Exception as exc:
+                for idx in instagram_batch_indexes:
+                    raw_input = raw_inputs[idx]
+                    errors.append(f"{raw_input}: не смог подтвердить профиль ({exc})")
+                    failed_resolution_indexes.add(idx)
+            else:
+                for idx, seed in zip(instagram_batch_indexes, instagram_seeds):
+                    resolved[idx] = (raw_inputs[idx], seed)
 
-    skipped = max(0, len(raw_inputs) - added - len(errors))
-    await state.clear()
-    await message.answer(
-        _build_add_remove_summary(
-            action="Добавлено вручную",
-            changed=added,
-            skipped=skipped,
-            errors=errors,
-            counts=counts,
+        for idx, raw_input in enumerate(raw_inputs):
+            if idx in instagram_batch_index_set:
+                continue
+            try:
+                seed = await asyncio.to_thread(resolve_exact_seed, raw_input, context=context)
+            except Exception as exc:
+                errors.append(f"{raw_input}: не смог подтвердить профиль ({exc})")
+                failed_resolution_indexes.add(idx)
+                continue
+            resolved[idx] = (raw_input, seed)
+
+        for idx, (raw_input, seed) in enumerate(resolved):
+            if seed is None:
+                if idx not in failed_resolution_indexes:
+                    errors.append(f"{raw_input}: не смог подтвердить профиль")
+                continue
+            try:
+                if seed.platform == Platform.YOUTUBE:
+                    passes_gate, recent_count = await asyncio.to_thread(
+                        youtube_profile_recent_shorts_gate_status,
+                        external_id=seed.external_id,
+                        handle=seed.handle,
+                        url=seed.url,
+                        display_name=seed.title,
+                        context=context,
+                    )
+                    if not passes_gate:
+                        errors.append(
+                            f"{seed.title or seed.external_id}: YouTube-канал не прошел фильтр активности "
+                            f"(shorts за 60 дней: {recent_count}, нужно минимум 2)"
+                        )
+                        continue
+                await db_call(
+                    upsert_competitor,
+                    user=user,
+                    platform=seed.platform,
+                    external_id=seed.external_id,
+                    handle=seed.handle,
+                    url=seed.url,
+                    display_name=seed.title,
+                    added_by=AddedBy.MANUAL,
+                    meta=_seed_meta(seed),
+                )
+                counts[seed.platform] = counts.get(seed.platform, 0) + 1
+                added += 1
+            except Exception as exc:
+                errors.append(f"{raw_input}: не смог добавить профиль ({exc})")
+
+        skipped = max(0, len(raw_inputs) - added - len(errors))
+        await message.answer(
+            _build_add_remove_summary(
+                action="Добавлено вручную",
+                changed=added,
+                skipped=skipped,
+                errors=errors,
+                counts=counts,
+            )
         )
-    )
+    except Exception:
+        logger.exception("manual_competitor_add_failed user_id=%s", data.get("user_id"))
+        await message.answer("Не удалось обработать список профилей. Попробуй еще раз позже.")
+    finally:
+        await state.clear()
 
 
 def _build_add_remove_summary(

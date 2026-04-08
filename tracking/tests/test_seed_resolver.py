@@ -100,3 +100,45 @@ def test_resolve_exact_seed_surfaces_provider_errors(monkeypatch):
 
     with pytest.raises(seed_resolver.SeedResolveError, match="TIKTOK_PROVIDER_ACCESS_TOKEN is not set"):
         seed_resolver.resolve_exact_seed("https://www.tiktok.com/@apifytech")
+
+
+def test_resolve_instagram_seeds_batch_keeps_input_order_and_missing_entries(monkeypatch):
+    calls: list[list[str]] = []
+
+    def fake_fetch_instagram_profiles_cached(*, inputs, context=None, purpose=None):
+        calls.append(list(inputs))
+        return [
+            {
+                "id": "ig-1",
+                "username": "eng.lisaa",
+                "url": "https://www.instagram.com/eng.lisaa/",
+                "fullName": "Eng Lisaa",
+                "biography": "Teacher",
+            },
+            {
+                "id": "ig-3",
+                "username": "physics.world",
+                "url": "https://www.instagram.com/physics.world/",
+                "fullName": "Physics World",
+                "biography": "Physics",
+            },
+        ]
+
+    monkeypatch.setattr(seed_resolver, "fetch_instagram_profiles_cached", fake_fetch_instagram_profiles_cached)
+
+    resolved = seed_resolver.resolve_instagram_seeds_batch(
+        [
+            "https://www.instagram.com/eng.lisaa/?igsh=abc111",
+            "https://www.instagram.com/missing.account/?igsh=abc222",
+            "https://www.instagram.com/physics.world/",
+        ]
+    )
+
+    assert calls == [
+        [
+            "https://www.instagram.com/eng.lisaa/?igsh=abc111",
+            "https://www.instagram.com/missing.account/?igsh=abc222",
+            "https://www.instagram.com/physics.world/",
+        ]
+    ]
+    assert [item.handle if item else None for item in resolved] == ["eng.lisaa", None, "physics.world"]
