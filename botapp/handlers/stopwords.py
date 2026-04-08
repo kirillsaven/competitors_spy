@@ -26,6 +26,8 @@ from tracking.models import TgUser
 from tracking.services.picker_snapshot_cache import (
     load_stopword_add_picker_snapshot,
     load_stopword_remove_picker_snapshot,
+    peek_stopword_add_picker_snapshot,
+    peek_stopword_remove_picker_snapshot,
 )
 from tracking.services.report_filters import get_user_report_stopwords
 from tracking.services.stopword_suggestions import build_user_stopword_suggestions
@@ -40,8 +42,16 @@ def _load_stopword_add_picker_snapshot_cached(*, user: TgUser):
     return load_stopword_add_picker_snapshot(user=user, builder=build_user_stopword_suggestions)
 
 
+def _peek_stopword_add_picker_snapshot_cached(*, user: TgUser):
+    return peek_stopword_add_picker_snapshot(user=user)
+
+
 def _load_stopword_remove_picker_snapshot_cached(*, user: TgUser):
     return load_stopword_remove_picker_snapshot(user=user)
+
+
+def _peek_stopword_remove_picker_snapshot_cached(*, user: TgUser):
+    return peek_stopword_remove_picker_snapshot(user=user)
 
 
 def _save_user_stopwords(*, user: TgUser, stopwords: list[str]) -> None:
@@ -119,6 +129,25 @@ async def _render_add_picker(
     callback_info: dict | None = None,
 ) -> None:
     data = data if data is not None else await state.get_data()
+    text, kb, keyboard_render_ms, metrics, row_count = _build_add_picker_view(data)
+    edit = await safe_edit_message(message, text=text, reply_markup=kb, edit_mode=edit_mode)
+    if edit.failure_reason:
+        logger.warning("stopword_add_picker_render_failed edit_path=%s error=%s", edit.path, edit.failure_reason)
+    if callback_info:
+        _log_picker_callback(
+            ack=callback_info["ack"],
+            edit=edit,
+            page_before=int(callback_info.get("page_before") or 0),
+            page_after=int(data.get("stopword_add_page") or 0),
+            candidate_count=row_count,
+            keyboard_render_ms=keyboard_render_ms,
+            status="failure" if edit.failure_reason else "success",
+            rows_count=metrics.rows_count,
+            rendered_button_count=metrics.rendered_button_count,
+        )
+
+
+def _build_add_picker_view(data: dict) -> tuple[str, object, float, object, int]:
     suggestions = [str(item) for item in (data.get("stopword_add_candidates") or []) if str(item).strip()]
     selected = {int(item) for item in (data.get("stopword_add_selected_ids") or [])}
     page = _clamp_picker_page(int(data.get("stopword_add_page") or 0), total=len(suggestions), page_size=_PAGE_SIZE)
@@ -139,21 +168,8 @@ async def _render_add_picker(
     )
     keyboard_render_ms = (callback_started() - keyboard_started) * 1000
     metrics = keyboard_metrics(kb)
-    edit = await safe_edit_message(message, text=text, reply_markup=kb, edit_mode=edit_mode)
-    if edit.failure_reason:
-        logger.warning("stopword_add_picker_render_failed edit_path=%s error=%s", edit.path, edit.failure_reason)
-    if callback_info:
-        _log_picker_callback(
-            ack=callback_info["ack"],
-            edit=edit,
-            page_before=int(callback_info.get("page_before") or 0),
-            page_after=page,
-            candidate_count=len(suggestions),
-            keyboard_render_ms=keyboard_render_ms,
-            status="failure" if edit.failure_reason else "success",
-            rows_count=metrics.rows_count,
-            rendered_button_count=metrics.rendered_button_count,
-        )
+    data["stopword_add_page"] = page
+    return text, kb, keyboard_render_ms, metrics, len(suggestions)
 
 
 async def _render_remove_picker(
@@ -165,6 +181,25 @@ async def _render_remove_picker(
     callback_info: dict | None = None,
 ) -> None:
     data = data if data is not None else await state.get_data()
+    text, kb, keyboard_render_ms, metrics, row_count = _build_remove_picker_view(data)
+    edit = await safe_edit_message(message, text=text, reply_markup=kb, edit_mode=edit_mode)
+    if edit.failure_reason:
+        logger.warning("stopword_remove_picker_render_failed edit_path=%s error=%s", edit.path, edit.failure_reason)
+    if callback_info:
+        _log_picker_callback(
+            ack=callback_info["ack"],
+            edit=edit,
+            page_before=int(callback_info.get("page_before") or 0),
+            page_after=int(data.get("stopword_remove_page") or 0),
+            candidate_count=row_count,
+            keyboard_render_ms=keyboard_render_ms,
+            status="failure" if edit.failure_reason else "success",
+            rows_count=metrics.rows_count,
+            rendered_button_count=metrics.rendered_button_count,
+        )
+
+
+def _build_remove_picker_view(data: dict) -> tuple[str, object, float, object, int]:
     stopwords = [str(item) for item in (data.get("stopword_remove_items") or []) if str(item).strip()]
     selected = {int(item) for item in (data.get("stopword_remove_selected_ids") or [])}
     page = _clamp_picker_page(int(data.get("stopword_remove_page") or 0), total=len(stopwords), page_size=_PAGE_SIZE)
@@ -185,21 +220,8 @@ async def _render_remove_picker(
     )
     keyboard_render_ms = (callback_started() - keyboard_started) * 1000
     metrics = keyboard_metrics(kb)
-    edit = await safe_edit_message(message, text=text, reply_markup=kb, edit_mode=edit_mode)
-    if edit.failure_reason:
-        logger.warning("stopword_remove_picker_render_failed edit_path=%s error=%s", edit.path, edit.failure_reason)
-    if callback_info:
-        _log_picker_callback(
-            ack=callback_info["ack"],
-            edit=edit,
-            page_before=int(callback_info.get("page_before") or 0),
-            page_after=page,
-            candidate_count=len(stopwords),
-            keyboard_render_ms=keyboard_render_ms,
-            status="failure" if edit.failure_reason else "success",
-            rows_count=metrics.rows_count,
-            rendered_button_count=metrics.rendered_button_count,
-        )
+    data["stopword_remove_page"] = page
+    return text, kb, keyboard_render_ms, metrics, len(stopwords)
 
 
 @router.message(Command("stopwords"))
@@ -245,15 +267,20 @@ async def cmd_stopwords_add(message: Message, state: FSMContext) -> None:
         last_name=message.from_user.last_name,
         language_code=message.from_user.language_code,
     )
-    loading = await message.answer("Подбираю фразы для stopwords...")
     open_started = perf_counter()
+    load_result = await asyncio.to_thread(_peek_stopword_add_picker_snapshot_cached, user=user)
+    open_path = "single_send" if load_result is not None else "placeholder_edit"
+    loading = None
     try:
-        load_result = await asyncio.to_thread(_load_stopword_add_picker_snapshot_cached, user=user)
+        if load_result is None:
+            loading = await message.answer("Подбираю фразы для stopwords...")
+            load_result = await asyncio.to_thread(_load_stopword_add_picker_snapshot_cached, user=user)
     except Exception as exc:
         await state.clear()
         logger.info(
-            "stopword_add_open_observability user_id=%s cache_hit=%s cache_source=%s open_ms=%.1f row_count=%s status=%s failure_reason=%s",
+            "stopword_add_open_observability user_id=%s open_path=%s cache_hit=%s cache_source=%s total_open_ms=%.1f row_count=%s status=%s failure_reason=%s",
             user.id,
+            open_path,
             False,
             "cold_build",
             (perf_counter() - open_started) * 1000,
@@ -261,21 +288,28 @@ async def cmd_stopwords_add(message: Message, state: FSMContext) -> None:
             "failure",
             exc,
         )
-        await loading.edit_text(f"Не смог подготовить список stopwords: {exc}")
+        if loading is not None:
+            await loading.edit_text(f"Не смог подготовить список stopwords: {exc}")
+        else:
+            await message.answer(f"Не смог подготовить список stopwords: {exc}")
         return
     suggestions = [str(item) for item in (load_result.payload.get("items") or []) if str(item).strip()]
     if not suggestions:
         await state.clear()
         logger.info(
-            "stopword_add_open_observability user_id=%s cache_hit=%s cache_source=%s open_ms=%.1f row_count=%s status=%s",
+            "stopword_add_open_observability user_id=%s open_path=%s cache_hit=%s cache_source=%s total_open_ms=%.1f row_count=%s status=%s",
             user.id,
+            open_path,
             load_result.cache_hit,
             load_result.cache_source,
             (perf_counter() - open_started) * 1000,
             0,
             "empty",
         )
-        await loading.edit_text("Сейчас не нашел готовых фраз для добавления в stopwords.")
+        if loading is not None:
+            await loading.edit_text("Сейчас не нашел готовых фраз для добавления в stopwords.")
+        else:
+            await message.answer("Сейчас не нашел готовых фраз для добавления в stopwords.")
         return
     await state.update_data(
         user_id=user.id,
@@ -284,14 +318,21 @@ async def cmd_stopwords_add(message: Message, state: FSMContext) -> None:
         stopword_add_page=0,
     )
     await state.set_state(StopwordManagementStates.PICK_STOPWORDS_ADD)
-    await _render_add_picker(loading, state)
+    if open_path == "single_send":
+        data = await state.get_data()
+        text, kb, _, _, row_count = _build_add_picker_view(data)
+        await message.answer(text, reply_markup=kb)
+    else:
+        await _render_add_picker(loading, state)
+        row_count = len(suggestions)
     logger.info(
-        "stopword_add_open_observability user_id=%s cache_hit=%s cache_source=%s open_ms=%.1f row_count=%s status=%s",
+        "stopword_add_open_observability user_id=%s open_path=%s cache_hit=%s cache_source=%s total_open_ms=%.1f row_count=%s status=%s",
         user.id,
+        open_path,
         load_result.cache_hit,
         load_result.cache_source,
         (perf_counter() - open_started) * 1000,
-        len(suggestions),
+        row_count,
         "success",
     )
 
@@ -309,15 +350,20 @@ async def cmd_stopwords_remove(message: Message, state: FSMContext) -> None:
         last_name=message.from_user.last_name,
         language_code=message.from_user.language_code,
     )
-    picker = await message.answer("Готовлю список stopwords...")
     open_started = perf_counter()
+    load_result = await asyncio.to_thread(_peek_stopword_remove_picker_snapshot_cached, user=user)
+    open_path = "single_send" if load_result is not None else "placeholder_edit"
+    picker = None
     try:
-        load_result = await asyncio.to_thread(_load_stopword_remove_picker_snapshot_cached, user=user)
+        if load_result is None:
+            picker = await message.answer("Готовлю список stopwords...")
+            load_result = await asyncio.to_thread(_load_stopword_remove_picker_snapshot_cached, user=user)
     except Exception as exc:
         await state.clear()
         logger.info(
-            "stopword_remove_open_observability user_id=%s cache_hit=%s cache_source=%s open_ms=%.1f row_count=%s status=%s failure_reason=%s",
+            "stopword_remove_open_observability user_id=%s open_path=%s cache_hit=%s cache_source=%s total_open_ms=%.1f row_count=%s status=%s failure_reason=%s",
             user.id,
+            open_path,
             False,
             "cold_build",
             (perf_counter() - open_started) * 1000,
@@ -325,21 +371,28 @@ async def cmd_stopwords_remove(message: Message, state: FSMContext) -> None:
             "failure",
             exc,
         )
-        await picker.edit_text(f"Не смог подготовить список stopwords: {exc}")
+        if picker is not None:
+            await picker.edit_text(f"Не смог подготовить список stopwords: {exc}")
+        else:
+            await message.answer(f"Не смог подготовить список stopwords: {exc}")
         return
     current = [str(item) for item in (load_result.payload.get("items") or []) if str(item).strip()]
     if not current:
         await state.clear()
         logger.info(
-            "stopword_remove_open_observability user_id=%s cache_hit=%s cache_source=%s open_ms=%.1f row_count=%s status=%s",
+            "stopword_remove_open_observability user_id=%s open_path=%s cache_hit=%s cache_source=%s total_open_ms=%.1f row_count=%s status=%s",
             user.id,
+            open_path,
             load_result.cache_hit,
             load_result.cache_source,
             (perf_counter() - open_started) * 1000,
             0,
             "empty",
         )
-        await picker.edit_text("Стоп-слов для удаления сейчас нет.")
+        if picker is not None:
+            await picker.edit_text("Стоп-слов для удаления сейчас нет.")
+        else:
+            await message.answer("Стоп-слов для удаления сейчас нет.")
         return
     await state.update_data(
         user_id=user.id,
@@ -348,14 +401,21 @@ async def cmd_stopwords_remove(message: Message, state: FSMContext) -> None:
         stopword_remove_page=0,
     )
     await state.set_state(StopwordManagementStates.PICK_STOPWORDS_REMOVE)
-    await _render_remove_picker(picker, state)
+    if open_path == "single_send":
+        data = await state.get_data()
+        text, kb, _, _, row_count = _build_remove_picker_view(data)
+        await message.answer(text, reply_markup=kb)
+    else:
+        await _render_remove_picker(picker, state)
+        row_count = len(current)
     logger.info(
-        "stopword_remove_open_observability user_id=%s cache_hit=%s cache_source=%s open_ms=%.1f row_count=%s status=%s",
+        "stopword_remove_open_observability user_id=%s open_path=%s cache_hit=%s cache_source=%s total_open_ms=%.1f row_count=%s status=%s",
         user.id,
+        open_path,
         load_result.cache_hit,
         load_result.cache_source,
         (perf_counter() - open_started) * 1000,
-        len(current),
+        row_count,
         "success",
     )
 

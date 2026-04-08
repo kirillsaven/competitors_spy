@@ -70,6 +70,18 @@ def _load_cached_snapshot(*, cache_key: str, builder: Callable[[], dict]) -> Pic
     )
 
 
+def _peek_cached_snapshot(*, cache_key: str) -> PickerSnapshotLoadResult | None:
+    cached, cache_hit = get_cached_retry_value(cache_key)
+    if not cache_hit or not isinstance(cached, dict):
+        return None
+    return PickerSnapshotLoadResult(
+        payload=deepcopy(cached),
+        cache_hit=True,
+        cache_source=PICKER_SNAPSHOT_CACHE_SOURCE_SNAPSHOT_HIT,
+        build_ms=0.0,
+    )
+
+
 def _active_competitor_link_snapshot(*, user: TgUser) -> list[dict]:
     rows: list[dict] = []
     for link in list_active_user_competitor_links(user=user):
@@ -127,10 +139,57 @@ def load_competitor_remove_picker_snapshot(*, user: TgUser) -> PickerSnapshotLoa
         "user_id": int(user.id),
         "active_links": _active_competitor_link_snapshot(user=user),
     }
+    cache_key = _digest_payload(kind="competitors_remove", payload=snapshot_payload)
     return _load_cached_snapshot(
-        cache_key=_digest_payload(kind="competitors_remove", payload=snapshot_payload),
+        cache_key=cache_key,
         builder=lambda: _competitor_remove_picker_payload(user=user),
     )
+
+
+def peek_competitor_remove_picker_snapshot(*, user: TgUser) -> PickerSnapshotLoadResult | None:
+    snapshot_payload = {
+        "version": _PICKER_SNAPSHOT_CACHE_VERSION,
+        "user_id": int(user.id),
+        "active_links": _active_competitor_link_snapshot(user=user),
+    }
+    cache_key = _digest_payload(kind="competitors_remove", payload=snapshot_payload)
+    return _peek_cached_snapshot(cache_key=cache_key)
+
+
+def _stopword_add_cache_key(*, user: TgUser) -> str:
+    snapshot_payload = {
+        "version": _PICKER_SNAPSHOT_CACHE_VERSION,
+        "user_id": int(user.id),
+        "stopwords": get_user_report_stopwords(user=user),
+        "active_competitors": _active_competitor_link_snapshot(user=user),
+        "content_freshness": _active_competitor_freshness_snapshot(user=user),
+    }
+    return _digest_payload(kind="stopwords_add", payload=snapshot_payload)
+
+
+def _stopword_remove_cache_key(*, user: TgUser) -> str:
+    snapshot_payload = {
+        "version": _PICKER_SNAPSHOT_CACHE_VERSION,
+        "user_id": int(user.id),
+        "stopwords": get_user_report_stopwords(user=user),
+    }
+    return _digest_payload(kind="stopwords_remove", payload=snapshot_payload)
+
+
+def load_stopword_add_picker_snapshot(
+    *,
+    user: TgUser,
+    builder: Callable[..., list[str]] = build_user_stopword_suggestions,
+) -> PickerSnapshotLoadResult:
+    cache_key = _stopword_add_cache_key(user=user)
+    return _load_cached_snapshot(
+        cache_key=cache_key,
+        builder=lambda: {"items": list(builder(user=user))},
+    )
+
+
+def peek_stopword_add_picker_snapshot(*, user: TgUser) -> PickerSnapshotLoadResult | None:
+    return _peek_cached_snapshot(cache_key=_stopword_add_cache_key(user=user))
 
 
 def _active_competitor_freshness_snapshot(*, user: TgUser) -> dict:
@@ -163,31 +222,13 @@ def _active_competitor_freshness_snapshot(*, user: TgUser) -> dict:
     }
 
 
-def load_stopword_add_picker_snapshot(
-    *,
-    user: TgUser,
-    builder: Callable[..., list[str]] = build_user_stopword_suggestions,
-) -> PickerSnapshotLoadResult:
-    snapshot_payload = {
-        "version": _PICKER_SNAPSHOT_CACHE_VERSION,
-        "user_id": int(user.id),
-        "stopwords": get_user_report_stopwords(user=user),
-        "active_competitors": _active_competitor_link_snapshot(user=user),
-        "content_freshness": _active_competitor_freshness_snapshot(user=user),
-    }
-    return _load_cached_snapshot(
-        cache_key=_digest_payload(kind="stopwords_add", payload=snapshot_payload),
-        builder=lambda: {"items": list(builder(user=user))},
-    )
-
-
 def load_stopword_remove_picker_snapshot(*, user: TgUser) -> PickerSnapshotLoadResult:
-    snapshot_payload = {
-        "version": _PICKER_SNAPSHOT_CACHE_VERSION,
-        "user_id": int(user.id),
-        "stopwords": get_user_report_stopwords(user=user),
-    }
+    cache_key = _stopword_remove_cache_key(user=user)
     return _load_cached_snapshot(
-        cache_key=_digest_payload(kind="stopwords_remove", payload=snapshot_payload),
+        cache_key=cache_key,
         builder=lambda: {"items": get_user_report_stopwords(user=user)},
     )
+
+
+def peek_stopword_remove_picker_snapshot(*, user: TgUser) -> PickerSnapshotLoadResult | None:
+    return _peek_cached_snapshot(cache_key=_stopword_remove_cache_key(user=user))
