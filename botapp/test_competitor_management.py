@@ -45,6 +45,8 @@ class DummyMessage:
             last_name="User",
             language_code="ru",
         )
+        self.edit_text_calls = 0
+        self.edit_reply_markup_calls = 0
 
     async def answer(self, text: str, reply_markup=None):
         self.answers.append(text)
@@ -52,11 +54,13 @@ class DummyMessage:
         return self
 
     async def edit_text(self, text: str, reply_markup=None):
+        self.edit_text_calls += 1
         self.answers.append(text)
         self.reply_markups.append(reply_markup)
         return self
 
     async def edit_reply_markup(self, reply_markup=None):
+        self.edit_reply_markup_calls += 1
         self.reply_markups.append(reply_markup)
         return self
 
@@ -78,6 +82,23 @@ async def _db_call(func, *args, **kwargs):
 
 async def _db_run(func, *args, **kwargs):
     return await sync_to_async(func, thread_sensitive=True)(*args, **kwargs)
+
+
+def _candidate(idx: int, *, platform: str = Platform.YOUTUBE) -> dict:
+    handle = f"candidate_{idx}"
+    return {
+        "platform": platform,
+        "external_id": f"{platform}-{idx}",
+        "handle": handle,
+        "url": f"https://example.com/{handle}",
+        "display_name": f"Candidate {idx}",
+        "added_by": "auto",
+        "meta": {},
+    }
+
+
+def _button_texts(markup) -> list[str]:
+    return [button.text for row in markup.inline_keyboard for button in row]
 
 
 @pytest.mark.django_db
@@ -191,6 +212,61 @@ def test_competitors_suggest_reactivates_from_picker(monkeypatch):
     assert "Пропущено: 0" in message.answers[-1]
     assert "Ошибки: 0" in message.answers[-1]
     assert "YouTube: 1" in message.answers[-1]
+
+
+def test_competitor_add_picker_page_forward_back_uses_markup_only():
+    candidates = [_candidate(idx) for idx in range(10)]
+    state = DummyState()
+    async_to_sync(state.update_data)(
+        user_id=101,
+        competitor_add_candidates=candidates,
+        competitor_add_picker_rows=competitors._make_add_picker_rows(candidates),
+        competitor_add_platform_by_id=competitors._make_add_platform_by_id(candidates),
+        competitor_add_selected_ids=[],
+        competitor_add_page=0,
+        competitor_add_notes=[],
+    )
+    message = DummyMessage(user_id=101)
+
+    next_page = DummyCallbackQuery(data="compadd_page:1", message=message)
+    async_to_sync(competitors.on_add_page)(next_page, state)
+
+    assert state.data["competitor_add_page"] == 1
+    assert message.edit_text_calls == 0
+    assert message.edit_reply_markup_calls == 1
+    assert any("Candidate 8" in text for text in _button_texts(message.reply_markups[-1]))
+
+    prev_page = DummyCallbackQuery(data="compadd_page:0", message=message)
+    async_to_sync(competitors.on_add_page)(prev_page, state)
+
+    assert state.data["competitor_add_page"] == 0
+    assert message.edit_text_calls == 0
+    assert message.edit_reply_markup_calls == 2
+    assert any("Candidate 0" in text for text in _button_texts(message.reply_markups[-1]))
+
+
+def test_competitor_add_picker_selection_persists_across_pages():
+    candidates = [_candidate(idx) for idx in range(10)]
+    state = DummyState()
+    async_to_sync(state.update_data)(
+        user_id=102,
+        competitor_add_candidates=candidates,
+        competitor_add_picker_rows=competitors._make_add_picker_rows(candidates),
+        competitor_add_platform_by_id=competitors._make_add_platform_by_id(candidates),
+        competitor_add_selected_ids=[],
+        competitor_add_page=0,
+        competitor_add_notes=[],
+    )
+    message = DummyMessage(user_id=102)
+
+    async_to_sync(competitors.on_add_toggle)(DummyCallbackQuery(data="compadd_toggle:0", message=message), state)
+    async_to_sync(competitors.on_add_page)(DummyCallbackQuery(data="compadd_page:1", message=message), state)
+    async_to_sync(competitors.on_add_toggle)(DummyCallbackQuery(data="compadd_toggle:8", message=message), state)
+    async_to_sync(competitors.on_add_page)(DummyCallbackQuery(data="compadd_page:0", message=message), state)
+
+    assert state.data["competitor_add_selected_ids"] == [0, 8]
+    assert state.data["competitor_add_page"] == 0
+    assert any(text.startswith("✅ 1. [YT] Candidate 0") for text in _button_texts(message.reply_markups[-1]))
 
 
 @pytest.mark.django_db
@@ -671,6 +747,52 @@ def test_competitors_remove_deactivates_only_user_link_and_updates_report_active
     assert "Пропущено: 0" in message.answers[-1]
     assert "YouTube: 0" in message.answers[-1]
     assert "Instagram: 1" in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_competitors_remove_picker_pages_and_done_preserve_selection(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=131, tg_chat_id=131)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+    competitor_ids: list[int] = []
+    for idx in range(9):
+        competitor_obj = async_to_sync(sync_to_async(Competitor.objects.create, thread_sensitive=True))(
+            platform=Platform.YOUTUBE,
+            external_id=f"yt-remove-page-{idx}",
+            handle=f"remove_page_{idx}",
+            display_name=f"Remove Page {idx}",
+            url=f"https://www.youtube.com/@remove_page_{idx}",
+        )
+        async_to_sync(sync_to_async(UserCompetitor.objects.create, thread_sensitive=True))(
+            user=user,
+            competitor=competitor_obj,
+            is_active=True,
+        )
+        competitor_ids.append(competitor_obj.id)
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+
+    state = DummyState()
+    message = DummyMessage(user_id=131)
+    async_to_sync(competitors.cmd_competitors_remove)(message, state)
+
+    async_to_sync(competitors.on_remove_page)(DummyCallbackQuery(data="comprem_page:1", message=message), state)
+    async_to_sync(competitors.on_remove_toggle)(DummyCallbackQuery(data=f"comprem_toggle:{competitor_ids[-1]}", message=message), state)
+    async_to_sync(competitors.on_remove_page)(DummyCallbackQuery(data="comprem_page:0", message=message), state)
+    async_to_sync(competitors.on_remove_done)(DummyCallbackQuery(data="comprem_done", message=message), state)
+
+    removed_link = async_to_sync(sync_to_async(UserCompetitor.objects.get, thread_sensitive=True))(
+        user=user,
+        competitor_id=competitor_ids[-1],
+    )
+    active_count = async_to_sync(sync_to_async(UserCompetitor.objects.filter(user=user, is_active=True).count, thread_sensitive=True))()
+
+    assert state.state is None
+    assert removed_link.is_active is False
+    assert active_count == 8
+    assert message.edit_reply_markup_calls >= 2
+    assert "Удалено: 1" in message.answers[-1]
+    assert "YouTube: 8" in message.answers[-1]
 
 
 @pytest.mark.django_db

@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from time import perf_counter
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
@@ -241,6 +243,185 @@ def _build_picker_text(
     return "\n".join(lines)
 
 
+def _picker_page_count(total: int, page_size: int) -> int:
+    return max(1, (max(0, total) + page_size - 1) // page_size)
+
+
+def _clamp_picker_page(page: int, *, total: int, page_size: int) -> int:
+    return min(max(0, page), _picker_page_count(total, page_size) - 1)
+
+
+def _make_add_picker_rows(candidates: list[dict]) -> list[dict]:
+    return [
+        {
+            "id": idx,
+            "name": _competitor_display_name(candidate),
+            "url": str(candidate.get("url") or "").strip() or None,
+        }
+        for idx, candidate in enumerate(candidates)
+    ]
+
+
+def _make_add_platform_by_id(candidates: list[dict]) -> dict[str, str]:
+    return {str(idx): str(candidate.get("platform") or "") for idx, candidate in enumerate(candidates)}
+
+
+def _make_remove_picker_rows(rows: list[dict]) -> list[dict]:
+    return [
+        {
+            "id": int(row.get("competitor_id") or 0),
+            "name": str(row.get("display_name") or "").strip(),
+            "url": str(row.get("url") or "").strip() or None,
+        }
+        for row in rows
+        if int(row.get("competitor_id") or 0) > 0
+    ]
+
+
+def _make_remove_platform_by_id(rows: list[dict]) -> dict[str, str]:
+    return {
+        str(int(row.get("competitor_id") or 0)): str(row.get("platform") or "")
+        for row in rows
+        if int(row.get("competitor_id") or 0) > 0
+    }
+
+
+def _picker_rows_from_state(rows: list[dict] | None) -> list[tuple[int, str, str | None]]:
+    out: list[tuple[int, str, str | None]] = []
+    for row in rows or []:
+        try:
+            if isinstance(row, dict):
+                row_id = int(row.get("id") or 0)
+                name = str(row.get("name") or "").strip()
+                url = str(row.get("url") or "").strip() or None
+            else:
+                row_id = int(row[0])
+                name = str(row[1] or "").strip()
+                url = str(row[2] or "").strip() or None
+        except Exception:
+            continue
+        out.append((row_id, name, url))
+    return out
+
+
+def _selected_platform_counts(*, selected_ids: set[int], platform_by_id: dict) -> dict[str, int]:
+    counts = {platform: 0 for platform in PLATFORM_ORDER}
+    for item_id in selected_ids:
+        platform = str(platform_by_id.get(str(item_id)) or platform_by_id.get(item_id) or "")
+        if platform:
+            counts[platform] = counts.get(platform, 0) + 1
+    return counts
+
+
+def _exception_summary(exc: Exception) -> str:
+    return f"{type(exc).__name__}: {exc}"
+
+
+def _is_message_not_modified(exc: Exception) -> bool:
+    return isinstance(exc, TelegramBadRequest) and "message is not modified" in str(exc).lower()
+
+
+async def _answer_picker_callback(
+    cb: CallbackQuery,
+    *,
+    callback_type: str,
+    started_at: float,
+    text: str | None = None,
+    show_alert: bool = False,
+) -> str:
+    try:
+        await cb.answer(text, show_alert=show_alert)
+        return "success"
+    except Exception as exc:
+        logger.warning(
+            "competitor_picker_callback_answer_failed callback_type=%s telegram_user_id=%s "
+            "callback_age_ms=%.1f error=%s",
+            callback_type,
+            getattr(cb.from_user, "id", None),
+            (perf_counter() - started_at) * 1000,
+            _exception_summary(exc),
+        )
+        return f"failure:{type(exc).__name__}"
+
+
+async def _edit_picker_message(
+    message: Message,
+    *,
+    text: str,
+    reply_markup,
+    edit_mode: str,
+) -> tuple[str, float, str | None]:
+    edit_started = perf_counter()
+    if edit_mode == "markup":
+        try:
+            await message.edit_reply_markup(reply_markup=reply_markup)
+            return "edit_reply_markup", (perf_counter() - edit_started) * 1000, None
+        except Exception as exc:
+            if _is_message_not_modified(exc):
+                return "edit_reply_markup_noop", (perf_counter() - edit_started) * 1000, None
+            markup_error = _exception_summary(exc)
+            try:
+                await message.edit_text(text, reply_markup=reply_markup)
+                return "edit_reply_markup_fallback_edit_text", (perf_counter() - edit_started) * 1000, None
+            except Exception as fallback_exc:
+                return (
+                    "edit_reply_markup_failed",
+                    (perf_counter() - edit_started) * 1000,
+                    f"{markup_error}; fallback={_exception_summary(fallback_exc)}",
+                )
+
+    try:
+        await message.edit_text(text, reply_markup=reply_markup)
+        return "edit_text", (perf_counter() - edit_started) * 1000, None
+    except Exception as exc:
+        text_error = _exception_summary(exc)
+        try:
+            await message.edit_reply_markup(reply_markup=reply_markup)
+            return "edit_text_fallback_edit_reply_markup", (perf_counter() - edit_started) * 1000, None
+        except Exception as fallback_exc:
+            if _is_message_not_modified(fallback_exc):
+                return "edit_text_fallback_noop", (perf_counter() - edit_started) * 1000, None
+            return (
+                "edit_text_failed",
+                (perf_counter() - edit_started) * 1000,
+                f"{text_error}; fallback={_exception_summary(fallback_exc)}",
+            )
+
+
+def _log_picker_callback(
+    *,
+    callback_type: str,
+    user_id: int | None,
+    page_before: int,
+    page_after: int,
+    candidate_count: int,
+    keyboard_render_ms: float,
+    telegram_edit_ms: float,
+    started_at: float,
+    ack_status: str,
+    edit_path: str,
+    status: str,
+    error: str | None = None,
+) -> None:
+    logger.info(
+        "competitor_picker_callback_observability callback_type=%s user_id=%s page_before=%s page_after=%s "
+        "candidate_count=%s keyboard_render_ms=%.1f telegram_edit_ms=%.1f total_callback_latency_ms=%.1f "
+        "ack_status=%s edit_path=%s status=%s error=%s",
+        callback_type,
+        user_id,
+        page_before,
+        page_after,
+        candidate_count,
+        keyboard_render_ms,
+        telegram_edit_ms,
+        (perf_counter() - started_at) * 1000,
+        ack_status,
+        edit_path,
+        status,
+        error or "",
+    )
+
+
 def _manual_add_prompt_text() -> str:
     return (
         "Отправь ссылки или хэндлы конкурентов, по одному на строку.\n"
@@ -267,29 +448,33 @@ def _instagram_suggestion_added_text(*, display_name: str, counts: dict[str, int
     )
 
 
-async def _render_add_picker(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
+async def _render_add_picker(
+    message: Message,
+    state: FSMContext,
+    *,
+    data: dict | None = None,
+    edit_mode: str = "text",
+    callback_info: dict | None = None,
+) -> None:
+    data = data if data is not None else await state.get_data()
     candidates = list(data.get("competitor_add_candidates") or [])
     selected_ids = {int(item) for item in (data.get("competitor_add_selected_ids") or [])}
-    page = int(data.get("competitor_add_page") or 0)
+    page = _clamp_picker_page(int(data.get("competitor_add_page") or 0), total=len(candidates), page_size=_PAGE_SIZE)
     notes = [str(item) for item in (data.get("competitor_add_notes") or []) if str(item).strip()]
-    counts = {platform: 0 for platform in PLATFORM_ORDER}
-    for idx, candidate in enumerate(candidates):
-        if idx not in selected_ids:
-            continue
-        platform = str(candidate.get("platform") or "")
-        if platform:
-            counts[platform] = counts.get(platform, 0) + 1
-    rows = [
-        (idx, _competitor_display_name(candidate), str(candidate.get("url") or "").strip() or None)
-        for idx, candidate in enumerate(candidates)
-    ]
+    rows = _picker_rows_from_state(data.get("competitor_add_picker_rows"))
+    if not rows:
+        rows = _picker_rows_from_state(_make_add_picker_rows(candidates))
+    platform_by_id = dict(data.get("competitor_add_platform_by_id") or {})
+    if not platform_by_id:
+        platform_by_id = _make_add_platform_by_id(candidates)
+    counts = _selected_platform_counts(selected_ids=selected_ids, platform_by_id=platform_by_id)
     text = _build_picker_text(
         action_label="Нашел кандидатов для добавления. Выбирай профили кнопками ниже.",
         selected_total=len(selected_ids),
         counts=counts,
         notes=notes,
     )
+    keyboard_started = perf_counter()
     kb = kb_manage_competitors(
         competitor_rows=rows,
         selected_ids=selected_ids,
@@ -301,41 +486,57 @@ async def _render_add_picker(message: Message, state: FSMContext) -> None:
         done_callback="compadd_done",
         done_text="Добавить",
     )
-    try:
-        await message.edit_text(text, reply_markup=kb)
-    except Exception:
-        try:
-            await message.edit_reply_markup(reply_markup=kb)
-        except Exception:
-            return
+    keyboard_render_ms = (perf_counter() - keyboard_started) * 1000
+    edit_path, telegram_edit_ms, error = await _edit_picker_message(
+        message,
+        text=text,
+        reply_markup=kb,
+        edit_mode=edit_mode,
+    )
+    if error:
+        logger.warning("competitor_add_picker_render_failed edit_path=%s error=%s", edit_path, error)
+    if callback_info:
+        _log_picker_callback(
+            callback_type=str(callback_info.get("callback_type") or ""),
+            user_id=callback_info.get("user_id"),
+            page_before=int(callback_info.get("page_before") or 0),
+            page_after=page,
+            candidate_count=len(rows),
+            keyboard_render_ms=keyboard_render_ms,
+            telegram_edit_ms=telegram_edit_ms,
+            started_at=float(callback_info.get("started_at") or perf_counter()),
+            ack_status=str(callback_info.get("ack_status") or ""),
+            edit_path=edit_path,
+            status="failure" if error else "success",
+            error=error,
+        )
 
 
-async def _render_remove_picker(message: Message, state: FSMContext) -> None:
-    data = await state.get_data()
+async def _render_remove_picker(
+    message: Message,
+    state: FSMContext,
+    *,
+    data: dict | None = None,
+    edit_mode: str = "text",
+    callback_info: dict | None = None,
+) -> None:
+    data = data if data is not None else await state.get_data()
     rows = list(data.get("competitor_remove_rows") or [])
     selected_ids = {int(item) for item in (data.get("competitor_remove_selected_ids") or [])}
-    page = int(data.get("competitor_remove_page") or 0)
-    counts = {platform: 0 for platform in PLATFORM_ORDER}
-    for row in rows:
-        if int(row.get("competitor_id") or 0) not in selected_ids:
-            continue
-        platform = str(row.get("platform") or "")
-        if platform:
-            counts[platform] = counts.get(platform, 0) + 1
-    kb_rows = [
-        (
-            int(row.get("competitor_id") or 0),
-            str(row.get("display_name") or "").strip(),
-            str(row.get("url") or "").strip() or None,
-        )
-        for row in rows
-        if int(row.get("competitor_id") or 0) > 0
-    ]
+    kb_rows = _picker_rows_from_state(data.get("competitor_remove_picker_rows"))
+    if not kb_rows:
+        kb_rows = _picker_rows_from_state(_make_remove_picker_rows(rows))
+    page = _clamp_picker_page(int(data.get("competitor_remove_page") or 0), total=len(kb_rows), page_size=_PAGE_SIZE)
+    platform_by_id = dict(data.get("competitor_remove_platform_by_id") or {})
+    if not platform_by_id:
+        platform_by_id = _make_remove_platform_by_id(rows)
+    counts = _selected_platform_counts(selected_ids=selected_ids, platform_by_id=platform_by_id)
     text = _build_picker_text(
         action_label="Выбери конкурентов, которых нужно убрать из активного списка.",
         selected_total=len(selected_ids),
         counts=counts,
     )
+    keyboard_started = perf_counter()
     kb = kb_manage_competitors(
         competitor_rows=kb_rows,
         selected_ids=selected_ids,
@@ -347,13 +548,30 @@ async def _render_remove_picker(message: Message, state: FSMContext) -> None:
         done_callback="comprem_done",
         done_text="Убрать",
     )
-    try:
-        await message.edit_text(text, reply_markup=kb)
-    except Exception:
-        try:
-            await message.edit_reply_markup(reply_markup=kb)
-        except Exception:
-            return
+    keyboard_render_ms = (perf_counter() - keyboard_started) * 1000
+    edit_path, telegram_edit_ms, error = await _edit_picker_message(
+        message,
+        text=text,
+        reply_markup=kb,
+        edit_mode=edit_mode,
+    )
+    if error:
+        logger.warning("competitor_remove_picker_render_failed edit_path=%s error=%s", edit_path, error)
+    if callback_info:
+        _log_picker_callback(
+            callback_type=str(callback_info.get("callback_type") or ""),
+            user_id=callback_info.get("user_id"),
+            page_before=int(callback_info.get("page_before") or 0),
+            page_after=page,
+            candidate_count=len(kb_rows),
+            keyboard_render_ms=keyboard_render_ms,
+            telegram_edit_ms=telegram_edit_ms,
+            started_at=float(callback_info.get("started_at") or perf_counter()),
+            ack_status=str(callback_info.get("ack_status") or ""),
+            edit_path=edit_path,
+            status="failure" if error else "success",
+            error=error,
+        )
 
 
 @router.message(Command("competitors"))
@@ -428,6 +646,8 @@ async def cmd_competitors_suggest(message: Message, state: FSMContext) -> None:
     await state.update_data(
         user_id=user.id,
         competitor_add_candidates=candidates,
+        competitor_add_picker_rows=_make_add_picker_rows(candidates),
+        competitor_add_platform_by_id=_make_add_platform_by_id(candidates),
         competitor_add_selected_ids=[],
         competitor_add_page=0,
         competitor_add_notes=notes,
@@ -491,6 +711,8 @@ async def cmd_competitors_remove(message: Message, state: FSMContext) -> None:
     await state.update_data(
         user_id=user.id,
         competitor_remove_rows=rows,
+        competitor_remove_picker_rows=_make_remove_picker_rows(rows),
+        competitor_remove_platform_by_id=_make_remove_platform_by_id(rows),
         competitor_remove_selected_ids=[],
         competitor_remove_page=0,
     )
@@ -723,20 +945,39 @@ async def on_back(cb: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_ADD, F.data.startswith("compadd_page:"))
 async def on_add_page(cb: CallbackQuery, state: FSMContext) -> None:
-    await cb.answer()
+    started_at = perf_counter()
+    ack_status = await _answer_picker_callback(cb, callback_type="compadd_page", started_at=started_at)
     if not cb.message:
         return
     try:
-        page = int(str(cb.data).split(":", 1)[1])
+        requested_page = int(str(cb.data).split(":", 1)[1])
     except Exception:
         return
-    await state.update_data(competitor_add_page=max(0, page))
-    await _render_add_picker(cb.message, state)
+    data = await state.get_data()
+    candidates = list(data.get("competitor_add_candidates") or [])
+    page_before = int(data.get("competitor_add_page") or 0)
+    page_after = _clamp_picker_page(requested_page, total=len(candidates), page_size=_PAGE_SIZE)
+    await state.update_data(competitor_add_page=page_after)
+    data["competitor_add_page"] = page_after
+    await _render_add_picker(
+        cb.message,
+        state,
+        data=data,
+        edit_mode="markup",
+        callback_info={
+            "callback_type": "compadd_page",
+            "user_id": data.get("user_id"),
+            "page_before": page_before,
+            "started_at": started_at,
+            "ack_status": ack_status,
+        },
+    )
 
 
 @router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_ADD, F.data.startswith("compadd_toggle:"))
 async def on_add_toggle(cb: CallbackQuery, state: FSMContext) -> None:
-    await cb.answer()
+    started_at = perf_counter()
+    ack_status = await _answer_picker_callback(cb, callback_type="compadd_toggle", started_at=started_at)
     if not cb.message:
         return
     try:
@@ -744,37 +985,87 @@ async def on_add_toggle(cb: CallbackQuery, state: FSMContext) -> None:
     except Exception:
         return
     data = await state.get_data()
+    page_before = int(data.get("competitor_add_page") or 0)
     selected = {int(item) for item in (data.get("competitor_add_selected_ids") or [])}
     if idx in selected:
         selected.remove(idx)
     else:
         selected.add(idx)
-    await state.update_data(competitor_add_selected_ids=sorted(selected))
-    await _render_add_picker(cb.message, state)
+    selected_sorted = sorted(selected)
+    await state.update_data(competitor_add_selected_ids=selected_sorted)
+    data["competitor_add_selected_ids"] = selected_sorted
+    await _render_add_picker(
+        cb.message,
+        state,
+        data=data,
+        callback_info={
+            "callback_type": "compadd_toggle",
+            "user_id": data.get("user_id"),
+            "page_before": page_before,
+            "started_at": started_at,
+            "ack_status": ack_status,
+        },
+    )
 
 
 @router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_ADD, F.data == "compadd_all")
 async def on_add_all(cb: CallbackQuery, state: FSMContext) -> None:
-    await cb.answer()
+    started_at = perf_counter()
+    ack_status = await _answer_picker_callback(cb, callback_type="compadd_all", started_at=started_at)
     if not cb.message:
         return
     data = await state.get_data()
+    page_before = int(data.get("competitor_add_page") or 0)
     candidates = list(data.get("competitor_add_candidates") or [])
-    await state.update_data(competitor_add_selected_ids=list(range(len(candidates))))
-    await _render_add_picker(cb.message, state)
+    selected_ids = list(range(len(candidates)))
+    await state.update_data(competitor_add_selected_ids=selected_ids)
+    data["competitor_add_selected_ids"] = selected_ids
+    await _render_add_picker(
+        cb.message,
+        state,
+        data=data,
+        callback_info={
+            "callback_type": "compadd_all",
+            "user_id": data.get("user_id"),
+            "page_before": page_before,
+            "started_at": started_at,
+            "ack_status": ack_status,
+        },
+    )
 
 
 @router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_ADD, F.data == "compadd_done")
 async def on_add_done(cb: CallbackQuery, state: FSMContext) -> None:
-    await cb.answer()
+    started_at = perf_counter()
     if not cb.message:
         return
     data = await state.get_data()
+    page_before = int(data.get("competitor_add_page") or 0)
     selected_ids = {int(item) for item in (data.get("competitor_add_selected_ids") or [])}
     candidates = list(data.get("competitor_add_candidates") or [])
     if not selected_ids:
-        await cb.answer("Сначала выбери хотя бы одного конкурента.", show_alert=True)
+        ack_status = await _answer_picker_callback(
+            cb,
+            callback_type="compadd_done",
+            started_at=started_at,
+            text="Сначала выбери хотя бы одного конкурента.",
+            show_alert=True,
+        )
+        _log_picker_callback(
+            callback_type="compadd_done",
+            user_id=data.get("user_id"),
+            page_before=page_before,
+            page_after=page_before,
+            candidate_count=len(candidates),
+            keyboard_render_ms=0.0,
+            telegram_edit_ms=0.0,
+            started_at=started_at,
+            ack_status=ack_status,
+            edit_path="none",
+            status="empty_selection",
+        )
         return
+    ack_status = await _answer_picker_callback(cb, callback_type="compadd_done", started_at=started_at)
 
     user = await db_call(TgUser.objects.get, id=data["user_id"])
     counts = await db_run(lambda: get_active_user_competitor_counts(user=user))
@@ -812,24 +1103,58 @@ async def on_add_done(cb: CallbackQuery, state: FSMContext) -> None:
             counts=counts,
         )
     )
+    _log_picker_callback(
+        callback_type="compadd_done",
+        user_id=data.get("user_id"),
+        page_before=page_before,
+        page_after=page_before,
+        candidate_count=len(candidates),
+        keyboard_render_ms=0.0,
+        telegram_edit_ms=0.0,
+        started_at=started_at,
+        ack_status=ack_status,
+        edit_path="answer",
+        status="success",
+    )
 
 
 @router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_REMOVE, F.data.startswith("comprem_page:"))
 async def on_remove_page(cb: CallbackQuery, state: FSMContext) -> None:
-    await cb.answer()
+    started_at = perf_counter()
+    ack_status = await _answer_picker_callback(cb, callback_type="comprem_page", started_at=started_at)
     if not cb.message:
         return
     try:
-        page = int(str(cb.data).split(":", 1)[1])
+        requested_page = int(str(cb.data).split(":", 1)[1])
     except Exception:
         return
-    await state.update_data(competitor_remove_page=max(0, page))
-    await _render_remove_picker(cb.message, state)
+    data = await state.get_data()
+    rows = _picker_rows_from_state(data.get("competitor_remove_picker_rows"))
+    if not rows:
+        rows = _picker_rows_from_state(_make_remove_picker_rows(list(data.get("competitor_remove_rows") or [])))
+    page_before = int(data.get("competitor_remove_page") or 0)
+    page_after = _clamp_picker_page(requested_page, total=len(rows), page_size=_PAGE_SIZE)
+    await state.update_data(competitor_remove_page=page_after)
+    data["competitor_remove_page"] = page_after
+    await _render_remove_picker(
+        cb.message,
+        state,
+        data=data,
+        edit_mode="markup",
+        callback_info={
+            "callback_type": "comprem_page",
+            "user_id": data.get("user_id"),
+            "page_before": page_before,
+            "started_at": started_at,
+            "ack_status": ack_status,
+        },
+    )
 
 
 @router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_REMOVE, F.data.startswith("comprem_toggle:"))
 async def on_remove_toggle(cb: CallbackQuery, state: FSMContext) -> None:
-    await cb.answer()
+    started_at = perf_counter()
+    ack_status = await _answer_picker_callback(cb, callback_type="comprem_toggle", started_at=started_at)
     if not cb.message:
         return
     try:
@@ -837,37 +1162,87 @@ async def on_remove_toggle(cb: CallbackQuery, state: FSMContext) -> None:
     except Exception:
         return
     data = await state.get_data()
+    page_before = int(data.get("competitor_remove_page") or 0)
     selected = {int(item) for item in (data.get("competitor_remove_selected_ids") or [])}
     if competitor_id in selected:
         selected.remove(competitor_id)
     else:
         selected.add(competitor_id)
-    await state.update_data(competitor_remove_selected_ids=sorted(selected))
-    await _render_remove_picker(cb.message, state)
+    selected_sorted = sorted(selected)
+    await state.update_data(competitor_remove_selected_ids=selected_sorted)
+    data["competitor_remove_selected_ids"] = selected_sorted
+    await _render_remove_picker(
+        cb.message,
+        state,
+        data=data,
+        callback_info={
+            "callback_type": "comprem_toggle",
+            "user_id": data.get("user_id"),
+            "page_before": page_before,
+            "started_at": started_at,
+            "ack_status": ack_status,
+        },
+    )
 
 
 @router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_REMOVE, F.data == "comprem_all")
 async def on_remove_all(cb: CallbackQuery, state: FSMContext) -> None:
-    await cb.answer()
+    started_at = perf_counter()
+    ack_status = await _answer_picker_callback(cb, callback_type="comprem_all", started_at=started_at)
     if not cb.message:
         return
     data = await state.get_data()
+    page_before = int(data.get("competitor_remove_page") or 0)
     rows = list(data.get("competitor_remove_rows") or [])
     selected = [int(row.get("competitor_id") or 0) for row in rows if int(row.get("competitor_id") or 0) > 0]
     await state.update_data(competitor_remove_selected_ids=selected)
-    await _render_remove_picker(cb.message, state)
+    data["competitor_remove_selected_ids"] = selected
+    await _render_remove_picker(
+        cb.message,
+        state,
+        data=data,
+        callback_info={
+            "callback_type": "comprem_all",
+            "user_id": data.get("user_id"),
+            "page_before": page_before,
+            "started_at": started_at,
+            "ack_status": ack_status,
+        },
+    )
 
 
 @router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_REMOVE, F.data == "comprem_done")
 async def on_remove_done(cb: CallbackQuery, state: FSMContext) -> None:
-    await cb.answer()
+    started_at = perf_counter()
     if not cb.message:
         return
     data = await state.get_data()
+    page_before = int(data.get("competitor_remove_page") or 0)
     selected_ids = {int(item) for item in (data.get("competitor_remove_selected_ids") or [])}
     if not selected_ids:
-        await cb.answer("Сначала выбери хотя бы одного конкурента.", show_alert=True)
+        rows = list(data.get("competitor_remove_rows") or [])
+        ack_status = await _answer_picker_callback(
+            cb,
+            callback_type="comprem_done",
+            started_at=started_at,
+            text="Сначала выбери хотя бы одного конкурента.",
+            show_alert=True,
+        )
+        _log_picker_callback(
+            callback_type="comprem_done",
+            user_id=data.get("user_id"),
+            page_before=page_before,
+            page_after=page_before,
+            candidate_count=len(rows),
+            keyboard_render_ms=0.0,
+            telegram_edit_ms=0.0,
+            started_at=started_at,
+            ack_status=ack_status,
+            edit_path="none",
+            status="empty_selection",
+        )
         return
+    ack_status = await _answer_picker_callback(cb, callback_type="comprem_done", started_at=started_at)
 
     user = await db_call(TgUser.objects.get, id=data["user_id"])
     removed = await db_run(lambda: deactivate_user_competitors(user=user, competitor_ids=sorted(selected_ids)))
@@ -881,6 +1256,19 @@ async def on_remove_done(cb: CallbackQuery, state: FSMContext) -> None:
             errors=[],
             counts=counts,
         )
+    )
+    _log_picker_callback(
+        callback_type="comprem_done",
+        user_id=data.get("user_id"),
+        page_before=page_before,
+        page_after=page_before,
+        candidate_count=len(data.get("competitor_remove_rows") or []),
+        keyboard_render_ms=0.0,
+        telegram_edit_ms=0.0,
+        started_at=started_at,
+        ack_status=ack_status,
+        edit_path="answer",
+        status="success",
     )
 
 
