@@ -10,6 +10,13 @@ from botapp.handlers import common, competitors
 from botapp.state import CompetitorManagementStates
 from tracking.adapters.base import SeedResolution
 from tracking.models import Competitor, Platform, Report, Schedule, SeedProfile, SeedStatus, TgUser, UserCompetitor
+from tracking.services.competitor_suggest_cache import (
+    COMPETITOR_SUGGEST_CACHE_SOURCE_COLD_BUILD,
+    COMPETITOR_SUGGEST_CACHE_SOURCE_SETUP_WARM,
+    COMPETITOR_SUGGEST_CACHE_SOURCE_SNAPSHOT_HIT,
+    CompetitorSuggestCacheLoadResult,
+    store_competitor_suggest_cache,
+)
 from tracking.services import report_pipeline, suggested_competitors
 from tracking.services.setup_retry_cache import clear_retry_cache
 
@@ -190,7 +197,7 @@ def test_competitors_suggest_reactivates_from_picker(monkeypatch):
     monkeypatch.setattr(
         competitors,
         "_load_add_candidates_for_user_cached",
-        lambda **kwargs: competitors.AddCandidateLoadResult(
+        lambda **kwargs: CompetitorSuggestCacheLoadResult(
             candidates=[
                 {
                     "platform": Platform.YOUTUBE,
@@ -204,6 +211,7 @@ def test_competitors_suggest_reactivates_from_picker(monkeypatch):
             ],
             notes=[],
             cache_hit=False,
+            cache_source=COMPETITOR_SUGGEST_CACHE_SOURCE_COLD_BUILD,
             discovery_build_ms=0.0,
         ),
     )
@@ -266,9 +274,50 @@ def test_competitors_suggest_second_open_reuses_cache(monkeypatch):
 
     assert calls["count"] == 1
     assert first.cache_hit is False
+    assert first.cache_source == COMPETITOR_SUGGEST_CACHE_SOURCE_COLD_BUILD
     assert second.cache_hit is True
+    assert second.cache_source == COMPETITOR_SUGGEST_CACHE_SOURCE_SNAPSHOT_HIT
     assert first.candidates == second.candidates
     assert first.notes == second.notes
+    clear_retry_cache()
+
+
+@pytest.mark.django_db
+def test_competitors_suggest_first_open_can_reuse_setup_warmed_cache(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=123, tg_chat_id=123)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+    _create_resolved_seed_profile(user=user, raw_input="@warm", canonical_url="https://www.youtube.com/@warm")
+
+    clear_retry_cache()
+    store_competitor_suggest_cache(
+        user=user,
+        candidates=[
+            {
+                "platform": Platform.YOUTUBE,
+                "external_id": "yt-warm",
+                "handle": "warm",
+                "url": "https://www.youtube.com/@warm",
+                "display_name": "Warm",
+                "added_by": "auto",
+                "meta": {},
+            }
+        ],
+        notes=["warmed"],
+        cache_source=COMPETITOR_SUGGEST_CACHE_SOURCE_SETUP_WARM,
+    )
+
+    monkeypatch.setattr(
+        competitors,
+        "_load_add_candidates_for_user",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("cold builder should not run")),
+    )
+
+    result = competitors._load_add_candidates_for_user_cached(user=user)
+
+    assert result.cache_hit is True
+    assert result.cache_source == COMPETITOR_SUGGEST_CACHE_SOURCE_SETUP_WARM
+    assert result.discovery_build_ms == 0.0
+    assert result.candidates[0]["external_id"] == "yt-warm"
     clear_retry_cache()
 
 
@@ -311,7 +360,9 @@ def test_competitors_suggest_cache_invalidates_when_seed_changes(monkeypatch):
 
     assert calls["count"] == 2
     assert first.cache_hit is False
+    assert first.cache_source == COMPETITOR_SUGGEST_CACHE_SOURCE_COLD_BUILD
     assert second.cache_hit is False
+    assert second.cache_source == COMPETITOR_SUGGEST_CACHE_SOURCE_COLD_BUILD
     assert first.candidates != second.candidates
     clear_retry_cache()
 
@@ -592,7 +643,7 @@ def test_competitors_suggest_allows_add_over_twenty(monkeypatch):
     monkeypatch.setattr(
         competitors,
         "_load_add_candidates_for_user_cached",
-        lambda **kwargs: competitors.AddCandidateLoadResult(
+        lambda **kwargs: CompetitorSuggestCacheLoadResult(
             candidates=[
                 {
                     "platform": Platform.YOUTUBE,
@@ -606,6 +657,7 @@ def test_competitors_suggest_allows_add_over_twenty(monkeypatch):
             ],
             notes=[],
             cache_hit=False,
+            cache_source=COMPETITOR_SUGGEST_CACHE_SOURCE_COLD_BUILD,
             discovery_build_ms=0.0,
         ),
     )

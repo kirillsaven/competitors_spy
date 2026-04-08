@@ -8,8 +8,12 @@ from asgiref.sync import async_to_sync, sync_to_async
 from botapp.handlers import setup
 from botapp.state import SetupStates
 from tracking.adapters.base import SeedResolution
-from tracking.models import SeedProfile, SeedStatus, TgUser
+from tracking.models import SeedProfile, SeedStatus, TgUser, UserCompetitor
 from tracking.services.account_linking import LinkedAccountSuggestion
+from tracking.services.competitor_suggest_cache import (
+    COMPETITOR_SUGGEST_CACHE_SOURCE_SETUP_WARM,
+    CompetitorSuggestCacheLoadResult,
+)
 from tracking.services.platform_onboarding import DiscoveryOutcome, PlatformDiscoveryStatus
 
 
@@ -37,6 +41,15 @@ class DummyMessage:
     async def answer(self, text: str, reply_markup=None):
         self.answers.append(text)
         return SimpleNamespace(chat=self.chat, message_id=len(self.answers), bot=self.bot)
+
+
+class DummyCallbackQuery:
+    def __init__(self, *, message: DummyMessage) -> None:
+        self.message = message
+        self.answers: list[tuple[str | None, bool]] = []
+
+    async def answer(self, text: str | None = None, show_alert: bool = False):
+        self.answers.append((text, show_alert))
 
 
 async def _db_call(func, *args, **kwargs):
@@ -266,6 +279,59 @@ def test_prune_text_and_quota_are_independent_per_platform():
     assert "TikTok: 20/20." in text
     assert "Instagram: 20/20." in text
     assert setup._quota_error_text(selected_by_platform=counts, limit=20) is None
+
+
+@pytest.mark.django_db
+def test_prune_done_warms_competitor_suggest_cache(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=707, tg_chat_id=707)
+    state = DummyState(
+        {
+            "user_id": user.id,
+            "candidates": [
+                {
+                    "platform": "youtube",
+                    "external_id": "yt-1",
+                    "handle": "creator",
+                    "url": "https://www.youtube.com/@creator",
+                    "display_name": "Creator",
+                    "added_by": "auto",
+                    "meta": {},
+                }
+            ],
+            "excluded_candidate_ids": [],
+        }
+    )
+    message = DummyMessage()
+    callback = DummyCallbackQuery(message=message)
+    warmed = {}
+
+    monkeypatch.setattr(setup, "db_call", _db_call)
+    monkeypatch.setattr(setup, "db_run", _db_run)
+
+    def fake_warm(*, user, builder):
+        warmed["user_id"] = user.id
+        warmed["builder"] = builder
+        return CompetitorSuggestCacheLoadResult(
+            candidates=[{"external_id": "yt-next"}],
+            notes=["warmed"],
+            cache_hit=False,
+            cache_source=COMPETITOR_SUGGEST_CACHE_SOURCE_SETUP_WARM,
+            discovery_build_ms=12.5,
+        )
+
+    async def fake_ask_timezone_method(message, state):
+        warmed["timezone_called"] = True
+
+    monkeypatch.setattr(setup, "warm_competitor_suggest_cache", fake_warm)
+    monkeypatch.setattr(setup, "_ask_timezone_method", fake_ask_timezone_method)
+
+    async_to_sync(setup.on_prune_done)(callback, state)
+
+    active_count = async_to_sync(sync_to_async(UserCompetitor.objects.filter(user=user, is_active=True).count, thread_sensitive=True))()
+    assert active_count == 1
+    assert warmed["user_id"] == user.id
+    assert warmed["builder"] == setup.build_competitor_suggest_candidates
+    assert warmed["timezone_called"] is True
 
 
 def test_cap_candidates_per_platform_trims_overflow_before_prune():

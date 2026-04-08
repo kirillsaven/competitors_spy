@@ -1,10 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
-from dataclasses import dataclass
-import hashlib
-import json
 import logging
 from time import perf_counter
 
@@ -33,11 +29,9 @@ from tracking.models import (
     Platform,
     Report,
     Schedule,
-    SeedProfile,
     SeedStatus,
     TgUser,
     UserCompetitor,
-    UserLinkedAccount,
 )
 from tracking.services.competitor_service import (
     PLATFORM_LABELS,
@@ -48,14 +42,17 @@ from tracking.services.competitor_service import (
     list_active_user_competitor_links_grouped,
     upsert_competitor,
 )
-from tracking.services.platform_onboarding import discover_competitors_for_onboarding
+from tracking.services.competitor_suggest_cache import (
+    CompetitorSuggestCacheLoadResult,
+    build_competitor_suggest_candidates,
+    load_competitor_suggest_cache,
+)
 from tracking.services.platform_onboarding import youtube_profile_recent_shorts_gate_status
 from tracking.services.seed_resolver import (
     candidate_platforms_for_exact_seed,
     resolve_exact_seed,
     resolve_instagram_seeds_batch,
 )
-from tracking.services.setup_retry_cache import get_cached_retry_value, store_retry_value
 from tracking.services.suggested_competitors import (
     activate_instagram_suggested_competitor,
     activate_youtube_suggested_competitor,
@@ -63,20 +60,10 @@ from tracking.services.suggested_competitors import (
     record_youtube_suggested_competitor_acceptance,
 )
 from tracking.services.setup_runtime import SetupRunContext
-
 router = Router()
 logger = logging.getLogger(__name__)
 
 _PAGE_SIZE = 8
-_COMPETITOR_SUGGEST_CACHE_VERSION = "v1"
-
-
-@dataclass(frozen=True)
-class AddCandidateLoadResult:
-    candidates: list[dict]
-    notes: list[str]
-    cache_hit: bool
-    discovery_build_ms: float
 
 
 def _discovery_target_per_platform() -> int:
@@ -88,10 +75,6 @@ def _discovery_target_per_platform() -> int:
         )
         or 20
     )
-
-
-def _competitor_suggest_cache_ttl_seconds() -> int:
-    return max(1, int(getattr(settings, "COMPETITOR_SUGGEST_CACHE_TTL_SECONDS", 900) or 900))
 
 
 def _format_competitor_name(link: UserCompetitor) -> str:
@@ -112,110 +95,8 @@ def _seed_meta(seed: SeedResolution) -> dict[str, str] | None:
     return meta or None
 
 
-def _resolved_seed_profile_for_user(*, user: TgUser) -> SeedProfile:
-    seed_profile = (
-        SeedProfile.objects.filter(user=user, status=SeedStatus.RESOLVED)
-        .order_by("-id")
-        .first()
-    )
-    if seed_profile is None:
-        raise RuntimeError("Не нашел сохраненный setup. Сначала заново заверши /setup.")
-    return seed_profile
-
-
-def _seed_input_and_keywords(*, seed_profile: SeedProfile) -> tuple[str, list[str]]:
-    seed_input = str(seed_profile.canonical_url or seed_profile.raw_input or "").strip()
-    if not seed_input:
-        raise RuntimeError("В setup не сохранился исходный профиль. Запусти /setup заново.")
-    keywords = [str(item).strip() for item in (seed_profile.niche_keywords or []) if str(item).strip()]
-    if not keywords:
-        raise RuntimeError("Не нашел ключевые слова ниши. Запусти /setup заново.")
-    return seed_input, keywords
-
-
-def _linked_account_cache_snapshot(account: UserLinkedAccount) -> dict:
-    return {
-        "platform": str(account.platform or ""),
-        "external_id": str(account.external_id or "").strip(),
-        "handle": str(account.handle or "").strip(),
-        "url": str(account.url or "").strip(),
-        "display_name": str(account.display_name or "").strip(),
-        "source": str(account.source or ""),
-        "is_seed": bool(account.is_seed),
-        "meta": account.meta if isinstance(account.meta, dict) else {},
-    }
-
-
-def _active_competitor_cache_snapshot(link: UserCompetitor) -> dict:
-    competitor = link.competitor
-    return {
-        "platform": str(competitor.platform or ""),
-        "external_id": str(competitor.external_id or "").strip(),
-        "handle": str(competitor.handle or "").strip(),
-        "url": str(competitor.url or "").strip(),
-        "display_name": str(competitor.display_name or "").strip(),
-        "meta": competitor.meta if isinstance(competitor.meta, dict) else {},
-    }
-
-
-def _add_candidates_cache_key(*, user: TgUser) -> str:
-    seed_profile = _resolved_seed_profile_for_user(user=user)
-    seed_input, keywords = _seed_input_and_keywords(seed_profile=seed_profile)
-    linked_accounts = list(UserLinkedAccount.objects.filter(user=user).order_by("id"))
-    active_links = list_active_user_competitor_links(user=user)
-    payload = {
-        "version": _COMPETITOR_SUGGEST_CACHE_VERSION,
-        "user_id": int(user.id),
-        "seed_profile": {
-            "id": int(seed_profile.id),
-            "raw_input": str(seed_profile.raw_input or "").strip(),
-            "canonical_url": str(seed_profile.canonical_url or "").strip(),
-            "detected_platform": str(seed_profile.detected_platform or ""),
-            "niche_keywords": keywords,
-            "niche_source": str(seed_profile.niche_source or ""),
-            "seed_input": seed_input,
-        },
-        "linked_accounts": [_linked_account_cache_snapshot(account) for account in linked_accounts],
-        "active_competitors": [_active_competitor_cache_snapshot(link) for link in active_links],
-        "yt_max_search_calls": int(getattr(settings, "YT_MAX_SEARCH_CALLS_PER_SETUP", 5) or 5),
-        "max_candidates_per_platform": _discovery_target_per_platform(),
-    }
-    digest = hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    ).hexdigest()
-    return f"competitor-suggest::{digest}"
-
-
-def _load_add_candidates_for_user_cached(*, user: TgUser) -> AddCandidateLoadResult:
-    cache_key = _add_candidates_cache_key(user=user)
-    cached, cache_hit = get_cached_retry_value(cache_key)
-    if cache_hit and isinstance(cached, dict):
-        candidates = deepcopy(list(cached.get("candidates") or []))
-        notes = [str(item) for item in (cached.get("notes") or []) if str(item).strip()]
-        return AddCandidateLoadResult(
-            candidates=candidates,
-            notes=notes,
-            cache_hit=True,
-            discovery_build_ms=0.0,
-        )
-
-    discovery_started = perf_counter()
-    candidates, notes = _load_add_candidates_for_user(user=user)
-    discovery_build_ms = (perf_counter() - discovery_started) * 1000
-    store_retry_value(
-        cache_key,
-        {
-            "candidates": deepcopy(candidates),
-            "notes": list(notes),
-        },
-        ttl_seconds=_competitor_suggest_cache_ttl_seconds(),
-    )
-    return AddCandidateLoadResult(
-        candidates=deepcopy(candidates),
-        notes=list(notes),
-        cache_hit=False,
-        discovery_build_ms=discovery_build_ms,
-    )
+def _load_add_candidates_for_user_cached(*, user: TgUser) -> CompetitorSuggestCacheLoadResult:
+    return load_competitor_suggest_cache(user=user, builder=_load_add_candidates_for_user)
 
 
 def _counts_lines(counts: dict[str, int]) -> list[str]:
@@ -254,94 +135,8 @@ def _active_link_rows(*, user: TgUser) -> list[dict]:
     return rows
 
 
-def _seed_resolution_from_linked_account(account: UserLinkedAccount) -> SeedResolution | None:
-    external_id = str(account.external_id or "").strip()
-    if not external_id:
-        return None
-    meta = account.meta if isinstance(account.meta, dict) else {}
-    return SeedResolution(
-        platform=account.platform,
-        external_id=external_id,
-        handle=str(account.handle or "").strip() or None,
-        url=str(account.url or "").strip(),
-        title=str(account.display_name or account.handle or external_id).strip(),
-        description=str(meta.get("description") or "").strip() or None,
-        uploads_playlist_id=str(meta.get("uploads_playlist_id") or "").strip() or None,
-    )
-
-
-def _seed_resolution_from_user_link(link: UserCompetitor) -> SeedResolution | None:
-    competitor = link.competitor
-    external_id = str(competitor.external_id or "").strip()
-    if not external_id:
-        return None
-    meta = competitor.meta if isinstance(competitor.meta, dict) else {}
-    return SeedResolution(
-        platform=competitor.platform,
-        external_id=external_id,
-        handle=str(competitor.handle or "").strip() or None,
-        url=str(competitor.url or "").strip(),
-        title=str(competitor.display_name or competitor.handle or external_id).strip(),
-        description=str(meta.get("description") or "").strip() or None,
-        uploads_playlist_id=str(meta.get("uploads_playlist_id") or "").strip() or None,
-    )
-
-
 def _load_add_candidates_for_user(*, user: TgUser) -> tuple[list[dict], list[str]]:
-    seed_profile = _resolved_seed_profile_for_user(user=user)
-    seed_input, keywords = _seed_input_and_keywords(seed_profile=seed_profile)
-
-    context = SetupRunContext()
-    seed = resolve_exact_seed(seed_input, context=context)
-    if seed is None:
-        raise RuntimeError("Не смог заново подтвердить seed-профиль для подбора конкурентов.")
-
-    linked_accounts = [
-        seed_resolution
-        for seed_resolution in (
-            _seed_resolution_from_linked_account(account)
-            for account in UserLinkedAccount.objects.filter(user=user).order_by("id")
-        )
-        if seed_resolution is not None
-    ]
-    active_competitors = [
-        seed_resolution
-        for seed_resolution in (
-            _seed_resolution_from_user_link(link)
-            for link in list_active_user_competitor_links(user=user)
-        )
-        if seed_resolution is not None
-    ]
-    active_keys = {(item.platform, item.external_id) for item in active_competitors}
-
-    outcome = discover_competitors_for_onboarding(
-        keywords=keywords,
-        seed=seed,
-        competitors=active_competitors,
-        linked_accounts=linked_accounts,
-        max_youtube_search_calls=int(getattr(settings, "YT_MAX_SEARCH_CALLS_PER_SETUP", 5) or 5),
-        max_candidates_per_platform=_discovery_target_per_platform(),
-        context=context,
-    )
-    candidates: list[dict] = []
-    seen: set[tuple[str, str]] = set()
-    for candidate in outcome.candidates:
-        key = (candidate.platform, candidate.external_id)
-        if key in active_keys or key in seen:
-            continue
-        seen.add(key)
-        candidates.append(
-            {
-                "platform": candidate.platform,
-                "external_id": candidate.external_id,
-                "handle": candidate.handle,
-                "url": candidate.url,
-                "display_name": candidate.display_name,
-                "added_by": AddedBy.AUTO,
-                "meta": {},
-            }
-        )
-    return candidates, list(outcome.notes or [])
+    return build_competitor_suggest_candidates(user=user)
 
 
 def _build_picker_text(
@@ -666,10 +461,11 @@ async def cmd_competitors_suggest(message: Message, state: FSMContext) -> None:
     except Exception as exc:
         await state.clear()
         logger.info(
-            "competitor_suggest_open_observability user_id=%s cache_hit=%s discovery_build_ms=%.1f total_open_ms=%.1f "
+            "competitor_suggest_open_observability user_id=%s cache_hit=%s cache_source=%s discovery_build_ms=%.1f total_open_ms=%.1f "
             "candidate_count=%s status=%s failure_reason=%s",
             user.id,
             False,
+            "cold_build",
             0.0,
             (perf_counter() - open_started) * 1000,
             0,
@@ -688,10 +484,11 @@ async def cmd_competitors_suggest(message: Message, state: FSMContext) -> None:
             text = f"{text}\n\n{details}"
         await loading_message.edit_text(text)
         logger.info(
-            "competitor_suggest_open_observability user_id=%s cache_hit=%s discovery_build_ms=%.1f total_open_ms=%.1f "
+            "competitor_suggest_open_observability user_id=%s cache_hit=%s cache_source=%s discovery_build_ms=%.1f total_open_ms=%.1f "
             "candidate_count=%s status=%s",
             user.id,
             load_result.cache_hit,
+            load_result.cache_source,
             load_result.discovery_build_ms,
             (perf_counter() - open_started) * 1000,
             len(candidates),
@@ -711,10 +508,11 @@ async def cmd_competitors_suggest(message: Message, state: FSMContext) -> None:
     await state.set_state(CompetitorManagementStates.PICK_COMPETITORS_ADD)
     await _render_add_picker(loading_message, state)
     logger.info(
-        "competitor_suggest_open_observability user_id=%s cache_hit=%s discovery_build_ms=%.1f total_open_ms=%.1f "
+        "competitor_suggest_open_observability user_id=%s cache_hit=%s cache_source=%s discovery_build_ms=%.1f total_open_ms=%.1f "
         "candidate_count=%s status=%s",
         user.id,
         load_result.cache_hit,
+        load_result.cache_source,
         load_result.discovery_build_ms,
         (perf_counter() - open_started) * 1000,
         len(candidates),
