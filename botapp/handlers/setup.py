@@ -55,6 +55,10 @@ from tracking.models import (
 )
 from tracking.services.account_linking import replace_user_linked_accounts, suggest_accounts_for_platforms
 from tracking.services.competitor_service import upsert_competitor
+from tracking.services.competitor_suggest_cache import (
+    build_competitor_suggest_candidates,
+    warm_competitor_suggest_cache,
+)
 from tracking.services.niche_service import infer_niche_keywords
 from tracking.services.platform_onboarding import (
     PlatformOnboardingError,
@@ -1560,6 +1564,25 @@ async def on_prune_done(cb: CallbackQuery, state: FSMContext) -> None:
             added_by=str(c.get("added_by") or AddedBy.AUTO),
             meta=meta or None,
         )
+
+    try:
+        warm_result = await asyncio.to_thread(
+            warm_competitor_suggest_cache,
+            user=user,
+            builder=build_competitor_suggest_candidates,
+        )
+        logger.info(
+            "competitor_suggest_cache_warm_observability user_id=%s cache_hit=%s cache_source=%s discovery_build_ms=%.1f "
+            "candidate_count=%s status=%s",
+            user.id,
+            warm_result.cache_hit,
+            warm_result.cache_source,
+            warm_result.discovery_build_ms,
+            len(warm_result.candidates),
+            "success",
+        )
+    except Exception as exc:
+        logger.warning("competitor_suggest_cache_warm_failed user_id=%s error=%s", user.id, exc)
 
     await _ask_timezone_method(cb.message, state)
 
