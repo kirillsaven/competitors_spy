@@ -13,6 +13,7 @@ from botapp.callback_safety import (
     CallbackAck,
     MessageEdit,
     callback_started,
+    keyboard_metrics,
     log_callback_observability,
     safe_callback_ack,
     safe_edit_message,
@@ -329,6 +330,7 @@ def _log_picker_callback(
     keyboard_render_ms: float,
     status: str,
     error: str | None = None,
+    **fields,
 ) -> None:
     log_callback_observability(
         logger,
@@ -341,6 +343,7 @@ def _log_picker_callback(
         candidate_count=candidate_count,
         keyboard_render_ms=f"{keyboard_render_ms:.1f}",
         status=status,
+        **fields,
     )
 
 
@@ -409,6 +412,7 @@ async def _render_add_picker(
         done_text="Добавить",
     )
     keyboard_render_ms = (callback_started() - keyboard_started) * 1000
+    metrics = keyboard_metrics(kb)
     edit = await safe_edit_message(
         message,
         text=text,
@@ -427,6 +431,8 @@ async def _render_add_picker(
             candidate_count=len(rows),
             keyboard_render_ms=keyboard_render_ms,
             status="failure" if edit.failure_reason else "success",
+            rows_count=metrics.rows_count,
+            rendered_button_count=metrics.rendered_button_count,
         )
 
 
@@ -467,6 +473,7 @@ async def _render_remove_picker(
         done_text="Убрать",
     )
     keyboard_render_ms = (callback_started() - keyboard_started) * 1000
+    metrics = keyboard_metrics(kb)
     edit = await safe_edit_message(
         message,
         text=text,
@@ -485,6 +492,8 @@ async def _render_remove_picker(
             candidate_count=len(kb_rows),
             keyboard_render_ms=keyboard_render_ms,
             status="failure" if edit.failure_reason else "success",
+            rows_count=metrics.rows_count,
+            rendered_button_count=metrics.rendered_button_count,
         )
 
 

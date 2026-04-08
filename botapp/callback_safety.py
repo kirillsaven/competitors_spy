@@ -6,7 +6,7 @@ from time import perf_counter
 from typing import Any
 
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, InlineKeyboardMarkup
 
 
 @dataclass(frozen=True)
@@ -24,8 +24,22 @@ class MessageEdit:
     failure_reason: str | None = None
 
 
+@dataclass(frozen=True)
+class KeyboardMetrics:
+    rows_count: int
+    rendered_button_count: int
+
+
 def callback_started() -> float:
     return perf_counter()
+
+
+def keyboard_metrics(markup: InlineKeyboardMarkup | None) -> KeyboardMetrics:
+    rows = list(getattr(markup, "inline_keyboard", []) or [])
+    return KeyboardMetrics(
+        rows_count=len(rows),
+        rendered_button_count=sum(len(row) for row in rows),
+    )
 
 
 def exception_summary(exc: Exception) -> str:

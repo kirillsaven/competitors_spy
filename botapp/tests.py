@@ -1,6 +1,6 @@
 from django.test import TestCase
 
-from botapp.keyboards import kb_prune_competitors, kb_seed_candidates
+from botapp.keyboards import kb_manage_competitors, kb_prune_competitors, kb_seed_candidates
 from botapp.user_sync import normalize_profile_text, normalize_tg_username, upsert_tg_user
 from tracking.models import TgUser
 
@@ -91,6 +91,51 @@ class CompetitorPickerKeyboardTests(TestCase):
         self.assertEqual(len(first_row), 1)
         self.assertEqual(first_row[0].callback_data, "prune_toggle:0")
         self.assertEqual(first_row[0].text, "✅ 1. [YouTube] Daria Pancho")
+
+
+class ManageCompetitorPickerKeyboardTests(TestCase):
+    def test_manage_competitors_renders_inline_open_link_button(self) -> None:
+        markup = kb_manage_competitors(
+            competitor_rows=[(0, "[YT] Daria Pancho", "https://www.youtube.com/@dariapancho")],
+            selected_ids=set(),
+            page=0,
+            page_size=8,
+            toggle_prefix="compadd_toggle",
+            page_prefix="compadd_page",
+            all_callback="compadd_all",
+            done_callback="compadd_done",
+            done_text="Добавить",
+        )
+
+        first_row = markup.inline_keyboard[0]
+        self.assertEqual(len(first_row), 2)
+        self.assertEqual(first_row[0].callback_data, "compadd_toggle:0")
+        self.assertEqual(first_row[0].text, "⬜ 1. [YT] Daria Pancho")
+        self.assertEqual(first_row[1].text, "↗")
+        self.assertEqual(first_row[1].url, "https://www.youtube.com/@dariapancho")
+
+    def test_manage_competitors_has_no_separate_link_grid_rows(self) -> None:
+        markup = kb_manage_competitors(
+            competitor_rows=[
+                (0, "[YT] Daria Pancho", "https://www.youtube.com/@dariapancho"),
+                (1, "[IG] Anatoliy", "https://www.instagram.com/anatoliypanov/"),
+            ],
+            selected_ids=set(),
+            page=0,
+            page_size=8,
+            toggle_prefix="compadd_toggle",
+            page_prefix="compadd_page",
+            all_callback="compadd_all",
+            done_callback="compadd_done",
+            done_text="Добавить",
+        )
+
+        row_lengths = [len(row) for row in markup.inline_keyboard]
+        self.assertEqual(row_lengths[:2], [2, 2])
+        self.assertEqual(markup.inline_keyboard[2][0].text, "1/1")
+        flat_texts = [button.text for row in markup.inline_keyboard for button in row]
+        self.assertNotIn("1↗", flat_texts)
+        self.assertNotIn("2↗", flat_texts)
 
 
 class CompetitorDisplayNameTests(TestCase):
