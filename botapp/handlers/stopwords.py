@@ -46,14 +46,20 @@ def _summary_lines(*, action: str, changed: int, skipped: int, total: int) -> st
     )
 
 
-def _picker_text(*, title: str, selected_total: int, total: int) -> str:
+def _picker_text(*, title: str) -> str:
     return "\n".join(
         [
             title,
-            f"Выбрано: {selected_total}/{total}",
-            "Когда готово, нажми «Готово».",
+            "Отметки сохраняются при переключении страниц.",
+            "Когда готово, нажми кнопку ниже.",
         ]
     )
+
+
+def _picker_done_text(action: str, selected_total: int) -> str:
+    if selected_total <= 0:
+        return action
+    return f"{action} ({selected_total})"
 
 
 def _picker_page_count(total: int, page_size: int) -> int:
@@ -105,8 +111,6 @@ async def _render_add_picker(
     page = _clamp_picker_page(int(data.get("stopword_add_page") or 0), total=len(suggestions), page_size=_PAGE_SIZE)
     text = _picker_text(
         title="Выбери фразы, которые нужно добавить в stopwords.",
-        selected_total=len(selected),
-        total=len(suggestions),
     )
     keyboard_started = callback_started()
     kb = kb_manage_stopwords(
@@ -118,7 +122,7 @@ async def _render_add_picker(
         page_prefix="stopadd_page",
         all_callback="stopadd_all",
         done_callback="stopadd_done",
-        done_text="Добавить",
+        done_text=_picker_done_text("Добавить", len(selected)),
     )
     keyboard_render_ms = (callback_started() - keyboard_started) * 1000
     metrics = keyboard_metrics(kb)
@@ -153,8 +157,6 @@ async def _render_remove_picker(
     page = _clamp_picker_page(int(data.get("stopword_remove_page") or 0), total=len(stopwords), page_size=_PAGE_SIZE)
     text = _picker_text(
         title="Выбери stopwords, которые нужно удалить.",
-        selected_total=len(selected),
-        total=len(stopwords),
     )
     keyboard_started = callback_started()
     kb = kb_manage_stopwords(
@@ -166,7 +168,7 @@ async def _render_remove_picker(
         page_prefix="stoprem_page",
         all_callback="stoprem_all",
         done_callback="stoprem_done",
-        done_text="Удалить",
+        done_text=_picker_done_text("Удалить", len(selected)),
     )
     keyboard_render_ms = (callback_started() - keyboard_started) * 1000
     metrics = keyboard_metrics(kb)
@@ -344,6 +346,7 @@ async def on_add_toggle(cb: CallbackQuery, state: FSMContext) -> None:
         cb.message,
         state,
         data=data,
+        edit_mode="markup",
         callback_info={"ack": ack, "page_before": page_before},
     )
 
@@ -364,6 +367,7 @@ async def on_add_all(cb: CallbackQuery, state: FSMContext) -> None:
         cb.message,
         state,
         data=data,
+        edit_mode="markup",
         callback_info={"ack": ack, "page_before": page_before},
     )
 
@@ -472,6 +476,7 @@ async def on_remove_toggle(cb: CallbackQuery, state: FSMContext) -> None:
         cb.message,
         state,
         data=data,
+        edit_mode="markup",
         callback_info={"ack": ack, "page_before": page_before},
     )
 
@@ -492,6 +497,7 @@ async def on_remove_all(cb: CallbackQuery, state: FSMContext) -> None:
         cb.message,
         state,
         data=data,
+        edit_mode="markup",
         callback_info={"ack": ack, "page_before": page_before},
     )
 

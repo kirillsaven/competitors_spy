@@ -270,6 +270,29 @@ def test_competitor_add_picker_failed_ack_does_not_abort_page_render():
     assert any("Candidate 8" in text for text in _button_texts(message.reply_markups[-1]))
 
 
+def test_competitor_add_picker_toggle_uses_markup_only():
+    candidates = [_candidate(idx) for idx in range(10)]
+    state = DummyState()
+    async_to_sync(state.update_data)(
+        user_id=104,
+        competitor_add_candidates=candidates,
+        competitor_add_picker_rows=competitors._make_add_picker_rows(candidates),
+        competitor_add_platform_by_id=competitors._make_add_platform_by_id(candidates),
+        competitor_add_selected_ids=[],
+        competitor_add_page=0,
+        competitor_add_notes=[],
+    )
+    message = DummyMessage(user_id=104)
+
+    async_to_sync(competitors.on_add_toggle)(DummyCallbackQuery(data="compadd_toggle:0", message=message), state)
+
+    assert state.data["competitor_add_selected_ids"] == [0]
+    assert message.edit_text_calls == 0
+    assert message.edit_reply_markup_calls == 1
+    assert any(text.startswith("✅ 1. [YT] Candidate 0") for text in _button_texts(message.reply_markups[-1]))
+    assert "Добавить (1)" in _button_texts(message.reply_markups[-1])
+
+
 def test_competitor_add_picker_selection_persists_across_pages():
     candidates = [_candidate(idx) for idx in range(10)]
     state = DummyState()
@@ -291,7 +314,10 @@ def test_competitor_add_picker_selection_persists_across_pages():
 
     assert state.data["competitor_add_selected_ids"] == [0, 8]
     assert state.data["competitor_add_page"] == 0
+    assert message.edit_text_calls == 0
+    assert message.edit_reply_markup_calls == 4
     assert any(text.startswith("✅ 1. [YT] Candidate 0") for text in _button_texts(message.reply_markups[-1]))
+    assert "Добавить (2)" in _button_texts(message.reply_markups[-1])
 
 
 @pytest.mark.django_db

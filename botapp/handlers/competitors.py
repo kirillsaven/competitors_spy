@@ -233,21 +233,22 @@ def _load_add_candidates_for_user(*, user: TgUser) -> tuple[list[dict], list[str
 def _build_picker_text(
     *,
     action_label: str,
-    selected_total: int,
-    counts: dict[str, int],
     notes: list[str] | None = None,
 ) -> str:
-    lines = [
-        action_label,
-        f"Выбрано: {selected_total}",
-        *_counts_lines(counts),
-    ]
+    lines = [action_label]
     extra = [str(item).strip() for item in (notes or []) if str(item).strip()]
     if extra:
         lines.append("")
         lines.extend(extra[:5])
-    lines.append("Когда готово, нажми «Готово».")
+    lines.append("Отметки сохраняются при переключении страниц.")
+    lines.append("Когда готово, нажми кнопку ниже.")
     return "\n".join(lines)
+
+
+def _picker_done_text(action: str, selected_total: int) -> str:
+    if selected_total <= 0:
+        return action
+    return f"{action} ({selected_total})"
 
 
 def _picker_page_count(total: int, page_size: int) -> int:
@@ -392,11 +393,8 @@ async def _render_add_picker(
     platform_by_id = dict(data.get("competitor_add_platform_by_id") or {})
     if not platform_by_id:
         platform_by_id = _make_add_platform_by_id(candidates)
-    counts = _selected_platform_counts(selected_ids=selected_ids, platform_by_id=platform_by_id)
     text = _build_picker_text(
         action_label="Нашел кандидатов для добавления. Выбирай профили кнопками ниже.",
-        selected_total=len(selected_ids),
-        counts=counts,
         notes=notes,
     )
     keyboard_started = callback_started()
@@ -409,7 +407,7 @@ async def _render_add_picker(
         page_prefix="compadd_page",
         all_callback="compadd_all",
         done_callback="compadd_done",
-        done_text="Добавить",
+        done_text=_picker_done_text("Добавить", len(selected_ids)),
     )
     keyboard_render_ms = (callback_started() - keyboard_started) * 1000
     metrics = keyboard_metrics(kb)
@@ -454,11 +452,8 @@ async def _render_remove_picker(
     platform_by_id = dict(data.get("competitor_remove_platform_by_id") or {})
     if not platform_by_id:
         platform_by_id = _make_remove_platform_by_id(rows)
-    counts = _selected_platform_counts(selected_ids=selected_ids, platform_by_id=platform_by_id)
     text = _build_picker_text(
         action_label="Выбери конкурентов, которых нужно убрать из активного списка.",
-        selected_total=len(selected_ids),
-        counts=counts,
     )
     keyboard_started = callback_started()
     kb = kb_manage_competitors(
@@ -470,7 +465,7 @@ async def _render_remove_picker(
         page_prefix="comprem_page",
         all_callback="comprem_all",
         done_callback="comprem_done",
-        done_text="Убрать",
+        done_text=_picker_done_text("Убрать", len(selected_ids)),
     )
     keyboard_render_ms = (callback_started() - keyboard_started) * 1000
     metrics = keyboard_metrics(kb)
@@ -918,6 +913,7 @@ async def on_add_toggle(cb: CallbackQuery, state: FSMContext) -> None:
         cb.message,
         state,
         data=data,
+        edit_mode="markup",
         callback_info={
             "ack": ack,
             "page_before": page_before,
@@ -941,6 +937,7 @@ async def on_add_all(cb: CallbackQuery, state: FSMContext) -> None:
         cb.message,
         state,
         data=data,
+        edit_mode="markup",
         callback_info={
             "ack": ack,
             "page_before": page_before,
@@ -1077,6 +1074,7 @@ async def on_remove_toggle(cb: CallbackQuery, state: FSMContext) -> None:
         cb.message,
         state,
         data=data,
+        edit_mode="markup",
         callback_info={
             "ack": ack,
             "page_before": page_before,
@@ -1100,6 +1098,7 @@ async def on_remove_all(cb: CallbackQuery, state: FSMContext) -> None:
         cb.message,
         state,
         data=data,
+        edit_mode="markup",
         callback_info={
             "ack": ack,
             "page_before": page_before,
