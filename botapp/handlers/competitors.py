@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from time import perf_counter
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -21,6 +20,7 @@ from botapp.callback_safety import (
 )
 from botapp.db import db_call, db_run
 from botapp.keyboards import GLOBAL_BACK_CALLBACK, kb_manage_competitors
+from botapp.picker_open import PreparedPickerOpen, open_picker_with_cache
 from botapp.state import CompetitorManagementStates
 from botapp.user_sync import upsert_tg_user
 from tracking.adapters.base import SeedResolution
@@ -486,88 +486,58 @@ async def cmd_competitors_suggest(message: Message, state: FSMContext) -> None:
         await message.answer("Сначала заверши /setup.")
         return
 
-    open_started = perf_counter()
-    load_result = await asyncio.to_thread(_peek_add_candidates_for_user_cached, user=user)
-    open_path = "single_send" if load_result is not None else "placeholder_edit"
-    loading_message = None
-    try:
-        if load_result is None:
-            loading_message = await message.answer("Ищу кандидатов для добавления...")
-            load_result = await asyncio.to_thread(_load_add_candidates_for_user_cached, user=user)
-    except Exception as exc:
-        await state.clear()
-        logger.info(
-            "competitor_suggest_open_observability user_id=%s open_path=%s cache_hit=%s cache_source=%s discovery_build_ms=%.1f total_open_ms=%.1f "
-            "candidate_count=%s status=%s failure_reason=%s",
-            user.id,
-            open_path,
-            False,
-            "cold_build",
-            0.0,
-            (perf_counter() - open_started) * 1000,
-            0,
-            "failure",
-            exc,
+    async def _peek_load_result():
+        return await asyncio.to_thread(_peek_add_candidates_for_user_cached, user=user)
+
+    async def _load_result():
+        return await asyncio.to_thread(_load_add_candidates_for_user_cached, user=user)
+
+    async def _prepare_picker(load_result: CompetitorSuggestCacheLoadResult) -> PreparedPickerOpen | None:
+        candidates = load_result.candidates
+        if not candidates:
+            return None
+        await state.update_data(
+            user_id=user.id,
+            competitor_add_candidates=candidates,
+            competitor_add_picker_rows=_make_add_picker_rows(candidates),
+            competitor_add_platform_by_id=_make_add_platform_by_id(candidates),
+            competitor_add_selected_ids=[],
+            competitor_add_page=0,
+            competitor_add_notes=load_result.notes,
         )
-        if loading_message is not None:
-            await loading_message.edit_text(f"Не смог подготовить список кандидатов: {exc}")
-        else:
-            await message.answer(f"Не смог подготовить список кандидатов: {exc}")
-        return
-    candidates = load_result.candidates
-    notes = load_result.notes
-    if not candidates:
-        await state.clear()
-        details = "\n".join(notes[:5])
+        await state.set_state(CompetitorManagementStates.PICK_COMPETITORS_ADD)
+        data = await state.get_data()
+        text, kb, _, _, row_count = _build_add_picker_view(data)
+        return PreparedPickerOpen(text=text, reply_markup=kb, row_count=row_count)
+
+    def _empty_text(load_result: CompetitorSuggestCacheLoadResult) -> str:
+        details = "\n".join(load_result.notes[:5])
         text = "Не нашел новых кандидатов для добавления."
         if details:
             text = f"{text}\n\n{details}"
-        if loading_message is not None:
-            await loading_message.edit_text(text)
-        else:
-            await message.answer(text)
-        logger.info(
-            "competitor_suggest_open_observability user_id=%s open_path=%s cache_hit=%s cache_source=%s discovery_build_ms=%.1f total_open_ms=%.1f "
-            "candidate_count=%s status=%s",
-            user.id,
-            open_path,
-            load_result.cache_hit,
-            load_result.cache_source,
-            load_result.discovery_build_ms,
-            (perf_counter() - open_started) * 1000,
-            len(candidates),
-            "empty",
-        )
-        return
+        return text
 
-    await state.update_data(
+    def _log_fields(load_result: CompetitorSuggestCacheLoadResult | None, row_count: int) -> dict[str, object]:
+        return {
+            "cache_hit": getattr(load_result, "cache_hit", False),
+            "cache_source": getattr(load_result, "cache_source", "cold_build"),
+            "discovery_build_ms": f"{getattr(load_result, 'discovery_build_ms', 0.0):.1f}",
+            "candidate_count": row_count,
+        }
+
+    await open_picker_with_cache(
+        message=message,
+        logger=logger,
+        event_name="competitor_suggest_open_observability",
         user_id=user.id,
-        competitor_add_candidates=candidates,
-        competitor_add_picker_rows=_make_add_picker_rows(candidates),
-        competitor_add_platform_by_id=_make_add_platform_by_id(candidates),
-        competitor_add_selected_ids=[],
-        competitor_add_page=0,
-        competitor_add_notes=notes,
-    )
-    await state.set_state(CompetitorManagementStates.PICK_COMPETITORS_ADD)
-    if open_path == "single_send":
-        data = await state.get_data()
-        text, kb, _, _, row_count = _build_add_picker_view(data)
-        await message.answer(text, reply_markup=kb)
-    else:
-        await _render_add_picker(loading_message, state)
-        row_count = len(candidates)
-    logger.info(
-        "competitor_suggest_open_observability user_id=%s open_path=%s cache_hit=%s cache_source=%s discovery_build_ms=%.1f total_open_ms=%.1f "
-        "candidate_count=%s status=%s",
-        user.id,
-        open_path,
-        load_result.cache_hit,
-        load_result.cache_source,
-        load_result.discovery_build_ms,
-        (perf_counter() - open_started) * 1000,
-        row_count,
-        "success",
+        peek=_peek_load_result,
+        load=_load_result,
+        loading_text="Ищу кандидатов для добавления...",
+        build_failure_text=lambda exc: f"Не смог подготовить список кандидатов: {exc}",
+        build_empty_text=_empty_text,
+        prepare_picker=_prepare_picker,
+        clear_state=state.clear,
+        build_log_fields=_log_fields,
     )
 
 
@@ -616,78 +586,50 @@ async def cmd_competitors_remove(message: Message, state: FSMContext) -> None:
         await message.answer("Сначала заверши /setup.")
         return
 
-    open_started = perf_counter()
-    load_result = await db_run(lambda: _peek_remove_picker_snapshot_for_user_cached(user=user))
-    open_path = "single_send" if load_result is not None else "placeholder_edit"
-    picker = None
-    try:
-        if load_result is None:
-            picker = await message.answer("Готовлю список активных конкурентов...")
-            load_result = await db_run(lambda: _load_remove_picker_snapshot_for_user_cached(user=user))
-    except Exception as exc:
-        await state.clear()
-        logger.info(
-            "competitor_remove_open_observability user_id=%s open_path=%s cache_hit=%s cache_source=%s total_open_ms=%.1f row_count=%s status=%s failure_reason=%s",
-            user.id,
-            open_path,
-            False,
-            "cold_build",
-            (perf_counter() - open_started) * 1000,
-            0,
-            "failure",
-            exc,
-        )
-        if picker is not None:
-            await picker.edit_text(f"Не смог подготовить список активных конкурентов: {exc}")
-        else:
-            await message.answer(f"Не смог подготовить список активных конкурентов: {exc}")
-        return
+    async def _peek_load_result():
+        return await db_run(lambda: _peek_remove_picker_snapshot_for_user_cached(user=user))
 
-    snapshot = dict(load_result.payload or {})
-    rows = list(snapshot.get("rows") or [])
-    if not rows:
-        await state.clear()
-        logger.info(
-            "competitor_remove_open_observability user_id=%s open_path=%s cache_hit=%s cache_source=%s total_open_ms=%.1f row_count=%s status=%s",
-            user.id,
-            open_path,
-            load_result.cache_hit,
-            load_result.cache_source,
-            (perf_counter() - open_started) * 1000,
-            0,
-            "empty",
-        )
-        if picker is not None:
-            await picker.edit_text("Активных конкурентов для удаления сейчас нет.")
-        else:
-            await message.answer("Активных конкурентов для удаления сейчас нет.")
-        return
+    async def _load_result():
+        return await db_run(lambda: _load_remove_picker_snapshot_for_user_cached(user=user))
 
-    await state.update_data(
-        user_id=user.id,
-        competitor_remove_rows=rows,
-        competitor_remove_picker_rows=list(snapshot.get("picker_rows") or _make_remove_picker_rows(rows)),
-        competitor_remove_platform_by_id=dict(snapshot.get("platform_by_id") or _make_remove_platform_by_id(rows)),
-        competitor_remove_selected_ids=[],
-        competitor_remove_page=0,
-    )
-    await state.set_state(CompetitorManagementStates.PICK_COMPETITORS_REMOVE)
-    if open_path == "single_send":
+    async def _prepare_picker(load_result) -> PreparedPickerOpen | None:
+        snapshot = dict(load_result.payload or {})
+        rows = list(snapshot.get("rows") or [])
+        if not rows:
+            return None
+        await state.update_data(
+            user_id=user.id,
+            competitor_remove_rows=rows,
+            competitor_remove_picker_rows=list(snapshot.get("picker_rows") or _make_remove_picker_rows(rows)),
+            competitor_remove_platform_by_id=dict(snapshot.get("platform_by_id") or _make_remove_platform_by_id(rows)),
+            competitor_remove_selected_ids=[],
+            competitor_remove_page=0,
+        )
+        await state.set_state(CompetitorManagementStates.PICK_COMPETITORS_REMOVE)
         data = await state.get_data()
         text, kb, _, _, row_count = _build_remove_picker_view(data)
-        await message.answer(text, reply_markup=kb)
-    else:
-        await _render_remove_picker(picker, state)
-        row_count = len(rows)
-    logger.info(
-        "competitor_remove_open_observability user_id=%s open_path=%s cache_hit=%s cache_source=%s total_open_ms=%.1f row_count=%s status=%s",
-        user.id,
-        open_path,
-        load_result.cache_hit,
-        load_result.cache_source,
-        (perf_counter() - open_started) * 1000,
-        row_count,
-        "success",
+        return PreparedPickerOpen(text=text, reply_markup=kb, row_count=row_count)
+
+    def _log_fields(load_result, row_count: int) -> dict[str, object]:
+        return {
+            "cache_hit": getattr(load_result, "cache_hit", False),
+            "cache_source": getattr(load_result, "cache_source", "cold_build"),
+            "row_count": row_count,
+        }
+
+    await open_picker_with_cache(
+        message=message,
+        logger=logger,
+        event_name="competitor_remove_open_observability",
+        user_id=user.id,
+        peek=_peek_load_result,
+        load=_load_result,
+        loading_text="Готовлю список активных конкурентов...",
+        build_failure_text=lambda exc: f"Не смог подготовить список активных конкурентов: {exc}",
+        build_empty_text=lambda _load_result: "Активных конкурентов для удаления сейчас нет.",
+        prepare_picker=_prepare_picker,
+        clear_state=state.clear,
+        build_log_fields=_log_fields,
     )
 
 
