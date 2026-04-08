@@ -826,3 +826,118 @@ def test_suggested_youtube_add_is_idempotent_and_can_grow_active_list_beyond_twe
     assert acceptance["events"][0]["channel_id"] == "yt-suggested-21"
     assert any("Активных YouTube-конкурентов: 21" in answer for answer in message.answers)
     assert message.answers[-1] == "Suggested 21 уже есть в активных YouTube-конкурентах."
+
+
+@pytest.mark.django_db
+def test_suggested_instagram_add_reactivates_competitor(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=333, tg_chat_id=333)
+    competitor_obj = async_to_sync(sync_to_async(Competitor.objects.create, thread_sensitive=True))(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-suggested-reactivate",
+        handle="ig_reactivate",
+        display_name="IG Suggested Reactivate",
+        url="https://www.instagram.com/ig_reactivate/",
+    )
+    async_to_sync(sync_to_async(UserCompetitor.objects.create, thread_sensitive=True))(
+        user=user,
+        competitor=competitor_obj,
+        is_active=False,
+        added_by="auto",
+    )
+    report = async_to_sync(sync_to_async(Report.objects.create, thread_sensitive=True))(
+        user=user,
+        period_start=datetime(2026, 3, 30, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 31, 0, 0, tzinfo=UTC),
+        status="sent",
+        payload={
+            "sections": [],
+            "suggested_competitors": {
+                "instagram": {
+                    "items": [
+                        {
+                            "competitor_external_id": "ig-suggested-reactivate",
+                            "competitor_display_name": "IG Suggested Reactivate",
+                            "competitor_handle": "ig_reactivate",
+                            "competitor_url": "https://www.instagram.com/ig_reactivate/",
+                            "appearance_count": 2,
+                            "suggestion_reason": "repeated_report_competitor",
+                        }
+                    ]
+                }
+            },
+        },
+    )
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+
+    message = DummyMessage(user_id=333)
+    callback = DummyCallbackQuery(data=f"sugigadd:{report.id}:0", message=message)
+    async_to_sync(competitors.on_suggested_instagram_add)(callback)
+
+    link = async_to_sync(sync_to_async(UserCompetitor.objects.get, thread_sensitive=True))(user=user, competitor=competitor_obj)
+    report = async_to_sync(sync_to_async(Report.objects.get, thread_sensitive=True))(id=report.id)
+    acceptance = report.payload["suggested_competitors"]["instagram"]["acceptance"]
+    assert link.is_active is True
+    assert link.added_by == "suggested"
+    assert acceptance["clicked_add"] == 1
+    assert acceptance["added"] == 1
+    assert acceptance["already_active"] == 0
+    assert acceptance["events"][0]["status"] == "reactivated"
+    assert acceptance["events"][0]["suggestion_source"] == ""
+    assert "Добавил конкурента в Instagram: IG Suggested Reactivate." in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_suggested_instagram_add_is_idempotent(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=334, tg_chat_id=334)
+    report = async_to_sync(sync_to_async(Report.objects.create, thread_sensitive=True))(
+        user=user,
+        period_start=datetime(2026, 3, 30, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 31, 0, 0, tzinfo=UTC),
+        status="sent",
+        payload={
+            "sections": [],
+            "suggested_competitors": {
+                "instagram": {
+                    "items": [
+                        {
+                            "competitor_external_id": "ig-suggested-1",
+                            "competitor_display_name": "IG Suggested 1",
+                            "competitor_handle": "ig_suggested_1",
+                            "competitor_url": "https://www.instagram.com/ig_suggested_1/",
+                            "appearance_count": 3,
+                            "suggestion_reason": "repeated_report_competitor",
+                        }
+                    ]
+                }
+            },
+        },
+    )
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+
+    message = DummyMessage(user_id=334)
+    callback = DummyCallbackQuery(data=f"sugigadd:{report.id}:0", message=message)
+    async_to_sync(competitors.on_suggested_instagram_add)(callback)
+    async_to_sync(competitors.on_suggested_instagram_add)(callback)
+
+    count = async_to_sync(sync_to_async(UserCompetitor.objects.filter(user=user, is_active=True).count, thread_sensitive=True))()
+    link = async_to_sync(
+        sync_to_async(
+            UserCompetitor.objects.select_related("competitor").get,
+            thread_sensitive=True,
+        )
+    )(user=user, competitor__external_id="ig-suggested-1")
+    report = async_to_sync(sync_to_async(Report.objects.get, thread_sensitive=True))(id=report.id)
+    acceptance = report.payload["suggested_competitors"]["instagram"]["acceptance"]
+
+    assert count == 1
+    assert link.added_by == "suggested"
+    assert acceptance["clicked_add"] == 2
+    assert acceptance["added"] == 1
+    assert acceptance["already_active"] == 1
+    assert [event["status"] for event in acceptance["events"]] == ["added", "already_active"]
+    assert any("Активных Instagram-конкурентов: 1" in answer for answer in message.answers)
+    assert message.answers[-1] == "IG Suggested 1 уже есть в активных Instagram-конкурентах."

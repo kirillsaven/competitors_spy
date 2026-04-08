@@ -6,7 +6,9 @@ from django.test import override_settings
 
 from tracking.models import Competitor, Platform, Report, TgUser, UserCompetitor
 from tracking.services.suggested_competitors import (
+    build_instagram_suggested_competitors_payload,
     build_youtube_suggested_competitors_payload,
+    render_instagram_suggested_competitors_text,
     render_youtube_suggested_competitors_text,
 )
 
@@ -42,6 +44,35 @@ def _lane_payload(
                     "query_phrase_match": 0.18,
                     "traction": traction,
                 },
+            }
+        ],
+    }
+
+
+def _instagram_section_payload(
+    *,
+    external_id: str,
+    display_name: str,
+    score: float,
+    virality: float,
+    video_suffix: str,
+) -> dict:
+    return {
+        "platform": Platform.INSTAGRAM,
+        "items": [
+            {
+                "platform": Platform.INSTAGRAM,
+                "video_id": f"ig-video-{video_suffix}",
+                "title": f"Instagram idea {video_suffix}",
+                "url": f"https://www.instagram.com/reel/{video_suffix}/",
+                "competitor": {
+                    "id": 0,
+                    "display_name": display_name,
+                    "handle": display_name.lower().replace(" ", "_"),
+                    "external_id": external_id,
+                },
+                "score": score,
+                "virality": virality,
             }
         ],
     }
@@ -195,6 +226,103 @@ def test_repeated_creator_with_strong_supporting_video_is_suggested(db):
 
 def test_render_youtube_suggested_competitors_text_returns_none_without_items():
     assert render_youtube_suggested_competitors_text(suggestion_payload={"items": []}) is None
+
+
+def test_repeated_instagram_competitor_becomes_suggested_competitor(db):
+    user = TgUser.objects.create(tg_user_id=407, tg_chat_id=407)
+    Report.objects.create(
+        user=user,
+        period_start=datetime(2026, 3, 28, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 29, 0, 0, tzinfo=UTC),
+        status="sent",
+        payload={"sections": [_instagram_section_payload(external_id="ig-repeat", display_name="IG Repeat", score=2.1, virality=1.3, video_suffix="hist")]},
+    )
+
+    payload = build_instagram_suggested_competitors_payload(
+        user=user,
+        current_section_payload=_instagram_section_payload(
+            external_id="ig-repeat",
+            display_name="IG Repeat",
+            score=2.4,
+            virality=1.5,
+            video_suffix="current",
+        ),
+    )
+
+    assert payload["diagnostics"]["final_suggestions"] == 1
+    assert payload["items"][0]["competitor_external_id"] == "ig-repeat"
+    assert payload["items"][0]["appearance_count"] == 2
+    assert payload["items"][0]["suggestion_reason"] == "repeated_report_competitor"
+
+
+def test_already_active_instagram_competitor_is_not_suggested(db):
+    user = TgUser.objects.create(tg_user_id=408, tg_chat_id=408)
+    competitor = Competitor.objects.create(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-active",
+        handle="ig_active",
+        url="https://www.instagram.com/ig_active/",
+        display_name="IG Active",
+    )
+    UserCompetitor.objects.create(user=user, competitor=competitor, is_active=True)
+    Report.objects.create(
+        user=user,
+        period_start=datetime(2026, 3, 28, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 29, 0, 0, tzinfo=UTC),
+        status="sent",
+        payload={"sections": [_instagram_section_payload(external_id="ig-active", display_name="IG Active", score=2.2, virality=1.4, video_suffix="hist")]},
+    )
+
+    payload = build_instagram_suggested_competitors_payload(
+        user=user,
+        current_section_payload=_instagram_section_payload(
+            external_id="ig-active",
+            display_name="IG Active",
+            score=2.5,
+            virality=1.6,
+            video_suffix="current",
+        ),
+    )
+
+    assert payload["items"] == []
+    assert payload["diagnostics"]["dropped_already_active"] == 1
+
+
+def test_blocked_inactive_instagram_competitor_is_not_suggested(db):
+    user = TgUser.objects.create(tg_user_id=409, tg_chat_id=409)
+    blocked = Competitor.objects.create(
+        platform=Platform.INSTAGRAM,
+        external_id="ig-blocked",
+        handle="ig_blocked",
+        url="https://www.instagram.com/ig_blocked/",
+        display_name="IG Blocked",
+    )
+    UserCompetitor.objects.create(user=user, competitor=blocked, is_active=False)
+    Report.objects.create(
+        user=user,
+        period_start=datetime(2026, 3, 28, 0, 0, tzinfo=UTC),
+        period_end=datetime(2026, 3, 29, 0, 0, tzinfo=UTC),
+        status="sent",
+        payload={"sections": [_instagram_section_payload(external_id="ig-blocked", display_name="IG Blocked", score=2.0, virality=1.2, video_suffix="hist")]},
+    )
+
+    payload = build_instagram_suggested_competitors_payload(
+        user=user,
+        current_section_payload=_instagram_section_payload(
+            external_id="ig-blocked",
+            display_name="IG Blocked",
+            score=2.3,
+            virality=1.4,
+            video_suffix="current",
+        ),
+    )
+
+    assert payload["items"] == []
+    assert payload["diagnostics"]["dropped_blocked"] == 1
+
+
+def test_render_instagram_suggested_competitors_text_returns_none_without_items():
+    assert render_instagram_suggested_competitors_text(suggestion_payload={"items": []}) is None
 
 
 @override_settings(REPORT_YOUTUBE_SUGGESTED_COMPETITORS_MAX_ITEMS=1)

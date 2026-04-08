@@ -42,7 +42,9 @@ from tracking.services.seed_resolver import (
     resolve_instagram_seeds_batch,
 )
 from tracking.services.suggested_competitors import (
+    activate_instagram_suggested_competitor,
     activate_youtube_suggested_competitor,
+    record_instagram_suggested_competitor_acceptance,
     record_youtube_suggested_competitor_acceptance,
 )
 from tracking.services.setup_runtime import SetupRunContext
@@ -255,6 +257,13 @@ def _youtube_suggestion_added_text(*, display_name: str, counts: dict[str, int])
     return (
         f"Добавил конкурента в YouTube: {display_name}.\n"
         f"Активных YouTube-конкурентов: {counts.get(Platform.YOUTUBE, 0)}"
+    )
+
+
+def _instagram_suggestion_added_text(*, display_name: str, counts: dict[str, int]) -> str:
+    return (
+        f"Добавил конкурента в Instagram: {display_name}.\n"
+        f"Активных Instagram-конкурентов: {counts.get(Platform.INSTAGRAM, 0)}"
     )
 
 
@@ -586,6 +595,107 @@ async def on_suggested_youtube_add(cb: CallbackQuery) -> None:
         user.id,
         report.id,
         channel_id,
+        result.status,
+    )
+
+
+@router.callback_query(F.data.startswith("sugigadd:"))
+async def on_suggested_instagram_add(cb: CallbackQuery) -> None:
+    if not cb.message or not cb.from_user:
+        return
+    try:
+        _, report_id_raw, suggestion_idx_raw = str(cb.data).split(":", 2)
+        report_id = int(report_id_raw)
+        suggestion_idx = int(suggestion_idx_raw)
+    except Exception:
+        await cb.answer("Не понял, какую подсказку добавить.", show_alert=True)
+        return
+
+    user, _ = await db_call(
+        upsert_tg_user,
+        telegram_user_id=cb.from_user.id,
+        chat_id=cb.message.chat.id,
+        username=cb.from_user.username,
+        first_name=cb.from_user.first_name,
+        last_name=cb.from_user.last_name,
+        language_code=cb.from_user.language_code,
+    )
+    report = await db_run(lambda: Report.objects.filter(id=report_id, user=user).first())
+    if report is None:
+        await cb.answer("Подсказка устарела. Дождись нового отчета.", show_alert=True)
+        return
+
+    instagram_suggestions = ((((report.payload or {}).get("suggested_competitors") or {}).get("instagram")) or {})
+    delivery = dict(instagram_suggestions.get("delivery") or {})
+    delivered_items = [item for item in list(delivery.get("sent_items") or []) if isinstance(item, dict)]
+    items = delivered_items or [item for item in list(instagram_suggestions.get("items") or []) if isinstance(item, dict)]
+    if suggestion_idx < 0 or suggestion_idx >= len(items):
+        await cb.answer("Не нашел эту подсказку в отчете.", show_alert=True)
+        return
+
+    suggestion = items[suggestion_idx]
+    try:
+        result = await db_call(
+            activate_instagram_suggested_competitor,
+            user=user,
+            suggestion=suggestion,
+            added_by=AddedBy.SUGGESTED,
+        )
+    except Exception as exc:
+        acceptance = await db_call(
+            record_instagram_suggested_competitor_acceptance,
+            report=report,
+            suggestion=suggestion,
+            status="error",
+        )
+        logger.info(
+            "suggested_competitor_click_observability user_id=%s report_id=%s competitor_external_id=%s status=%s "
+            "clicked_add=%s added=%s already_active=%s suggestion_source=%s suggestion_reason=%s",
+            user.id,
+            report.id,
+            str(suggestion.get("competitor_external_id") or "").strip(),
+            "error",
+            acceptance.get("clicked_add", 0),
+            acceptance.get("added", 0),
+            acceptance.get("already_active", 0),
+            ((((report.payload or {}).get("suggested_competitors") or {}).get("instagram")) or {}).get("source"),
+            suggestion.get("suggestion_reason"),
+        )
+        await cb.answer(str(exc), show_alert=True)
+        return
+
+    competitor_external_id = str(suggestion.get("competitor_external_id") or "").strip()
+    acceptance = await db_call(
+        record_instagram_suggested_competitor_acceptance,
+        report=report,
+        suggestion=suggestion,
+        status=result.status,
+    )
+    logger.info(
+        "suggested_competitor_click_observability user_id=%s report_id=%s competitor_external_id=%s status=%s "
+        "clicked_add=%s added=%s already_active=%s suggestion_source=%s suggestion_reason=%s",
+        user.id,
+        report.id,
+        competitor_external_id,
+        result.status,
+        acceptance.get("clicked_add", 0),
+        acceptance.get("added", 0),
+        acceptance.get("already_active", 0),
+        ((((report.payload or {}).get("suggested_competitors") or {}).get("instagram")) or {}).get("source"),
+        suggestion.get("suggestion_reason"),
+    )
+    if result.status == "already_active":
+        await cb.message.answer(f"{result.display_name} уже есть в активных Instagram-конкурентах.")
+        await cb.answer("Уже в активном списке.")
+        return
+
+    await cb.message.answer(_instagram_suggestion_added_text(display_name=result.display_name, counts=result.counts))
+    await cb.answer("Конкурент добавлен.")
+    logger.info(
+        "suggested_competitor_added_via_click user_id=%s report_id=%s competitor_external_id=%s status=%s",
+        user.id,
+        report.id,
+        competitor_external_id,
         result.status,
     )
 

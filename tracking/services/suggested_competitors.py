@@ -35,6 +35,18 @@ def _base_acceptance_payload() -> dict[str, Any]:
     }
 
 
+def _active_external_ids(*, user: TgUser, platform: str) -> set[str]:
+    return {
+        str(external_id).strip()
+        for external_id in UserCompetitor.objects.filter(
+            user=user,
+            is_active=True,
+            competitor__platform=platform,
+        ).values_list("competitor__external_id", flat=True)
+        if str(external_id).strip()
+    }
+
+
 _QUALITY_FACTOR_KEYS = (
     "niche_phrase_match",
     "query_phrase_match",
@@ -296,6 +308,199 @@ def build_youtube_suggested_competitors_payload(
     }
 
 
+def build_instagram_suggested_competitors_payload(
+    *,
+    user: TgUser,
+    current_section_payload: dict | None,
+) -> dict[str, Any]:
+    max_items = max(
+        1,
+        int(getattr(settings, "REPORT_INSTAGRAM_SUGGESTED_COMPETITORS_MAX_ITEMS", 3) or 3),
+    )
+    history_runs = max(
+        1,
+        int(getattr(settings, "REPORT_INSTAGRAM_SUGGESTED_COMPETITORS_HISTORY_RUNS", 5) or 5),
+    )
+    min_appearances = max(
+        2,
+        int(getattr(settings, "REPORT_INSTAGRAM_SUGGESTED_COMPETITORS_MIN_APPEARANCES", 2) or 2),
+    )
+    min_average_score = float(
+        getattr(settings, "REPORT_INSTAGRAM_SUGGESTED_COMPETITORS_MIN_AVERAGE_SCORE", 0.0) or 0.0
+    )
+    diagnostics: dict[str, Any] = {
+        "current_candidates": 0,
+        "current_unique_creators": 0,
+        "history_reports_considered": 0,
+        "suggestions_considered": 0,
+        "suggestions_generated": 0,
+        "suggestions_sent": 0,
+        "dropped_missing_competitor_id": 0,
+        "dropped_blocked": 0,
+        "dropped_already_active": 0,
+        "dropped_not_repeated": 0,
+        "dropped_dedup": 0,
+        "dropped_limit": 0,
+        "suppressed_by_run_cap": 0,
+        "suppressed_by_cooldown": 0,
+        "dropped_low_average_score": 0,
+        "final_suggestions": 0,
+    }
+    section = {
+        "title": "Новые конкуренты в Instagram:",
+        "subtitle": "Профили, которые стабильно попадают в топ отчета.",
+        "max_items": max_items,
+    }
+    current_items = [
+        item
+        for item in list((current_section_payload or {}).get("items") or [])
+        if isinstance(item, dict)
+    ]
+    diagnostics["current_candidates"] = len(current_items)
+    if not current_items:
+        return {
+            "source": "instagram_report_competitor_suggestion",
+            "diagnostics": diagnostics,
+            "items": [],
+            "section": section,
+        }
+
+    active_external_ids = _active_external_ids(user=user, platform=Platform.INSTAGRAM)
+    blocked_external_ids = get_inactive_user_competitor_external_ids(user=user, platform=Platform.INSTAGRAM)
+
+    current_stats: dict[str, dict[str, Any]] = {}
+    for item in current_items:
+        competitor = dict(item.get("competitor") or {})
+        competitor_external_id = str(competitor.get("external_id") or "").strip()
+        if not competitor_external_id:
+            diagnostics["dropped_missing_competitor_id"] += 1
+            continue
+        creator = current_stats.setdefault(
+            competitor_external_id,
+            {
+                "competitor_external_id": competitor_external_id,
+                "competitor_display_name": str(
+                    competitor.get("display_name") or competitor.get("handle") or competitor_external_id
+                ).strip(),
+                "competitor_handle": str(competitor.get("handle") or "").strip(),
+                "competitor_url": str(item.get("competitor_url") or "").strip()
+                or str(competitor.get("url") or "").strip(),
+                "current_run_hits": 0,
+                "current_scores": [],
+                "current_virality": [],
+                "sample_item_title": "",
+                "sample_item_url": "",
+            },
+        )
+        creator["current_run_hits"] += 1
+        creator["current_scores"].append(float(item.get("score") or 0.0))
+        creator["current_virality"].append(float(item.get("virality") or 0.0))
+        if not creator["sample_item_title"]:
+            creator["sample_item_title"] = str(item.get("title") or "").strip()
+        if not creator["sample_item_url"]:
+            creator["sample_item_url"] = str(item.get("url") or "").strip()
+
+    diagnostics["current_unique_creators"] = len(current_stats)
+    valid_candidates = diagnostics["current_candidates"] - diagnostics["dropped_missing_competitor_id"]
+    diagnostics["suggestions_considered"] = len(current_stats)
+    diagnostics["dropped_dedup"] = max(valid_candidates - diagnostics["suggestions_considered"], 0)
+
+    history_by_external_id: dict[str, dict[int, dict[str, float]]] = defaultdict(dict)
+    prior_reports = list(
+        Report.objects.filter(user=user, status=ReportStatus.SENT).order_by("-id")[:history_runs]
+    )
+    diagnostics["history_reports_considered"] = len(prior_reports)
+    for report in prior_reports:
+        sections = [section for section in list((report.payload or {}).get("sections") or []) if isinstance(section, dict)]
+        instagram_section = next(
+            (section for section in sections if str(section.get("platform") or "").strip() == Platform.INSTAGRAM),
+            None,
+        )
+        if not isinstance(instagram_section, dict):
+            continue
+        for item in list(instagram_section.get("items") or []):
+            if not isinstance(item, dict):
+                continue
+            competitor = dict(item.get("competitor") or {})
+            competitor_external_id = str(competitor.get("external_id") or "").strip()
+            if not competitor_external_id:
+                continue
+            evidence = {
+                "score": float(item.get("score") or 0.0),
+                "virality": float(item.get("virality") or 0.0),
+            }
+            previous = history_by_external_id[competitor_external_id].get(report.id)
+            if previous is None or evidence["score"] > float(previous.get("score") or 0.0):
+                history_by_external_id[competitor_external_id][report.id] = evidence
+
+    suggestions: list[dict[str, Any]] = []
+    for competitor_external_id, creator in current_stats.items():
+        if competitor_external_id in blocked_external_ids:
+            diagnostics["dropped_blocked"] += 1
+            continue
+        if competitor_external_id in active_external_ids:
+            diagnostics["dropped_already_active"] += 1
+            continue
+        history_scores = [
+            float(evidence.get("score") or 0.0)
+            for evidence in list(history_by_external_id.get(competitor_external_id, {}).values())
+        ]
+        history_virality = [
+            float(evidence.get("virality") or 0.0)
+            for evidence in list(history_by_external_id.get(competitor_external_id, {}).values())
+        ]
+        appearance_count = 1 + len(history_scores)
+        if appearance_count < min_appearances:
+            diagnostics["dropped_not_repeated"] += 1
+            continue
+        current_best_score = max(creator["current_scores"] or [0.0])
+        average_score = mean([current_best_score, *history_scores])
+        if average_score < min_average_score:
+            diagnostics["dropped_low_average_score"] += 1
+            continue
+        current_best_virality = max(creator["current_virality"] or [0.0])
+        average_virality = mean([current_best_virality, *history_virality]) if history_virality else current_best_virality
+        suggestions.append(
+            {
+                "competitor_external_id": competitor_external_id,
+                "competitor_display_name": creator["competitor_display_name"],
+                "competitor_handle": creator["competitor_handle"],
+                "competitor_url": creator["competitor_url"],
+                "appearance_count": appearance_count,
+                "history_appearance_count": len(history_scores),
+                "current_run_hits": int(creator["current_run_hits"] or 0),
+                "average_score": round(float(average_score), 4),
+                "current_best_score": round(float(current_best_score), 4),
+                "average_virality": round(float(average_virality), 4),
+                "current_best_virality": round(float(current_best_virality), 4),
+                "sample_item_title": creator["sample_item_title"],
+                "sample_item_url": creator["sample_item_url"],
+                "suggestion_reason": "repeated_report_competitor",
+            }
+        )
+
+    diagnostics["suggestions_generated"] = len(suggestions)
+    suggestions.sort(
+        key=lambda item: (
+            -int(item.get("appearance_count") or 0),
+            -float(item.get("average_score") or 0.0),
+            -float(item.get("current_best_score") or 0.0),
+            str(item.get("competitor_display_name") or "").lower(),
+        )
+    )
+    diagnostics["dropped_limit"] = max(len(suggestions) - max_items, 0)
+    suggestions = suggestions[:max_items]
+    diagnostics["final_suggestions"] = len(suggestions)
+
+    return {
+        "source": "instagram_report_competitor_suggestion",
+        "diagnostics": diagnostics,
+        "items": suggestions,
+        "section": section,
+        "acceptance": _base_acceptance_payload(),
+    }
+
+
 def render_youtube_suggested_competitors_text(*, suggestion_payload: dict | None) -> str | None:
     if not isinstance(suggestion_payload, dict):
         return None
@@ -316,6 +521,31 @@ def render_youtube_suggested_competitors_text(*, suggestion_payload: dict | None
         lines.append(f"Появлялся в дополнительных идеях {appearance_count} раз(а).")
         lines.append("")
     lines.append("Нажми «Добавить», если хочешь включить канал в отслеживание.")
+    return "\n".join(lines).rstrip()
+
+
+def render_instagram_suggested_competitors_text(*, suggestion_payload: dict | None) -> str | None:
+    if not isinstance(suggestion_payload, dict):
+        return None
+    items = [item for item in list(suggestion_payload.get("items") or []) if isinstance(item, dict)]
+    if not items:
+        return None
+
+    section = dict(suggestion_payload.get("section") or {})
+    lines = [str(section.get("title") or "Новые конкуренты в Instagram:")]
+    subtitle = str(section.get("subtitle") or "").strip()
+    if subtitle:
+        lines.append(subtitle)
+    lines.append("")
+    for idx, item in enumerate(items, start=1):
+        profile_name = str(
+            item.get("competitor_display_name") or item.get("competitor_handle") or item.get("competitor_external_id") or "Instagram"
+        ).strip()
+        appearance_count = int(item.get("appearance_count") or 0)
+        lines.append(f"{idx}) {profile_name}")
+        lines.append(f"Появлялся в отчетах {appearance_count} раз(а).")
+        lines.append("")
+    lines.append("Нажми «Добавить», если хочешь включить профиль в отслеживание.")
     return "\n".join(lines).rstrip()
 
 
@@ -354,6 +584,47 @@ def record_youtube_suggested_competitor_acceptance(
 
     youtube_payload["acceptance"] = acceptance
     suggested_payload["youtube"] = youtube_payload
+    payload["suggested_competitors"] = suggested_payload
+    report.payload = payload
+    report.save(update_fields=["payload"])
+    return acceptance
+
+
+def record_instagram_suggested_competitor_acceptance(
+    *,
+    report: Report,
+    suggestion: dict[str, Any],
+    status: str,
+) -> dict[str, Any]:
+    payload = dict(report.payload or {})
+    suggested_payload = dict(payload.get("suggested_competitors") or {})
+    instagram_payload = dict(suggested_payload.get("instagram") or {})
+    acceptance = _base_acceptance_payload()
+    acceptance.update(dict(instagram_payload.get("acceptance") or {}))
+    events = [item for item in list(acceptance.get("events") or []) if isinstance(item, dict)]
+
+    acceptance["clicked_add"] = int(acceptance.get("clicked_add") or 0) + 1
+    if status in {"added", "reactivated"}:
+        acceptance["added"] = int(acceptance.get("added") or 0) + 1
+    elif status == "already_active":
+        acceptance["already_active"] = int(acceptance.get("already_active") or 0) + 1
+
+    events.append(
+        {
+            "clicked_at": timezone.now().isoformat(),
+            "status": status,
+            "counted_status": "added" if status in {"added", "reactivated"} else status,
+            "competitor_external_id": str(suggestion.get("competitor_external_id") or "").strip(),
+            "competitor_display_name": str(suggestion.get("competitor_display_name") or "").strip(),
+            "suggestion_source": str(instagram_payload.get("source") or "").strip(),
+            "suggestion_reason": str(suggestion.get("suggestion_reason") or "").strip(),
+            "appearance_count": int(suggestion.get("appearance_count") or 0),
+        }
+    )
+    acceptance["events"] = events[-20:]
+
+    instagram_payload["acceptance"] = acceptance
+    suggested_payload["instagram"] = instagram_payload
     payload["suggested_competitors"] = suggested_payload
     report.payload = payload
     report.save(update_fields=["payload"])
@@ -426,4 +697,60 @@ def activate_youtube_suggested_competitor(
         counts=counts,
         competitor_external_id=str(competitor.external_id or channel_id),
         display_name=str(competitor.display_name or competitor.handle or channel_id),
+    )
+
+
+def activate_instagram_suggested_competitor(
+    *,
+    user: TgUser,
+    suggestion: dict[str, Any],
+    added_by: str = AddedBy.SUGGESTED,
+) -> SuggestedCompetitorActivationResult:
+    competitor_external_id = str(suggestion.get("competitor_external_id") or "").strip()
+    if not competitor_external_id:
+        raise RuntimeError("В подсказке нет competitor_external_id")
+
+    existing_link = (
+        UserCompetitor.objects.select_related("competitor")
+        .filter(
+            user=user,
+            competitor__platform=Platform.INSTAGRAM,
+            competitor__external_id=competitor_external_id,
+        )
+        .first()
+    )
+    if existing_link is not None and existing_link.is_active:
+        return SuggestedCompetitorActivationResult(
+            status="already_active",
+            counts=get_active_user_competitor_counts(user=user),
+            competitor_external_id=competitor_external_id,
+            display_name=str(
+                existing_link.competitor.display_name or existing_link.competitor.handle or competitor_external_id
+            ),
+        )
+
+    competitor_url = str(suggestion.get("competitor_url") or "").strip()
+    competitor_handle = str(suggestion.get("competitor_handle") or "").strip().lstrip("@")
+    if not competitor_url and competitor_handle:
+        competitor_url = f"https://www.instagram.com/{competitor_handle}/"
+    competitor_display_name = str(
+        suggestion.get("competitor_display_name") or suggestion.get("competitor_handle") or competitor_external_id
+    ).strip()
+
+    competitor = upsert_competitor(
+        user=user,
+        platform=Platform.INSTAGRAM,
+        external_id=competitor_external_id,
+        handle=competitor_handle or None,
+        url=competitor_url,
+        display_name=competitor_display_name or None,
+        added_by=added_by,
+        meta=None,
+    )
+    counts = get_active_user_competitor_counts(user=user)
+    return SuggestedCompetitorActivationResult(
+        status="reactivated" if existing_link is not None else "added",
+        counts=counts,
+        competitor_external_id=str(competitor.external_id or competitor_external_id),
+        display_name=str(competitor.display_name or competitor.handle or competitor_external_id),
     )
