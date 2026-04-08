@@ -66,13 +66,16 @@ class DummyMessage:
 
 
 class DummyCallbackQuery:
-    def __init__(self, *, data: str, message: DummyMessage) -> None:
+    def __init__(self, *, data: str, message: DummyMessage, fail_answer: bool = False) -> None:
         self.data = data
         self.message = message
         self.from_user = message.from_user
+        self.fail_answer = fail_answer
         self.answers: list[tuple[str | None, bool]] = []
 
     async def answer(self, text: str | None = None, show_alert: bool = False):
+        if self.fail_answer:
+            raise RuntimeError("stale callback")
         self.answers.append((text, show_alert))
 
 
@@ -243,6 +246,28 @@ def test_competitor_add_picker_page_forward_back_uses_markup_only():
     assert message.edit_text_calls == 0
     assert message.edit_reply_markup_calls == 2
     assert any("Candidate 0" in text for text in _button_texts(message.reply_markups[-1]))
+
+
+def test_competitor_add_picker_failed_ack_does_not_abort_page_render():
+    candidates = [_candidate(idx) for idx in range(10)]
+    state = DummyState()
+    async_to_sync(state.update_data)(
+        user_id=103,
+        competitor_add_candidates=candidates,
+        competitor_add_picker_rows=competitors._make_add_picker_rows(candidates),
+        competitor_add_platform_by_id=competitors._make_add_platform_by_id(candidates),
+        competitor_add_selected_ids=[],
+        competitor_add_page=0,
+        competitor_add_notes=[],
+    )
+    message = DummyMessage(user_id=103)
+
+    callback = DummyCallbackQuery(data="compadd_page:1", message=message, fail_answer=True)
+    async_to_sync(competitors.on_add_page)(callback, state)
+
+    assert state.data["competitor_add_page"] == 1
+    assert message.edit_reply_markup_calls == 1
+    assert any("Candidate 8" in text for text in _button_texts(message.reply_markups[-1]))
 
 
 def test_competitor_add_picker_selection_persists_across_pages():
