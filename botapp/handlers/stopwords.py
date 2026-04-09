@@ -44,6 +44,7 @@ from tracking.services.picker_snapshot_cache import (
     peek_stopword_add_picker_snapshot,
     peek_stopword_remove_picker_snapshot,
 )
+from tracking.services.picker_cache_refresh import refresh_picker_caches_after_stopword_mutation
 from tracking.services.report_filters import get_user_report_stopwords
 from tracking.services.stopword_suggestions import build_user_stopword_suggestions
 
@@ -116,6 +117,25 @@ def _log_picker_callback(
         keyboard_render_ms=f"{keyboard_render_ms:.1f}",
         status=status,
         **fields,
+    )
+
+
+def _log_mutation_cache_refresh(
+    *,
+    user_id: int,
+    mutation_type: str,
+    refresh_result,
+) -> None:
+    logger.info(
+        "stopword_picker_mutation_cache_refresh_observability user_id=%s mutation_type=%s "
+        "mutation_cache_refresh=%s cache_targets_refreshed=%s refresh_ms=%.1f status=%s failure_reason=%s",
+        user_id,
+        mutation_type,
+        refresh_result.mutation_cache_refresh,
+        ",".join(refresh_result.refreshed_targets),
+        refresh_result.refresh_ms,
+        refresh_result.status,
+        refresh_result.failure_reason or "",
     )
 
 
@@ -459,6 +479,16 @@ async def on_add_done(cb: CallbackQuery, state: FSMContext) -> None:
     added_words = [word for word in chosen if word not in current_set]
     next_stopwords = current + added_words
     await db_run(lambda: _save_user_stopwords(user=user, stopwords=next_stopwords))
+    refresh_result = await db_run(
+        lambda: refresh_picker_caches_after_stopword_mutation(
+            user=user,
+        )
+    )
+    _log_mutation_cache_refresh(
+        user_id=user.id,
+        mutation_type="add_done",
+        refresh_result=refresh_result,
+    )
     await state.clear()
     await cb.message.answer(
         _summary_lines(
@@ -561,6 +591,16 @@ async def on_remove_done(cb: CallbackQuery, state: FSMContext) -> None:
     next_stopwords = [word for word in current if word not in to_remove]
     removed = len(current) - len(next_stopwords)
     await db_run(lambda: _save_user_stopwords(user=user, stopwords=next_stopwords))
+    refresh_result = await db_run(
+        lambda: refresh_picker_caches_after_stopword_mutation(
+            user=user,
+        )
+    )
+    _log_mutation_cache_refresh(
+        user_id=user.id,
+        mutation_type="remove_done",
+        refresh_result=refresh_result,
+    )
     await state.clear()
     await cb.message.answer(
         _summary_lines(

@@ -67,6 +67,7 @@ from tracking.services.picker_snapshot_cache import (
     load_competitor_remove_picker_snapshot,
     peek_competitor_remove_picker_snapshot,
 )
+from tracking.services.picker_cache_refresh import refresh_picker_caches_after_competitor_mutation
 from tracking.services.platform_onboarding import youtube_profile_recent_shorts_gate_status
 from tracking.services.seed_resolver import (
     candidate_platforms_for_exact_seed,
@@ -268,6 +269,25 @@ def _log_picker_callback(
         keyboard_render_ms=f"{keyboard_render_ms:.1f}",
         status=status,
         **fields,
+    )
+
+
+def _log_mutation_cache_refresh(
+    *,
+    user_id: int,
+    mutation_type: str,
+    refresh_result,
+) -> None:
+    logger.info(
+        "competitor_picker_mutation_cache_refresh_observability user_id=%s mutation_type=%s "
+        "mutation_cache_refresh=%s cache_targets_refreshed=%s refresh_ms=%.1f status=%s failure_reason=%s",
+        user_id,
+        mutation_type,
+        refresh_result.mutation_cache_refresh,
+        ",".join(refresh_result.refreshed_targets),
+        refresh_result.refresh_ms,
+        refresh_result.status,
+        refresh_result.failure_reason or "",
     )
 
 
@@ -928,6 +948,17 @@ async def on_add_done(cb: CallbackQuery, state: FSMContext) -> None:
         added += 1
 
     skipped = len(selected_ids) - added - len(errors)
+    refresh_result = await db_run(
+        lambda: refresh_picker_caches_after_competitor_mutation(
+            user=user,
+            suggest_builder=_load_add_candidates_for_user,
+        )
+    )
+    _log_mutation_cache_refresh(
+        user_id=user.id,
+        mutation_type="add_done",
+        refresh_result=refresh_result,
+    )
     await state.clear()
     await cb.message.answer(
         _build_add_remove_summary(
@@ -1036,6 +1067,17 @@ async def on_remove_done(cb: CallbackQuery, state: FSMContext) -> None:
     user = await db_call(TgUser.objects.get, id=data["user_id"])
     removed = await db_run(lambda: deactivate_user_competitors(user=user, competitor_ids=sorted(selected_ids)))
     counts = await db_run(lambda: get_active_user_competitor_counts(user=user))
+    refresh_result = await db_run(
+        lambda: refresh_picker_caches_after_competitor_mutation(
+            user=user,
+            suggest_builder=_load_add_candidates_for_user,
+        )
+    )
+    _log_mutation_cache_refresh(
+        user_id=user.id,
+        mutation_type="remove_done",
+        refresh_result=refresh_result,
+    )
     await state.clear()
     await cb.message.answer(
         _build_add_remove_summary(
