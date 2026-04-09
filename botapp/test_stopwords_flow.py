@@ -8,11 +8,14 @@ from asgiref.sync import async_to_sync, sync_to_async
 from botapp.handlers import stopwords
 from botapp.state import StopwordManagementStates
 from tracking.models import TgUser
+from tracking.services.picker_cache_refresh import refresh_picker_caches_after_stopword_mutation
 from tracking.services.picker_snapshot_cache import (
     PICKER_SNAPSHOT_CACHE_SOURCE_COLD_BUILD,
     PICKER_SNAPSHOT_CACHE_SOURCE_SNAPSHOT_HIT,
     load_stopword_add_picker_snapshot,
     load_stopword_remove_picker_snapshot,
+    peek_stopword_add_picker_snapshot,
+    peek_stopword_remove_picker_snapshot,
 )
 from tracking.services.setup_retry_cache import clear_retry_cache
 
@@ -414,3 +417,97 @@ def test_stopwords_remove_deletes_only_requested_user_words(monkeypatch):
     assert "Удалено: 1" in message.answers[-1]
     assert "Пропущено: 0" in message.answers[-1]
     assert "Всего стоп-слов: 2" in message.answers[-1]
+
+
+@pytest.mark.django_db
+def test_stopwords_add_done_refreshes_caches_and_next_remove_open_hits_cache(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(
+        tg_user_id=613,
+        tg_chat_id=613,
+        report_stopwords=["spoiler"],
+    )
+    clear_retry_cache()
+
+    monkeypatch.setattr(stopwords, "db_call", _db_call)
+    monkeypatch.setattr(stopwords, "db_run", _db_run)
+    monkeypatch.setattr(
+        stopwords,
+        "refresh_picker_caches_after_stopword_mutation",
+        lambda *, user: refresh_picker_caches_after_stopword_mutation(
+            user=user,
+            stopword_builder=lambda **kwargs: ["launch teaser", "spoiler"],
+        ),
+    )
+
+    state = DummyState()
+    async_to_sync(state.update_data)(
+        user_id=user.id,
+        stopword_add_candidates=["launch teaser", "spoiler"],
+        stopword_add_selected_ids=[0, 1],
+        stopword_add_page=0,
+    )
+    message = DummyMessage(user_id=613)
+    async_to_sync(stopwords.on_add_done)(DummyCallbackQuery(data="stopadd_done", message=message), state)
+
+    refreshed_user = async_to_sync(sync_to_async(TgUser.objects.get, thread_sensitive=True))(id=user.id)
+    assert state.state is None
+    assert "Добавлено: 1" in message.answers[-1]
+    assert peek_stopword_add_picker_snapshot(user=refreshed_user) is not None
+    assert peek_stopword_remove_picker_snapshot(user=refreshed_user) is not None
+
+    next_state = DummyState()
+    next_message = DummyMessage(user_id=613)
+    async_to_sync(stopwords.cmd_stopwords_remove)(next_message, next_state)
+
+    assert next_state.state == StopwordManagementStates.PICK_STOPWORDS_REMOVE
+    assert len(next_message.answers) == 1
+    assert next_message.edit_text_calls == 0
+    assert next_message.reply_markups[0] is not None
+    clear_retry_cache()
+
+
+@pytest.mark.django_db
+def test_stopwords_remove_done_refreshes_caches_and_next_add_open_hits_cache(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(
+        tg_user_id=614,
+        tg_chat_id=614,
+        report_stopwords=["spoiler", "promo post", "launch"],
+    )
+    clear_retry_cache()
+
+    monkeypatch.setattr(stopwords, "db_call", _db_call)
+    monkeypatch.setattr(stopwords, "db_run", _db_run)
+    monkeypatch.setattr(
+        stopwords,
+        "refresh_picker_caches_after_stopword_mutation",
+        lambda *, user: refresh_picker_caches_after_stopword_mutation(
+            user=user,
+            stopword_builder=lambda **kwargs: ["fresh topic"],
+        ),
+    )
+
+    state = DummyState()
+    async_to_sync(state.update_data)(
+        user_id=user.id,
+        stopword_remove_items=["spoiler", "promo post", "launch"],
+        stopword_remove_selected_ids=[0],
+        stopword_remove_page=0,
+    )
+    message = DummyMessage(user_id=614)
+    async_to_sync(stopwords.on_remove_done)(DummyCallbackQuery(data="stoprem_done", message=message), state)
+
+    refreshed_user = async_to_sync(sync_to_async(TgUser.objects.get, thread_sensitive=True))(id=user.id)
+    assert state.state is None
+    assert "Удалено: 1" in message.answers[-1]
+    assert peek_stopword_add_picker_snapshot(user=refreshed_user) is not None
+    assert peek_stopword_remove_picker_snapshot(user=refreshed_user) is not None
+
+    next_state = DummyState()
+    next_message = DummyMessage(user_id=614)
+    async_to_sync(stopwords.cmd_stopwords_add)(next_message, next_state)
+
+    assert next_state.state == StopwordManagementStates.PICK_STOPWORDS_ADD
+    assert len(next_message.answers) == 1
+    assert next_message.edit_text_calls == 0
+    assert next_message.reply_markups[0] is not None
+    clear_retry_cache()

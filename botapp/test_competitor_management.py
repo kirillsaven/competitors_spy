@@ -15,11 +15,14 @@ from tracking.services.competitor_suggest_cache import (
     COMPETITOR_SUGGEST_CACHE_SOURCE_SETUP_WARM,
     COMPETITOR_SUGGEST_CACHE_SOURCE_SNAPSHOT_HIT,
     CompetitorSuggestCacheLoadResult,
+    peek_competitor_suggest_cache,
     store_competitor_suggest_cache,
 )
+from tracking.services.picker_cache_refresh import refresh_picker_caches_after_competitor_mutation
 from tracking.services.picker_snapshot_cache import (
     PICKER_SNAPSHOT_CACHE_SOURCE_COLD_BUILD,
     PICKER_SNAPSHOT_CACHE_SOURCE_SNAPSHOT_HIT,
+    peek_competitor_remove_picker_snapshot,
 )
 from tracking.services import report_pipeline, suggested_competitors
 from tracking.services.setup_retry_cache import clear_retry_cache
@@ -1460,3 +1463,118 @@ def test_suggested_instagram_add_is_idempotent(monkeypatch):
     assert [event["status"] for event in acceptance["events"]] == ["added", "already_active"]
     assert any("Активных Instagram-конкурентов: 1" in answer for answer in message.answers)
     assert message.answers[-1] == "IG Suggested 1 уже есть в активных Instagram-конкурентах."
+
+
+@pytest.mark.django_db
+def test_competitors_add_done_refreshes_caches_and_next_remove_open_hits_cache(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=611, tg_chat_id=611)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+    _create_resolved_seed_profile(user=user)
+    clear_retry_cache()
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+    monkeypatch.setattr(competitors, "_load_add_candidates_for_user", lambda **kwargs: ([_candidate(7)], []))
+    monkeypatch.setattr(
+        competitors,
+        "refresh_picker_caches_after_competitor_mutation",
+        lambda *, user, suggest_builder: refresh_picker_caches_after_competitor_mutation(
+            user=user,
+            suggest_builder=suggest_builder,
+            stopword_builder=lambda **kwargs: ["promo post"],
+        ),
+    )
+
+    state = DummyState()
+    async_to_sync(state.update_data)(
+        user_id=user.id,
+        competitor_add_candidates=[_candidate(0)],
+        competitor_add_picker_rows=competitors._make_add_picker_rows([_candidate(0)]),
+        competitor_add_platform_by_id=competitors._make_add_platform_by_id([_candidate(0)]),
+        competitor_add_selected_ids=[0],
+        competitor_add_page=0,
+        competitor_add_notes=[],
+    )
+    message = DummyMessage(user_id=611)
+    async_to_sync(competitors.on_add_done)(DummyCallbackQuery(data="compadd_done", message=message), state)
+
+    refreshed_user = async_to_sync(sync_to_async(TgUser.objects.get, thread_sensitive=True))(id=user.id)
+    assert state.state is None
+    assert "Добавлено: 1" in message.answers[-1]
+    assert peek_competitor_suggest_cache(user=refreshed_user) is not None
+    assert peek_competitor_remove_picker_snapshot(user=refreshed_user) is not None
+
+    next_state = DummyState()
+    next_message = DummyMessage(user_id=611)
+    async_to_sync(competitors.cmd_competitors_remove)(next_message, next_state)
+
+    assert next_state.state == CompetitorManagementStates.PICK_COMPETITORS_REMOVE
+    assert len(next_message.answers) == 1
+    assert next_message.edit_text_calls == 0
+    assert next_message.reply_markups[0] is not None
+    clear_retry_cache()
+
+
+@pytest.mark.django_db
+def test_competitors_remove_done_refreshes_caches_and_next_remove_open_hits_cache(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=612, tg_chat_id=612)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+    _create_resolved_seed_profile(user=user)
+    keep_competitor = async_to_sync(sync_to_async(Competitor.objects.create, thread_sensitive=True))(
+        platform=Platform.YOUTUBE,
+        external_id="yt-keep-612",
+        handle="keep_612",
+        display_name="Keep 612",
+        url="https://www.youtube.com/@keep_612",
+    )
+    remove_competitor = async_to_sync(sync_to_async(Competitor.objects.create, thread_sensitive=True))(
+        platform=Platform.YOUTUBE,
+        external_id="yt-remove-612",
+        handle="remove_612",
+        display_name="Remove 612",
+        url="https://www.youtube.com/@remove_612",
+    )
+    async_to_sync(sync_to_async(UserCompetitor.objects.create, thread_sensitive=True))(user=user, competitor=keep_competitor, is_active=True)
+    async_to_sync(sync_to_async(UserCompetitor.objects.create, thread_sensitive=True))(user=user, competitor=remove_competitor, is_active=True)
+    clear_retry_cache()
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+    monkeypatch.setattr(competitors, "_load_add_candidates_for_user", lambda **kwargs: ([_candidate(8)], []))
+    monkeypatch.setattr(
+        competitors,
+        "refresh_picker_caches_after_competitor_mutation",
+        lambda *, user, suggest_builder: refresh_picker_caches_after_competitor_mutation(
+            user=user,
+            suggest_builder=suggest_builder,
+            stopword_builder=lambda **kwargs: ["promo post"],
+        ),
+    )
+
+    state = DummyState()
+    async_to_sync(state.update_data)(
+        user_id=user.id,
+        competitor_remove_rows=competitors._active_link_rows(user=user),
+        competitor_remove_picker_rows=competitors._make_remove_picker_rows(competitors._active_link_rows(user=user)),
+        competitor_remove_platform_by_id=competitors._make_remove_platform_by_id(competitors._active_link_rows(user=user)),
+        competitor_remove_selected_ids=[remove_competitor.id],
+        competitor_remove_page=0,
+    )
+    message = DummyMessage(user_id=612)
+    async_to_sync(competitors.on_remove_done)(DummyCallbackQuery(data="comprem_done", message=message), state)
+
+    refreshed_user = async_to_sync(sync_to_async(TgUser.objects.get, thread_sensitive=True))(id=user.id)
+    assert state.state is None
+    assert "Удалено: 1" in message.answers[-1]
+    assert peek_competitor_suggest_cache(user=refreshed_user) is not None
+    assert peek_competitor_remove_picker_snapshot(user=refreshed_user) is not None
+
+    next_state = DummyState()
+    next_message = DummyMessage(user_id=612)
+    async_to_sync(competitors.cmd_competitors_remove)(next_message, next_state)
+
+    assert next_state.state == CompetitorManagementStates.PICK_COMPETITORS_REMOVE
+    assert len(next_message.answers) == 1
+    assert next_message.edit_text_calls == 0
+    assert next_message.reply_markups[0] is not None
+    clear_retry_cache()
