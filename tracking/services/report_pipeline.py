@@ -343,7 +343,55 @@ def _build_supplemental_payload(
         result.diagnostics.get("queries_executed", 0),
         result.diagnostics.get("final_candidates", 0),
     )
-    return {"youtube_topic_video": result.to_payload()}
+    return _exclude_previously_reported_youtube_supplemental_candidates(
+        user=user,
+        supplemental_payload={"youtube_topic_video": result.to_payload()},
+    )
+
+
+def _exclude_previously_reported_youtube_supplemental_candidates(
+    *,
+    user: TgUser,
+    supplemental_payload: dict[str, dict] | None,
+) -> dict[str, dict] | None:
+    if not isinstance(supplemental_payload, dict):
+        return supplemental_payload
+    lane_payload = supplemental_payload.get("youtube_topic_video")
+    if not isinstance(lane_payload, dict):
+        return supplemental_payload
+
+    reported_keys = _load_previously_reported_content_keys(user=user)
+    if not reported_keys:
+        return supplemental_payload
+
+    kept_candidates: list[dict] = []
+    dropped = 0
+    for candidate in list(lane_payload.get("candidates") or []):
+        if not isinstance(candidate, dict):
+            continue
+        key = _reported_content_key(
+            platform=Platform.YOUTUBE,
+            external_id=str(candidate.get("video_id") or candidate.get("external_id") or "").strip(),
+            url=str(candidate.get("url") or "").strip(),
+        )
+        if key is not None and key in reported_keys:
+            dropped += 1
+            continue
+        kept_candidates.append(candidate)
+
+    diagnostics = dict(lane_payload.get("diagnostics") or {})
+    diagnostics["dropped_by_report_history"] = int(diagnostics.get("dropped_by_report_history") or 0) + dropped
+    diagnostics["final_candidates_before_history"] = int(diagnostics.get("final_candidates") or len(list(lane_payload.get("candidates") or [])))
+    diagnostics["final_candidates"] = len(kept_candidates)
+    if dropped:
+        logger.info("Excluded previously reported YouTube supplemental videos for user_id=%s count=%s", user.id, dropped)
+
+    next_lane_payload = dict(lane_payload)
+    next_lane_payload["candidates"] = kept_candidates
+    next_lane_payload["diagnostics"] = diagnostics
+    next_payload = dict(supplemental_payload)
+    next_payload["youtube_topic_video"] = next_lane_payload
+    return next_payload
 
 
 def _attach_suggested_competitors_payload(

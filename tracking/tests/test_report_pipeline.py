@@ -1611,6 +1611,196 @@ def test_build_report_preview_renders_youtube_supplemental_section_without_main_
     assert "Main duplicate" not in preview.text
 
 
+def test_build_report_preview_excludes_previously_sent_youtube_supplemental_video(db, monkeypatch, settings):
+    settings.ENABLE_YOUTUBE_SUPPLEMENTAL_TOPIC_VIDEO_COLLECTION = True
+    user = TgUser.objects.create(tg_user_id=188, tg_chat_id=188, timezone_str="UTC")
+    competitor = Competitor.objects.create(
+        platform=Platform.YOUTUBE,
+        external_id="yt-supp-history",
+        handle="yt_supp_history",
+        url="https://www.youtube.com/@yt_supp_history",
+        display_name="YT Supp History",
+        meta={"uploads_playlist_id": "UU-supp-history"},
+    )
+    UserCompetitor.objects.create(user=user, competitor=competitor, is_active=True)
+    now = datetime(2026, 3, 24, 12, 0, tzinfo=UTC)
+    main_item = competitor.content_items.create(
+        platform=competitor.platform,
+        external_id="main-still-renders",
+        url="https://www.youtube.com/watch?v=main-still-renders",
+        title="Main item still renders",
+        description="desc",
+        published_at=now - timedelta(hours=2),
+        duration_seconds=30,
+        meta={"content_type": "short"},
+    )
+    Report.objects.create(
+        user=user,
+        period_start=now - timedelta(days=2),
+        period_end=now - timedelta(days=1),
+        status="sent",
+        payload={
+            "sections": [],
+            "supplemental": {
+                "youtube_topic_video": {
+                    "section": {
+                        "items": [
+                            {
+                                "video_id": "seen-supplemental",
+                                "url": "https://www.youtube.com/watch?v=seen-supplemental",
+                            }
+                        ]
+                    }
+                }
+            },
+        },
+    )
+
+    monkeypatch.setattr(report_pipeline, "youtube_profile_recent_shorts_gate_status", lambda **kwargs: (True, 2))
+    monkeypatch.setattr(report_pipeline, "refresh_competitor", lambda **kwargs: [main_item])
+    monkeypatch.setattr(report_pipeline, "compute_competitor_baseline", lambda **kwargs: SimpleNamespace(vph_median=1.0, rph_median=1.0))
+    monkeypatch.setattr(report_pipeline, "_classify_item_drop_reason", lambda **kwargs: None)
+    monkeypatch.setattr(
+        report_pipeline,
+        "score_items_for_period",
+        lambda **kwargs: [
+            SimpleNamespace(
+                content_item=main_item,
+                competitor=competitor,
+                views_end=5000,
+                likes_end=100,
+                comments_end=10,
+                shares_end=1,
+                velocity=250.0,
+                score_type="delta",
+                delta_views=1000,
+                delta_hours=4.0,
+                er_end=0.022,
+                base_score=3.0,
+                adaptation_relevance_score=0.4,
+                adaptation_relevance_factors={"niche_stem_overlap": 0.22},
+                selection_path="strict",
+                fallback_reason=None,
+                score=3.4,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        report_pipeline,
+        "collect_youtube_topic_video_candidates",
+        lambda **kwargs: SimpleNamespace(
+            to_payload=lambda: {
+                "source": "supplemental_topic_video",
+                "queries": ["spoken english"],
+                "diagnostics": {"queries_built": 1, "queries_executed": 1, "final_candidates": 2},
+                "candidates": [
+                    {
+                        "source": "supplemental_topic_video",
+                        "video_id": "seen-supplemental",
+                        "url": "https://www.youtube.com/watch?v=seen-supplemental",
+                        "title": "Already shown supplemental idea",
+                        "channel_title": "Old Topic Coach",
+                        "views": 6100,
+                    },
+                    {
+                        "source": "supplemental_topic_video",
+                        "video_id": "new-supplemental",
+                        "url": "https://www.youtube.com/watch?v=new-supplemental",
+                        "title": "New supplemental idea",
+                        "channel_title": "New Topic Coach",
+                        "views": 5900,
+                    },
+                ],
+            },
+            diagnostics={"queries_built": 1, "queries_executed": 1, "final_candidates": 2},
+        ),
+    )
+
+    preview = build_report_preview(
+        user=user,
+        period_start=now - timedelta(hours=24),
+        period_end=now,
+    )
+
+    youtube_section = next(section for section in preview.payload["sections"] if section["platform"] == Platform.YOUTUBE)
+    assert [item["video_id"] for item in youtube_section["items"]] == ["main-still-renders"]
+    youtube_supplemental = preview.payload["supplemental"]["youtube_topic_video"]
+    assert [item["video_id"] for item in youtube_supplemental["section"]["items"]] == ["new-supplemental"]
+    assert youtube_supplemental["diagnostics"]["dropped_by_report_history"] == 1
+    assert youtube_supplemental["diagnostics"]["final_candidates_before_history"] == 2
+    assert youtube_supplemental["diagnostics"]["final_candidates"] == 1
+    assert "Already shown supplemental idea" not in preview.text
+    assert "New supplemental idea" in preview.text
+
+
+def test_youtube_supplemental_history_dedupe_is_per_user(db, monkeypatch, settings):
+    settings.ENABLE_YOUTUBE_SUPPLEMENTAL_TOPIC_VIDEO_COLLECTION = True
+    user = TgUser.objects.create(tg_user_id=189, tg_chat_id=189, timezone_str="UTC")
+    other_user = TgUser.objects.create(tg_user_id=190, tg_chat_id=190, timezone_str="UTC")
+    now = datetime(2026, 3, 24, 12, 0, tzinfo=UTC)
+    Report.objects.create(
+        user=other_user,
+        period_start=now - timedelta(days=2),
+        period_end=now - timedelta(days=1),
+        status="sent",
+        payload={
+            "sections": [],
+            "supplemental": {
+                "youtube_topic_video": {
+                    "section": {
+                        "items": [
+                            {
+                                "video_id": "other-user-seen",
+                                "url": "https://www.youtube.com/watch?v=other-user-seen",
+                            }
+                        ]
+                    }
+                }
+            },
+        },
+    )
+    monkeypatch.setattr(
+        report_pipeline,
+        "collect_youtube_topic_video_candidates",
+        lambda **kwargs: SimpleNamespace(
+            to_payload=lambda: {
+                "source": "supplemental_topic_video",
+                "queries": ["spoken english"],
+                "diagnostics": {"queries_built": 1, "queries_executed": 1, "final_candidates": 2},
+                "candidates": [
+                    {
+                        "source": "supplemental_topic_video",
+                        "video_id": "other-user-seen",
+                        "url": "https://www.youtube.com/watch?v=other-user-seen",
+                        "title": "Only other user has seen this",
+                        "channel_title": "Topic Coach",
+                        "views": 6100,
+                    },
+                    {
+                        "source": "supplemental_topic_video",
+                        "video_id": "new-for-user",
+                        "url": "https://www.youtube.com/watch?v=new-for-user",
+                        "title": "New for user",
+                        "channel_title": "Topic Coach",
+                        "views": 5900,
+                    },
+                ],
+            },
+            diagnostics={"queries_built": 1, "queries_executed": 1, "final_candidates": 2},
+        ),
+    )
+
+    preview = build_report_preview(
+        user=user,
+        period_start=now - timedelta(hours=24),
+        period_end=now,
+    )
+
+    youtube_supplemental = preview.payload["supplemental"]["youtube_topic_video"]
+    assert [item["video_id"] for item in youtube_supplemental["section"]["items"]] == ["other-user-seen", "new-for-user"]
+    assert youtube_supplemental["diagnostics"].get("dropped_by_report_history", 0) == 0
+
+
 def test_build_report_preview_attaches_youtube_suggested_competitors_payload(db, monkeypatch, settings):
     settings.ENABLE_YOUTUBE_SUPPLEMENTAL_TOPIC_VIDEO_COLLECTION = True
     user = TgUser.objects.create(tg_user_id=183, tg_chat_id=183, timezone_str="UTC")
