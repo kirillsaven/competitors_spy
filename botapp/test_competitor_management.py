@@ -683,6 +683,45 @@ def test_competitors_add_enters_manual_wait_state(monkeypatch):
 
 
 @pytest.mark.django_db
+def test_competitors_remove_command_clears_previous_state(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=671, tg_chat_id=671)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+    monkeypatch.setattr(
+        competitors,
+        "_peek_remove_picker_snapshot_for_user_cached",
+        lambda **kwargs: SimpleNamespace(
+            payload={
+                "rows": [{"competitor_id": 10, "platform": Platform.YOUTUBE, "display_name": "Cached Remove", "url": "https://example.com/remove"}],
+                "picker_rows": [{"id": 10, "name": "Cached Remove", "url": "https://example.com/remove"}],
+                "platform_by_id": {"10": Platform.YOUTUBE},
+            },
+            cache_hit=True,
+            cache_source=PICKER_SNAPSHOT_CACHE_SOURCE_SNAPSHOT_HIT,
+            build_ms=0.0,
+        ),
+    )
+    monkeypatch.setattr(
+        competitors,
+        "_load_remove_picker_snapshot_for_user_cached",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("cold load should not run")),
+    )
+
+    state = DummyState()
+    async_to_sync(state.set_state)(CompetitorManagementStates.WAIT_COMPETITORS_ADD_INPUT)
+    async_to_sync(state.update_data)(user_id=999, stale_key="stale")
+    message = DummyMessage(user_id=671)
+
+    async_to_sync(competitors.cmd_competitors_remove)(message, state)
+
+    assert state.state == CompetitorManagementStates.PICK_COMPETITORS_REMOVE
+    assert "stale_key" not in state.data
+    assert state.data["user_id"] == user.id
+
+
+@pytest.mark.django_db
 def test_competitor_add_manual_alias_enters_wait_state(monkeypatch):
     user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=25, tg_chat_id=25)
     async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
@@ -1150,6 +1189,49 @@ def test_competitors_remove_deactivates_only_user_link_and_updates_report_active
 
 
 @pytest.mark.django_db
+def test_competitors_remove_done_schedules_background_refresh_and_detaches_markup(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=672, tg_chat_id=672)
+    async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
+    remove_competitor = async_to_sync(sync_to_async(Competitor.objects.create, thread_sensitive=True))(
+        platform=Platform.YOUTUBE,
+        external_id="yt-remove-672",
+        handle="remove_672",
+        display_name="Remove 672",
+        url="https://www.youtube.com/@remove_672",
+    )
+    async_to_sync(sync_to_async(UserCompetitor.objects.create, thread_sensitive=True))(user=user, competitor=remove_competitor, is_active=True)
+
+    monkeypatch.setattr(competitors, "db_call", _db_call)
+    monkeypatch.setattr(competitors, "db_run", _db_run)
+    schedule_calls: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        competitors,
+        "_schedule_competitor_cache_refresh",
+        lambda *, user_id, mutation_type: schedule_calls.append((user_id, mutation_type)) or True,
+    )
+
+    state = DummyState()
+    async_to_sync(state.update_data)(
+        user_id=user.id,
+        competitor_remove_rows=competitors._active_link_rows(user=user),
+        competitor_remove_picker_rows=competitors._make_remove_picker_rows(competitors._active_link_rows(user=user)),
+        competitor_remove_platform_by_id=competitors._make_remove_platform_by_id(competitors._active_link_rows(user=user)),
+        competitor_remove_selected_ids=[remove_competitor.id],
+        competitor_remove_page=0,
+    )
+    message = DummyMessage(user_id=672, text="Выбери конкурентов")
+
+    async_to_sync(competitors.on_remove_done)(DummyCallbackQuery(data="comprem_done", message=message), state)
+
+    link = async_to_sync(sync_to_async(UserCompetitor.objects.get, thread_sensitive=True))(user=user, competitor=remove_competitor)
+    assert link.is_active is False
+    assert state.state is None
+    assert schedule_calls == [(user.id, "remove_done")]
+    assert message.edit_reply_markup_calls == 1
+    assert "Удалено: 1" in message.answers[-1]
+
+
+@pytest.mark.django_db
 def test_competitors_remove_picker_pages_and_done_preserve_selection(monkeypatch):
     user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(tg_user_id=131, tg_chat_id=131)
     async_to_sync(sync_to_async(Schedule.objects.create, thread_sensitive=True))(user=user, times=["09:00"])
@@ -1475,15 +1557,7 @@ def test_competitors_add_done_refreshes_caches_and_next_remove_open_hits_cache(m
     monkeypatch.setattr(competitors, "db_call", _db_call)
     monkeypatch.setattr(competitors, "db_run", _db_run)
     monkeypatch.setattr(competitors, "_load_add_candidates_for_user", lambda **kwargs: ([_candidate(7)], []))
-    monkeypatch.setattr(
-        competitors,
-        "refresh_picker_caches_after_competitor_mutation",
-        lambda *, user, suggest_builder: refresh_picker_caches_after_competitor_mutation(
-            user=user,
-            suggest_builder=suggest_builder,
-            stopword_builder=lambda **kwargs: ["promo post"],
-        ),
-    )
+    monkeypatch.setattr(competitors, "_schedule_competitor_cache_refresh", lambda *, user_id, mutation_type: True)
 
     state = DummyState()
     async_to_sync(state.update_data)(
@@ -1497,6 +1571,11 @@ def test_competitors_add_done_refreshes_caches_and_next_remove_open_hits_cache(m
     )
     message = DummyMessage(user_id=611)
     async_to_sync(competitors.on_add_done)(DummyCallbackQuery(data="compadd_done", message=message), state)
+    refresh_picker_caches_after_competitor_mutation(
+        user=user,
+        suggest_builder=competitors._load_add_candidates_for_user,
+        stopword_builder=lambda **kwargs: ["promo post"],
+    )
 
     refreshed_user = async_to_sync(sync_to_async(TgUser.objects.get, thread_sensitive=True))(id=user.id)
     assert state.state is None
@@ -1541,15 +1620,7 @@ def test_competitors_remove_done_refreshes_caches_and_next_remove_open_hits_cach
     monkeypatch.setattr(competitors, "db_call", _db_call)
     monkeypatch.setattr(competitors, "db_run", _db_run)
     monkeypatch.setattr(competitors, "_load_add_candidates_for_user", lambda **kwargs: ([_candidate(8)], []))
-    monkeypatch.setattr(
-        competitors,
-        "refresh_picker_caches_after_competitor_mutation",
-        lambda *, user, suggest_builder: refresh_picker_caches_after_competitor_mutation(
-            user=user,
-            suggest_builder=suggest_builder,
-            stopword_builder=lambda **kwargs: ["promo post"],
-        ),
-    )
+    monkeypatch.setattr(competitors, "_schedule_competitor_cache_refresh", lambda *, user_id, mutation_type: True)
 
     state = DummyState()
     async_to_sync(state.update_data)(
@@ -1562,6 +1633,11 @@ def test_competitors_remove_done_refreshes_caches_and_next_remove_open_hits_cach
     )
     message = DummyMessage(user_id=612)
     async_to_sync(competitors.on_remove_done)(DummyCallbackQuery(data="comprem_done", message=message), state)
+    refresh_picker_caches_after_competitor_mutation(
+        user=user,
+        suggest_builder=competitors._load_add_candidates_for_user,
+        stopword_builder=lambda **kwargs: ["promo post"],
+    )
 
     refreshed_user = async_to_sync(sync_to_async(TgUser.objects.get, thread_sensitive=True))(id=user.id)
     assert state.state is None

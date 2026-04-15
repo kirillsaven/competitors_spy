@@ -152,6 +152,39 @@ def test_stopwords_add_uses_picker_and_skips_existing(monkeypatch):
     assert "Всего стоп-слов: 2" in message.answers[-1]
 
 
+@pytest.mark.django_db
+def test_stopwords_add_command_clears_previous_state(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(
+        tg_user_id=681,
+        tg_chat_id=681,
+        report_stopwords=["spoiler"],
+    )
+
+    monkeypatch.setattr(stopwords, "db_call", _db_call)
+    monkeypatch.setattr(stopwords, "_peek_stopword_add_picker_snapshot_cached", lambda **kwargs: SimpleNamespace(
+        payload={"items": ["promo post", "launch teaser"]},
+        cache_hit=True,
+        cache_source=PICKER_SNAPSHOT_CACHE_SOURCE_SNAPSHOT_HIT,
+        build_ms=0.0,
+    ))
+    monkeypatch.setattr(
+        stopwords,
+        "_load_stopword_add_picker_snapshot_cached",
+        lambda **kwargs: (_ for _ in ()).throw(AssertionError("cold load should not run")),
+    )
+
+    state = DummyState()
+    async_to_sync(state.set_state)(StopwordManagementStates.PICK_STOPWORDS_REMOVE)
+    async_to_sync(state.update_data)(user_id=999, stale_key="stale")
+    message = DummyMessage(user_id=681)
+
+    async_to_sync(stopwords.cmd_stopwords_add)(message, state)
+
+    assert state.state == StopwordManagementStates.PICK_STOPWORDS_ADD
+    assert "stale_key" not in state.data
+    assert state.data["user_id"] == user.id
+
+
 def test_stopwords_add_page_failed_ack_does_not_abort_render():
     suggestions = [f"word {idx}" for idx in range(12)]
     state = DummyState()
@@ -420,6 +453,42 @@ def test_stopwords_remove_deletes_only_requested_user_words(monkeypatch):
 
 
 @pytest.mark.django_db
+def test_stopwords_remove_done_schedules_background_refresh_and_detaches_markup(monkeypatch):
+    user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(
+        tg_user_id=682,
+        tg_chat_id=682,
+        report_stopwords=["spoiler", "promo post"],
+    )
+
+    monkeypatch.setattr(stopwords, "db_call", _db_call)
+    monkeypatch.setattr(stopwords, "db_run", _db_run)
+    schedule_calls: list[tuple[int, str]] = []
+    monkeypatch.setattr(
+        stopwords,
+        "_schedule_stopword_cache_refresh",
+        lambda *, user_id, mutation_type: schedule_calls.append((user_id, mutation_type)) or True,
+    )
+
+    state = DummyState()
+    async_to_sync(state.update_data)(
+        user_id=user.id,
+        stopword_remove_items=["spoiler", "promo post"],
+        stopword_remove_selected_ids=[0],
+        stopword_remove_page=0,
+    )
+    message = DummyMessage(user_id=682, text="Выбери stopwords")
+
+    async_to_sync(stopwords.on_remove_done)(DummyCallbackQuery(data="stoprem_done", message=message), state)
+
+    updated = async_to_sync(sync_to_async(TgUser.objects.get, thread_sensitive=True))(id=user.id)
+    assert updated.report_stopwords == ["promo post"]
+    assert state.state is None
+    assert schedule_calls == [(user.id, "remove_done")]
+    assert message.edit_reply_markup_calls == 1
+    assert "Удалено: 1" in message.answers[-1]
+
+
+@pytest.mark.django_db
 def test_stopwords_add_done_refreshes_caches_and_next_remove_open_hits_cache(monkeypatch):
     user = async_to_sync(sync_to_async(TgUser.objects.create, thread_sensitive=True))(
         tg_user_id=613,
@@ -430,14 +499,7 @@ def test_stopwords_add_done_refreshes_caches_and_next_remove_open_hits_cache(mon
 
     monkeypatch.setattr(stopwords, "db_call", _db_call)
     monkeypatch.setattr(stopwords, "db_run", _db_run)
-    monkeypatch.setattr(
-        stopwords,
-        "refresh_picker_caches_after_stopword_mutation",
-        lambda *, user: refresh_picker_caches_after_stopword_mutation(
-            user=user,
-            stopword_builder=lambda **kwargs: ["launch teaser", "spoiler"],
-        ),
-    )
+    monkeypatch.setattr(stopwords, "_schedule_stopword_cache_refresh", lambda *, user_id, mutation_type: True)
 
     state = DummyState()
     async_to_sync(state.update_data)(
@@ -448,8 +510,12 @@ def test_stopwords_add_done_refreshes_caches_and_next_remove_open_hits_cache(mon
     )
     message = DummyMessage(user_id=613)
     async_to_sync(stopwords.on_add_done)(DummyCallbackQuery(data="stopadd_done", message=message), state)
-
     refreshed_user = async_to_sync(sync_to_async(TgUser.objects.get, thread_sensitive=True))(id=user.id)
+    refresh_picker_caches_after_stopword_mutation(
+        user=refreshed_user,
+        stopword_builder=lambda **kwargs: ["launch teaser", "spoiler"],
+    )
+
     assert state.state is None
     assert "Добавлено: 1" in message.answers[-1]
     assert peek_stopword_add_picker_snapshot(user=refreshed_user) is not None
@@ -477,14 +543,7 @@ def test_stopwords_remove_done_refreshes_caches_and_next_add_open_hits_cache(mon
 
     monkeypatch.setattr(stopwords, "db_call", _db_call)
     monkeypatch.setattr(stopwords, "db_run", _db_run)
-    monkeypatch.setattr(
-        stopwords,
-        "refresh_picker_caches_after_stopword_mutation",
-        lambda *, user: refresh_picker_caches_after_stopword_mutation(
-            user=user,
-            stopword_builder=lambda **kwargs: ["fresh topic"],
-        ),
-    )
+    monkeypatch.setattr(stopwords, "_schedule_stopword_cache_refresh", lambda *, user_id, mutation_type: True)
 
     state = DummyState()
     async_to_sync(state.update_data)(
@@ -495,8 +554,12 @@ def test_stopwords_remove_done_refreshes_caches_and_next_add_open_hits_cache(mon
     )
     message = DummyMessage(user_id=614)
     async_to_sync(stopwords.on_remove_done)(DummyCallbackQuery(data="stoprem_done", message=message), state)
-
     refreshed_user = async_to_sync(sync_to_async(TgUser.objects.get, thread_sensitive=True))(id=user.id)
+    refresh_picker_caches_after_stopword_mutation(
+        user=refreshed_user,
+        stopword_builder=lambda **kwargs: ["fresh topic"],
+    )
+
     assert state.state is None
     assert "Удалено: 1" in message.answers[-1]
     assert peek_stopword_add_picker_snapshot(user=refreshed_user) is not None

@@ -15,7 +15,9 @@ from botapp.callback_safety import (
     callback_started,
     log_callback_observability,
     safe_callback_ack,
+    safe_edit_message,
 )
+from botapp.background_jobs import schedule_user_background_job
 from botapp.db import db_call, db_run
 from botapp.keyboards import GLOBAL_BACK_CALLBACK, kb_manage_competitors
 from botapp.picker_callback import (
@@ -93,6 +95,7 @@ _REMOVE_PICKER_SESSION_KEYS = PickerSessionKeys(
     page_key="competitor_remove_page",
     selected_key="competitor_remove_selected_ids",
 )
+_MUTATION_PENDING_KEY = "competitor_mutation_in_progress"
 
 
 def _discovery_target_per_platform() -> int:
@@ -291,6 +294,33 @@ def _log_mutation_cache_refresh(
     )
 
 
+def _message_text(message: Message) -> str:
+    return str(getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+
+
+def _schedule_competitor_cache_refresh(*, user_id: int, mutation_type: str) -> bool:
+    async def _job() -> None:
+        user = await db_call(TgUser.objects.get, id=user_id)
+        refresh_result = await db_run(
+            lambda: refresh_picker_caches_after_competitor_mutation(
+                user=user,
+                suggest_builder=_load_add_candidates_for_user,
+            )
+        )
+        _log_mutation_cache_refresh(
+            user_id=user.id,
+            mutation_type=mutation_type,
+            refresh_result=refresh_result,
+        )
+
+    return schedule_user_background_job(
+        kind="competitor_picker_cache_refresh",
+        user_id=user_id,
+        logger=logger,
+        job_factory=_job,
+    )
+
+
 def _manual_add_prompt_text() -> str:
     return (
         "Отправь ссылки или хэндлы конкурентов, по одному на строку.\n"
@@ -473,6 +503,7 @@ async def cmd_competitors_suggest(message: Message, state: FSMContext) -> None:
     if not setup_complete:
         await message.answer("Сначала заверши /setup.")
         return
+    await state.clear()
 
     async def _peek_load_result():
         return await asyncio.to_thread(_peek_add_candidates_for_user_cached, user=user)
@@ -573,6 +604,7 @@ async def cmd_competitors_remove(message: Message, state: FSMContext) -> None:
     if not setup_complete:
         await message.answer("Сначала заверши /setup.")
         return
+    await state.clear()
 
     async def _peek_load_result():
         return await db_run(lambda: _peek_remove_picker_snapshot_for_user_cached(user=user))
@@ -902,6 +934,23 @@ async def on_add_done(cb: CallbackQuery, state: FSMContext) -> None:
     page_before = picker_page(data, keys=_ADD_PICKER_SESSION_KEYS)
     selected_ids = picker_selected_set(data, keys=_ADD_PICKER_SESSION_KEYS)
     candidates = list(data.get("competitor_add_candidates") or [])
+    if data.get(_MUTATION_PENDING_KEY):
+        ack = await safe_callback_ack(
+            cb,
+            callback_type="compadd_done",
+            logger=logger,
+            started_at=started_at,
+            text="Уже обрабатываю выбранных конкурентов.",
+        )
+        _log_picker_callback(
+            ack=ack,
+            page_before=page_before,
+            page_after=page_before,
+            candidate_count=len(candidates),
+            keyboard_render_ms=0.0,
+            status="already_processing",
+        )
+        return
     if not selected_ids:
         ack = await safe_callback_ack(
             cb,
@@ -920,63 +969,78 @@ async def on_add_done(cb: CallbackQuery, state: FSMContext) -> None:
             status="empty_selection",
         )
         return
+    await state.update_data(**{_MUTATION_PENDING_KEY: True})
     ack = await safe_callback_ack(cb, callback_type="compadd_done", logger=logger, started_at=started_at)
+    edit = await safe_edit_message(
+        cb.message,
+        text=_message_text(cb.message),
+        reply_markup=None,
+        edit_mode="markup",
+    )
 
-    user = await db_call(TgUser.objects.get, id=data["user_id"])
-    counts = await db_run(lambda: get_active_user_competitor_counts(user=user))
-    added = 0
-    skipped = 0
-    errors: list[str] = []
+    try:
+        user = await db_call(TgUser.objects.get, id=data["user_id"])
+        counts = await db_run(lambda: get_active_user_competitor_counts(user=user))
+        added = 0
+        skipped = 0
+        errors: list[str] = []
 
-    for idx in sorted(selected_ids):
-        if idx < 0 or idx >= len(candidates):
-            continue
-        candidate = candidates[idx]
-        platform = str(candidate.get("platform") or "")
-        await db_call(
-            upsert_competitor,
-            user=user,
-            platform=platform,
-            external_id=str(candidate.get("external_id") or ""),
-            handle=candidate.get("handle"),
-            url=str(candidate.get("url") or ""),
-            display_name=candidate.get("display_name"),
-            added_by=str(candidate.get("added_by") or AddedBy.AUTO),
-            meta=candidate.get("meta") if isinstance(candidate.get("meta"), dict) else None,
-        )
-        counts[platform] = counts.get(platform, 0) + 1
-        added += 1
+        for idx in sorted(selected_ids):
+            if idx < 0 or idx >= len(candidates):
+                continue
+            candidate = candidates[idx]
+            platform = str(candidate.get("platform") or "")
+            await db_call(
+                upsert_competitor,
+                user=user,
+                platform=platform,
+                external_id=str(candidate.get("external_id") or ""),
+                handle=candidate.get("handle"),
+                url=str(candidate.get("url") or ""),
+                display_name=candidate.get("display_name"),
+                added_by=str(candidate.get("added_by") or AddedBy.AUTO),
+                meta=candidate.get("meta") if isinstance(candidate.get("meta"), dict) else None,
+            )
+            counts[platform] = counts.get(platform, 0) + 1
+            added += 1
 
-    skipped = len(selected_ids) - added - len(errors)
-    refresh_result = await db_run(
-        lambda: refresh_picker_caches_after_competitor_mutation(
-            user=user,
-            suggest_builder=_load_add_candidates_for_user,
+        skipped = len(selected_ids) - added - len(errors)
+        refresh_scheduled = _schedule_competitor_cache_refresh(user_id=user.id, mutation_type="add_done")
+        await state.clear()
+        await cb.message.answer(
+            _build_add_remove_summary(
+                action="Добавлено",
+                changed=added,
+                skipped=max(0, skipped),
+                errors=errors,
+                counts=counts,
+            )
         )
-    )
-    _log_mutation_cache_refresh(
-        user_id=user.id,
-        mutation_type="add_done",
-        refresh_result=refresh_result,
-    )
-    await state.clear()
-    await cb.message.answer(
-        _build_add_remove_summary(
-            action="Добавлено",
-            changed=added,
-            skipped=max(0, skipped),
-            errors=errors,
-            counts=counts,
+        _log_picker_callback(
+            ack=ack,
+            edit=edit,
+            page_before=page_before,
+            page_after=page_before,
+            candidate_count=len(candidates),
+            keyboard_render_ms=0.0,
+            status="success",
+            cache_refresh_mode="background",
+            cache_refresh_scheduled=refresh_scheduled,
         )
-    )
-    _log_picker_callback(
-        ack=ack,
-        page_before=page_before,
-        page_after=page_before,
-        candidate_count=len(candidates),
-        keyboard_render_ms=0.0,
-        status="success",
-    )
+    except Exception as exc:
+        logger.exception("competitor_add_done_failed user_id=%s", data.get("user_id"))
+        await state.clear()
+        await cb.message.answer("Не удалось добавить выбранных конкурентов. Попробуй еще раз.")
+        _log_picker_callback(
+            ack=ack,
+            edit=edit,
+            page_before=page_before,
+            page_after=page_before,
+            candidate_count=len(candidates),
+            keyboard_render_ms=0.0,
+            status="failure",
+            error=str(exc),
+        )
 
 
 @router.callback_query(CompetitorManagementStates.PICK_COMPETITORS_REMOVE, F.data.startswith("comprem_page:"))
@@ -1043,8 +1107,25 @@ async def on_remove_done(cb: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     page_before = picker_page(data, keys=_REMOVE_PICKER_SESSION_KEYS)
     selected_ids = picker_selected_set(data, keys=_REMOVE_PICKER_SESSION_KEYS)
+    rows = list(data.get("competitor_remove_rows") or [])
+    if data.get(_MUTATION_PENDING_KEY):
+        ack = await safe_callback_ack(
+            cb,
+            callback_type="comprem_done",
+            logger=logger,
+            started_at=started_at,
+            text="Уже обрабатываю выбранных конкурентов.",
+        )
+        _log_picker_callback(
+            ack=ack,
+            page_before=page_before,
+            page_after=page_before,
+            candidate_count=len(rows),
+            keyboard_render_ms=0.0,
+            status="already_processing",
+        )
+        return
     if not selected_ids:
-        rows = list(data.get("competitor_remove_rows") or [])
         ack = await safe_callback_ack(
             cb,
             callback_type="comprem_done",
@@ -1062,40 +1143,55 @@ async def on_remove_done(cb: CallbackQuery, state: FSMContext) -> None:
             status="empty_selection",
         )
         return
+    await state.update_data(**{_MUTATION_PENDING_KEY: True})
     ack = await safe_callback_ack(cb, callback_type="comprem_done", logger=logger, started_at=started_at)
+    edit = await safe_edit_message(
+        cb.message,
+        text=_message_text(cb.message),
+        reply_markup=None,
+        edit_mode="markup",
+    )
 
-    user = await db_call(TgUser.objects.get, id=data["user_id"])
-    removed = await db_run(lambda: deactivate_user_competitors(user=user, competitor_ids=sorted(selected_ids)))
-    counts = await db_run(lambda: get_active_user_competitor_counts(user=user))
-    refresh_result = await db_run(
-        lambda: refresh_picker_caches_after_competitor_mutation(
-            user=user,
-            suggest_builder=_load_add_candidates_for_user,
+    try:
+        user = await db_call(TgUser.objects.get, id=data["user_id"])
+        removed = await db_run(lambda: deactivate_user_competitors(user=user, competitor_ids=sorted(selected_ids)))
+        counts = await db_run(lambda: get_active_user_competitor_counts(user=user))
+        refresh_scheduled = _schedule_competitor_cache_refresh(user_id=user.id, mutation_type="remove_done")
+        await state.clear()
+        await cb.message.answer(
+            _build_add_remove_summary(
+                action="Удалено",
+                changed=removed,
+                skipped=max(0, len(selected_ids) - removed),
+                errors=[],
+                counts=counts,
+            )
         )
-    )
-    _log_mutation_cache_refresh(
-        user_id=user.id,
-        mutation_type="remove_done",
-        refresh_result=refresh_result,
-    )
-    await state.clear()
-    await cb.message.answer(
-        _build_add_remove_summary(
-            action="Удалено",
-            changed=removed,
-            skipped=max(0, len(selected_ids) - removed),
-            errors=[],
-            counts=counts,
+        _log_picker_callback(
+            ack=ack,
+            edit=edit,
+            page_before=page_before,
+            page_after=page_before,
+            candidate_count=len(rows),
+            keyboard_render_ms=0.0,
+            status="success",
+            cache_refresh_mode="background",
+            cache_refresh_scheduled=refresh_scheduled,
         )
-    )
-    _log_picker_callback(
-        ack=ack,
-        page_before=page_before,
-        page_after=page_before,
-        candidate_count=len(data.get("competitor_remove_rows") or []),
-        keyboard_render_ms=0.0,
-        status="success",
-    )
+    except Exception as exc:
+        logger.exception("competitor_remove_done_failed user_id=%s", data.get("user_id"))
+        await state.clear()
+        await cb.message.answer("Не удалось убрать выбранных конкурентов. Попробуй еще раз.")
+        _log_picker_callback(
+            ack=ack,
+            edit=edit,
+            page_before=page_before,
+            page_after=page_before,
+            candidate_count=len(rows),
+            keyboard_render_ms=0.0,
+            status="failure",
+            error=str(exc),
+        )
 
 
 @router.message(CompetitorManagementStates.PICK_COMPETITORS_ADD)
