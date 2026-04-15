@@ -14,7 +14,9 @@ from botapp.callback_safety import (
     callback_started,
     log_callback_observability,
     safe_callback_ack,
+    safe_edit_message,
 )
+from botapp.background_jobs import schedule_user_background_job
 from botapp.db import db_call, db_run
 from botapp.keyboards import GLOBAL_BACK_CALLBACK, kb_manage_stopwords
 from botapp.picker_callback import (
@@ -60,6 +62,7 @@ _REMOVE_PICKER_SESSION_KEYS = PickerSessionKeys(
     page_key="stopword_remove_page",
     selected_key="stopword_remove_selected_ids",
 )
+_MUTATION_PENDING_KEY = "stopword_mutation_in_progress"
 
 
 def _load_stopword_add_picker_snapshot_cached(*, user: TgUser):
@@ -136,6 +139,32 @@ def _log_mutation_cache_refresh(
         refresh_result.refresh_ms,
         refresh_result.status,
         refresh_result.failure_reason or "",
+    )
+
+
+def _message_text(message: Message) -> str:
+    return str(getattr(message, "text", None) or getattr(message, "caption", None) or "").strip()
+
+
+def _schedule_stopword_cache_refresh(*, user_id: int, mutation_type: str) -> bool:
+    async def _job() -> None:
+        user = await db_call(TgUser.objects.get, id=user_id)
+        refresh_result = await db_run(
+            lambda: refresh_picker_caches_after_stopword_mutation(
+                user=user,
+            )
+        )
+        _log_mutation_cache_refresh(
+            user_id=user.id,
+            mutation_type=mutation_type,
+            refresh_result=refresh_result,
+        )
+
+    return schedule_user_background_job(
+        kind="stopword_picker_cache_refresh",
+        user_id=user_id,
+        logger=logger,
+        job_factory=_job,
     )
 
 
@@ -278,6 +307,7 @@ async def cmd_stopwords_add(message: Message, state: FSMContext) -> None:
         last_name=message.from_user.last_name,
         language_code=message.from_user.language_code,
     )
+    await state.clear()
     async def _peek_load_result():
         return await asyncio.to_thread(_peek_stopword_add_picker_snapshot_cached, user=user)
 
@@ -335,6 +365,7 @@ async def cmd_stopwords_remove(message: Message, state: FSMContext) -> None:
         last_name=message.from_user.last_name,
         language_code=message.from_user.language_code,
     )
+    await state.clear()
     async def _peek_load_result():
         return await asyncio.to_thread(_peek_stopword_remove_picker_snapshot_cached, user=user)
 
@@ -452,6 +483,23 @@ async def on_add_done(cb: CallbackQuery, state: FSMContext) -> None:
     page_before = picker_page(data, keys=_ADD_PICKER_SESSION_KEYS)
     selected = picker_selected_set(data, keys=_ADD_PICKER_SESSION_KEYS)
     suggestions = [str(item) for item in (data.get("stopword_add_candidates") or []) if str(item).strip()]
+    if data.get(_MUTATION_PENDING_KEY):
+        ack = await safe_callback_ack(
+            cb,
+            callback_type="stopadd_done",
+            logger=logger,
+            started_at=started_at,
+            text="Уже обрабатываю выбранные stopwords.",
+        )
+        _log_picker_callback(
+            ack=ack,
+            page_before=page_before,
+            page_after=page_before,
+            candidate_count=len(suggestions),
+            keyboard_render_ms=0.0,
+            status="already_processing",
+        )
+        return
     if not selected:
         ack = await safe_callback_ack(
             cb,
@@ -470,42 +518,58 @@ async def on_add_done(cb: CallbackQuery, state: FSMContext) -> None:
             status="empty_selection",
         )
         return
+    await state.update_data(**{_MUTATION_PENDING_KEY: True})
     ack = await safe_callback_ack(cb, callback_type="stopadd_done", logger=logger, started_at=started_at)
+    edit = await safe_edit_message(
+        cb.message,
+        text=_message_text(cb.message),
+        reply_markup=None,
+        edit_mode="markup",
+    )
 
-    user = await db_call(TgUser.objects.get, id=data["user_id"])
-    current = await db_run(lambda: get_user_report_stopwords(user=user))
-    current_set = set(current)
-    chosen = [suggestions[idx] for idx in sorted(selected) if 0 <= idx < len(suggestions)]
-    added_words = [word for word in chosen if word not in current_set]
-    next_stopwords = current + added_words
-    await db_run(lambda: _save_user_stopwords(user=user, stopwords=next_stopwords))
-    refresh_result = await db_run(
-        lambda: refresh_picker_caches_after_stopword_mutation(
-            user=user,
+    try:
+        user = await db_call(TgUser.objects.get, id=data["user_id"])
+        current = await db_run(lambda: get_user_report_stopwords(user=user))
+        current_set = set(current)
+        chosen = [suggestions[idx] for idx in sorted(selected) if 0 <= idx < len(suggestions)]
+        added_words = [word for word in chosen if word not in current_set]
+        next_stopwords = current + added_words
+        await db_run(lambda: _save_user_stopwords(user=user, stopwords=next_stopwords))
+        refresh_scheduled = _schedule_stopword_cache_refresh(user_id=user.id, mutation_type="add_done")
+        await state.clear()
+        await cb.message.answer(
+            _summary_lines(
+                action="Добавлено",
+                changed=len(added_words),
+                skipped=len(chosen) - len(added_words),
+                total=len(next_stopwords),
+            )
         )
-    )
-    _log_mutation_cache_refresh(
-        user_id=user.id,
-        mutation_type="add_done",
-        refresh_result=refresh_result,
-    )
-    await state.clear()
-    await cb.message.answer(
-        _summary_lines(
-            action="Добавлено",
-            changed=len(added_words),
-            skipped=len(chosen) - len(added_words),
-            total=len(next_stopwords),
+        _log_picker_callback(
+            ack=ack,
+            edit=edit,
+            page_before=page_before,
+            page_after=page_before,
+            candidate_count=len(suggestions),
+            keyboard_render_ms=0.0,
+            status="success",
+            cache_refresh_mode="background",
+            cache_refresh_scheduled=refresh_scheduled,
         )
-    )
-    _log_picker_callback(
-        ack=ack,
-        page_before=page_before,
-        page_after=page_before,
-        candidate_count=len(suggestions),
-        keyboard_render_ms=0.0,
-        status="success",
-    )
+    except Exception as exc:
+        logger.exception("stopword_add_done_failed user_id=%s", data.get("user_id"))
+        await state.clear()
+        await cb.message.answer("Не удалось добавить выбранные stopwords. Попробуй еще раз.")
+        _log_picker_callback(
+            ack=ack,
+            edit=edit,
+            page_before=page_before,
+            page_after=page_before,
+            candidate_count=len(suggestions),
+            keyboard_render_ms=0.0,
+            status="failure",
+            error=str(exc),
+        )
 
 
 @router.callback_query(StopwordManagementStates.PICK_STOPWORDS_REMOVE, F.data.startswith("stoprem_page:"))
@@ -566,6 +630,23 @@ async def on_remove_done(cb: CallbackQuery, state: FSMContext) -> None:
     page_before = picker_page(data, keys=_REMOVE_PICKER_SESSION_KEYS)
     selected = picker_selected_set(data, keys=_REMOVE_PICKER_SESSION_KEYS)
     current = [str(item) for item in (data.get("stopword_remove_items") or []) if str(item).strip()]
+    if data.get(_MUTATION_PENDING_KEY):
+        ack = await safe_callback_ack(
+            cb,
+            callback_type="stoprem_done",
+            logger=logger,
+            started_at=started_at,
+            text="Уже обрабатываю выбранные stopwords.",
+        )
+        _log_picker_callback(
+            ack=ack,
+            page_before=page_before,
+            page_after=page_before,
+            candidate_count=len(current),
+            keyboard_render_ms=0.0,
+            status="already_processing",
+        )
+        return
     if not selected:
         ack = await safe_callback_ack(
             cb,
@@ -584,40 +665,56 @@ async def on_remove_done(cb: CallbackQuery, state: FSMContext) -> None:
             status="empty_selection",
         )
         return
+    await state.update_data(**{_MUTATION_PENDING_KEY: True})
     ack = await safe_callback_ack(cb, callback_type="stoprem_done", logger=logger, started_at=started_at)
+    edit = await safe_edit_message(
+        cb.message,
+        text=_message_text(cb.message),
+        reply_markup=None,
+        edit_mode="markup",
+    )
 
-    user = await db_call(TgUser.objects.get, id=data["user_id"])
-    to_remove = {current[idx] for idx in selected if 0 <= idx < len(current)}
-    next_stopwords = [word for word in current if word not in to_remove]
-    removed = len(current) - len(next_stopwords)
-    await db_run(lambda: _save_user_stopwords(user=user, stopwords=next_stopwords))
-    refresh_result = await db_run(
-        lambda: refresh_picker_caches_after_stopword_mutation(
-            user=user,
+    try:
+        user = await db_call(TgUser.objects.get, id=data["user_id"])
+        to_remove = {current[idx] for idx in selected if 0 <= idx < len(current)}
+        next_stopwords = [word for word in current if word not in to_remove]
+        removed = len(current) - len(next_stopwords)
+        await db_run(lambda: _save_user_stopwords(user=user, stopwords=next_stopwords))
+        refresh_scheduled = _schedule_stopword_cache_refresh(user_id=user.id, mutation_type="remove_done")
+        await state.clear()
+        await cb.message.answer(
+            _summary_lines(
+                action="Удалено",
+                changed=removed,
+                skipped=max(0, len(selected) - removed),
+                total=len(next_stopwords),
+            )
         )
-    )
-    _log_mutation_cache_refresh(
-        user_id=user.id,
-        mutation_type="remove_done",
-        refresh_result=refresh_result,
-    )
-    await state.clear()
-    await cb.message.answer(
-        _summary_lines(
-            action="Удалено",
-            changed=removed,
-            skipped=max(0, len(selected) - removed),
-            total=len(next_stopwords),
+        _log_picker_callback(
+            ack=ack,
+            edit=edit,
+            page_before=page_before,
+            page_after=page_before,
+            candidate_count=len(current),
+            keyboard_render_ms=0.0,
+            status="success",
+            cache_refresh_mode="background",
+            cache_refresh_scheduled=refresh_scheduled,
         )
-    )
-    _log_picker_callback(
-        ack=ack,
-        page_before=page_before,
-        page_after=page_before,
-        candidate_count=len(current),
-        keyboard_render_ms=0.0,
-        status="success",
-    )
+    except Exception as exc:
+        logger.exception("stopword_remove_done_failed user_id=%s", data.get("user_id"))
+        await state.clear()
+        await cb.message.answer("Не удалось удалить выбранные stopwords. Попробуй еще раз.")
+        _log_picker_callback(
+            ack=ack,
+            edit=edit,
+            page_before=page_before,
+            page_after=page_before,
+            candidate_count=len(current),
+            keyboard_render_ms=0.0,
+            status="failure",
+            error=str(exc),
+        )
 
 
 @router.message(StopwordManagementStates.PICK_STOPWORDS_ADD)

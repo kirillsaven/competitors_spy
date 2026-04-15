@@ -6,7 +6,7 @@ import os
 
 import django
 from aiogram import Bot, Dispatcher
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.memory import MemoryStorage, SimpleEventIsolation
 from django.conf import settings
 
 
@@ -30,7 +30,7 @@ async def main() -> None:
         raise RuntimeError("TELEGRAM_BOT_TOKEN is not set")
 
     bot = Bot(token=token)
-    dp = Dispatcher(storage=MemoryStorage())
+    dp = Dispatcher(storage=MemoryStorage(), events_isolation=SimpleEventIsolation())
     dp.include_router(common_router)
     dp.include_router(competitors_router)
     dp.include_router(setup_router)
