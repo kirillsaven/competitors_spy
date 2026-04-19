@@ -410,6 +410,97 @@ def test_phrase_match_and_instructional_format_survives_with_ranking_factors():
 
 
 @override_settings(
+    YT_SUPPLEMENTAL_MIN_VIEWS_BASE=200,
+    YT_SUPPLEMENTAL_MIN_VIEWS_PER_DAY=120,
+    YT_SUPPLEMENTAL_MIN_VIEWS_CAP=1200,
+    YT_SUPPLEMENTAL_MAX_QUERIES=1,
+    YT_SUPPLEMENTAL_MAX_RESULTS_PER_QUERY=2,
+    YT_SUPPLEMENTAL_MAX_SEARCH_PAGES_PER_QUERY=1,
+    YT_SUPPLEMENTAL_MAX_HYDRATED_VIDEOS=5,
+    YT_SUPPLEMENTAL_MAX_AGE_DAYS=30,
+    YT_SUPPLEMENTAL_SHORTS_ONLY=True,
+)
+def test_low_view_phrase_match_candidate_gets_filtered_by_low_traction_quality():
+    class FakeClient:
+        def search_videos_page(self, *, q, max_results, page_token=None, published_after=None, short_duration_only=False):
+            return [
+                {
+                    "id": {"videoId": "weak-1"},
+                    "snippet": {"channelId": "chan-1", "channelTitle": "Spam Coach"},
+                }
+            ], None
+
+        def videos_list(self, *, ids, part):
+            return [
+                {
+                    "id": "weak-1",
+                    "snippet": {
+                        "title": "АНГЛИЙСКИЙ ЯЗЫК ДЛЯ НАЧИНАЮЩИХ",
+                        "description": "английский для начинающих урок английского разговорный английский",
+                        "publishedAt": "2026-03-24T12:00:00Z",
+                    },
+                    "statistics": {"viewCount": "1", "likeCount": "1", "commentCount": "1"},
+                    "contentDetails": {"duration": "PT60S"},
+                }
+            ]
+
+    result = collection.collect_youtube_topic_video_candidates(
+        niche_keywords=["английский для начинающих", "урок английского", "разговорный английский"],
+        now=datetime(2026, 3, 30, 12, 0, tzinfo=UTC),
+        client=FakeClient(),
+    )
+
+    assert result.candidates == ()
+    assert result.diagnostics["raw_candidates_before_ranking"] == 1
+    assert result.diagnostics["dropped_by_low_traction_quality"] == 1
+
+
+@override_settings(
+    YT_SUPPLEMENTAL_MIN_VIEWS_BASE=200,
+    YT_SUPPLEMENTAL_MIN_VIEWS_PER_DAY=120,
+    YT_SUPPLEMENTAL_MIN_VIEWS_CAP=1200,
+    YT_SUPPLEMENTAL_MAX_QUERIES=1,
+    YT_SUPPLEMENTAL_MAX_RESULTS_PER_QUERY=2,
+    YT_SUPPLEMENTAL_MAX_SEARCH_PAGES_PER_QUERY=1,
+    YT_SUPPLEMENTAL_MAX_HYDRATED_VIDEOS=5,
+    YT_SUPPLEMENTAL_MAX_AGE_DAYS=30,
+    YT_SUPPLEMENTAL_SHORTS_ONLY=True,
+)
+def test_fresh_candidate_survives_age_aware_traction_floor():
+    class FakeClient:
+        def search_videos_page(self, *, q, max_results, page_token=None, published_after=None, short_duration_only=False):
+            return [
+                {
+                    "id": {"videoId": "fresh-1"},
+                    "snippet": {"channelId": "chan-1", "channelTitle": "Coach One"},
+                }
+            ], None
+
+        def videos_list(self, *, ids, part):
+            return [
+                {
+                    "id": "fresh-1",
+                    "snippet": {
+                        "title": "Разговорный английский для взрослых: 5 фраз для small talk",
+                        "description": "урок, примеры и диалог для практики",
+                        "publishedAt": "2026-03-30T02:00:00Z",
+                    },
+                    "statistics": {"viewCount": "260", "likeCount": "20", "commentCount": "3"},
+                    "contentDetails": {"duration": "PT44S"},
+                }
+            ]
+
+    result = collection.collect_youtube_topic_video_candidates(
+        niche_keywords=["разговорный английский для взрослых", "small talk english"],
+        now=datetime(2026, 3, 30, 12, 0, tzinfo=UTC),
+        client=FakeClient(),
+    )
+
+    assert [candidate.video_id for candidate in result.candidates] == ["fresh-1"]
+    assert result.diagnostics["dropped_by_low_traction_quality"] == 0
+
+
+@override_settings(
     YT_SUPPLEMENTAL_MAX_QUERIES=1,
     YT_SUPPLEMENTAL_MAX_RESULTS_PER_QUERY=2,
     YT_SUPPLEMENTAL_MAX_SEARCH_PAGES_PER_QUERY=1,
