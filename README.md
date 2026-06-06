@@ -43,6 +43,16 @@ docker compose exec web python manage.py verify_live_platform_report \
 ```
 The command resolves the supplied profiles through the real providers, refreshes snapshots, applies the current scoring pipeline, and fails if either requested platform still renders an empty report section.
 
+Export top recent Instagram Reels from competitor profiles as producer-ready markdown:
+```bash
+docker compose exec web python manage.py export_instagram_competitor_spy \
+  --instagram anyagal \
+  --instagram englex_school \
+  --format markdown \
+  --output /tmp/instagram_competitor_spy.md
+```
+Use `--input-file /path/to/handles.txt` for a reusable competitor list. The export is intended for content planning: it ranks recent Reels with public view counts and adds a mechanism/adaptation prompt. It should be used to adapt structures, not copy wording.
+
 Send a real live TikTok/Instagram report to Telegram and print the exact sent text plus Telegram `message_id`:
 ```bash
 docker compose exec web python manage.py send_test_platform_report \
