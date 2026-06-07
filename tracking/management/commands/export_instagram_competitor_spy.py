@@ -26,6 +26,7 @@ class InstagramSpyItem:
     views: int
     likes: int | None
     comments: int | None
+    interactions: int
     engagement_rate: float | None
     title: str
     mechanism_guess: str
@@ -75,7 +76,7 @@ def _engagement_rate(*, views: int, likes: int | None, comments: int | None) -> 
 def _rank_score(item: InstagramSpyItem) -> tuple[int, float]:
     if item.views > 0:
         return (item.views, item.engagement_rate or 0.0)
-    return (int(item.likes or 0) + int(item.comments or 0), 0.0)
+    return (item.interactions, 0.0)
 
 
 def _mechanism_guess(text: str) -> tuple[str, str]:
@@ -133,8 +134,8 @@ def _render_markdown(*, items: list[InstagramSpyItem], inputs: list[str]) -> str
             "",
             "## Top Reels",
             "",
-            "| rank | competitor | views | ER | mechanism | why it may have worked | adaptation | url |",
-            "| --- | --- | ---: | ---: | --- | --- | --- | --- |",
+            "| rank | competitor | views | interactions | ER | mechanism | why it may have worked | adaptation | url |",
+            "| --- | --- | ---: | ---: | ---: | --- | --- | --- | --- |",
         ]
     )
     for item in items:
@@ -146,6 +147,7 @@ def _render_markdown(*, items: list[InstagramSpyItem], inputs: list[str]) -> str
                     str(item.rank),
                     item.competitor.replace("|", "\\|"),
                     str(item.views),
+                    str(item.interactions),
                     er,
                     item.mechanism_guess.replace("|", "\\|"),
                     item.why_it_may_have_worked.replace("|", "\\|"),
@@ -213,6 +215,7 @@ class Command(BaseCommand):
             for detail in profile_to_video_details(profile):
                 title = _text_preview(detail.title or detail.description)
                 mechanism, why = _mechanism_guess(f"{detail.title}\n{detail.description}")
+                interactions = int(detail.likes or 0) + int(detail.comments or 0)
                 rows.append(
                     InstagramSpyItem(
                         rank=0,
@@ -222,6 +225,7 @@ class Command(BaseCommand):
                         views=detail.views,
                         likes=detail.likes,
                         comments=detail.comments,
+                        interactions=interactions,
                         engagement_rate=_engagement_rate(
                             views=detail.views,
                             likes=detail.likes,
