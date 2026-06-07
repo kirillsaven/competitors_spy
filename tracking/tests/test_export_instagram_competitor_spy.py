@@ -129,3 +129,58 @@ def test_export_instagram_competitor_spy_writes_json(tmp_path, monkeypatch, sett
     assert '"rank": 1' in text
     assert '"competitor": "@creator"' in text
     assert '"mechanism_guess": "contrast / before-after"' in text
+
+
+def test_export_instagram_competitor_spy_supports_gwaa_without_token(tmp_path, monkeypatch, settings):
+    from tracking.management.commands import export_instagram_competitor_spy as command_module
+
+    settings.INSTAGRAM_PROVIDER = "gwaa"
+    settings.INSTAGRAM_PROVIDER_ACCESS_TOKEN = ""
+    settings.INSTAGRAM_PROVIDER_BASE_URL = ""
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            assert kwargs["base_url"] == "https://highlights.gwaa.net"
+
+        def fetch_profiles(self, *, inputs):
+            assert inputs == ["anyagal"]
+            return [
+                {
+                    "username": "anyagal",
+                    "pk": "8763809956",
+                    "posts": [
+                        {
+                            "id": "reel-public",
+                            "code": "PublicReel",
+                            "taken_at": 1766583653,
+                            "product_type": "clips",
+                            "caption": "Как делать триггерные заголовки",
+                            "play_count": 0,
+                            "like_count": 4216,
+                            "comment_count": 138,
+                        }
+                    ],
+                }
+            ]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(command_module, "GwaaInstagramClient", FakeClient)
+    output_path = tmp_path / "instagram_spy_public.md"
+
+    call_command(
+        "export_instagram_competitor_spy",
+        "--instagram",
+        "anyagal",
+        "--format",
+        "markdown",
+        "--output",
+        str(output_path),
+    )
+
+    text = output_path.read_text(encoding="utf-8")
+
+    assert "@anyagal" in text
+    assert "PublicReel" in text
+    assert "Adapt the mechanism, not the wording" in text

@@ -7,7 +7,13 @@ from typing import Any
 
 from django.core.management.base import BaseCommand, CommandError
 
-from tracking.adapters.instagram import ApifyInstagramClient, InstagramApiError, extract_handle, profile_to_video_details
+from tracking.adapters.instagram import (
+    ApifyInstagramClient,
+    GwaaInstagramClient,
+    InstagramApiError,
+    extract_handle,
+    profile_to_video_details,
+)
 from tracking.services.provider_config import get_instagram_apify_config
 
 
@@ -64,6 +70,12 @@ def _engagement_rate(*, views: int, likes: int | None, comments: int | None) -> 
     if interactions <= 0:
         return None
     return round(interactions / views, 4)
+
+
+def _rank_score(item: InstagramSpyItem) -> tuple[int, float]:
+    if item.views > 0:
+        return (item.views, item.engagement_rate or 0.0)
+    return (int(item.likes or 0) + int(item.comments or 0), 0.0)
 
 
 def _mechanism_guess(text: str) -> tuple[str, str]:
@@ -172,17 +184,21 @@ class Command(BaseCommand):
             raise CommandError("Provide at least one --instagram value or --input-file")
 
         config = get_instagram_apify_config()
-        if config.provider != "apify":
-            raise CommandError(f"Unsupported Instagram provider: {config.provider}. Set INSTAGRAM_PROVIDER=apify")
-        if not config.access_token:
-            raise CommandError("INSTAGRAM_PROVIDER_ACCESS_TOKEN is not set")
-
-        client = ApifyInstagramClient(
-            access_token=config.access_token,
-            actor_id=config.profile_actor_id,
-            search_actor_id=config.search_actor_id,
-            base_url=config.base_url,
-        )
+        if config.provider == "apify":
+            if not config.access_token:
+                raise CommandError("INSTAGRAM_PROVIDER_ACCESS_TOKEN is not set")
+            client = ApifyInstagramClient(
+                access_token=config.access_token,
+                actor_id=config.profile_actor_id,
+                search_actor_id=config.search_actor_id,
+                base_url=config.base_url,
+            )
+        elif config.provider in {"gwaa", "public", "noauth"}:
+            client = GwaaInstagramClient(base_url=config.base_url or "https://highlights.gwaa.net")
+        else:
+            raise CommandError(
+                f"Unsupported Instagram provider: {config.provider}. Set INSTAGRAM_PROVIDER=apify or gwaa"
+            )
         try:
             profiles = client.fetch_profiles(inputs=inputs)
         except InstagramApiError as exc:
@@ -218,7 +234,7 @@ class Command(BaseCommand):
                     )
                 )
 
-        rows.sort(key=lambda item: (item.views, item.engagement_rate or 0.0), reverse=True)
+        rows.sort(key=_rank_score, reverse=True)
         limit = max(1, int(options["limit"]))
         ranked = [
             InstagramSpyItem(**{**asdict(item), "rank": index})

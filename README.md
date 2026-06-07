@@ -53,6 +53,14 @@ docker compose exec web python manage.py export_instagram_competitor_spy \
 ```
 Use `--input-file /path/to/handles.txt` for a reusable competitor list. The export is intended for content planning: it ranks recent Reels with public view counts and adds a mechanism/adaptation prompt. It should be used to adapt structures, not copy wording.
 
+No-token Instagram mode:
+```bash
+INSTAGRAM_PROVIDER=gwaa python manage.py export_instagram_competitor_spy \
+  --instagram anyagal \
+  --format markdown
+```
+This mode uses a public best-effort provider and does not require Apify or an Instagram login. It is less stable than a paid provider and may have incomplete view counts, but it is safer for lightweight content intelligence because it does not automate a personal Instagram session.
+
 Send a real live TikTok/Instagram report to Telegram and print the exact sent text plus Telegram `message_id`:
 ```bash
 docker compose exec web python manage.py send_test_platform_report \
@@ -139,3 +147,9 @@ Instagram Apify setup:
 - Optional: override `INSTAGRAM_APIFY_PROFILE_ACTOR_ID` (default `apify/instagram-profile-scraper`)
 
 Current Instagram MVP tracks only recent items that include public view counts from Apify output, because the existing scoring/report pipeline is view-based and this PR does not add a separate image-post scoring path.
+
+Instagram no-token public setup:
+
+- Set `INSTAGRAM_PROVIDER=gwaa`
+- Optional: set `INSTAGRAM_PROVIDER_BASE_URL` (defaults to `https://highlights.gwaa.net`)
+- No `INSTAGRAM_PROVIDER_ACCESS_TOKEN` is required
