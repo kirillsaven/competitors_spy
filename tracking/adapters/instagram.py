@@ -215,6 +215,8 @@ class GwaaInstagramClient:
                 data = response.json()
             except Exception as exc:
                 raise InstagramApiError(f"GWAA Instagram API invalid JSON: status={response.status_code}") from exc
+            if response.status_code == 404:
+                continue
             if response.status_code >= 400:
                 raise InstagramApiError(f"GWAA Instagram API error: status={response.status_code} body={data}")
             if not isinstance(data, dict):

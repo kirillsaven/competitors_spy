@@ -159,6 +159,30 @@ def test_gwaa_client_fetches_public_profiles():
     assert profiles == [{"username": "anyagal", "pk": "8763809956", "posts": []}]
 
 
+def test_gwaa_client_skips_missing_public_profiles():
+    from tracking.adapters.instagram import GwaaInstagramClient
+
+    class FakeHttpClient:
+        def get(self, url, params, headers):
+            return SimpleNamespace(
+                status_code=404,
+                json=lambda: {"success": False, "error": "Profile not found"},
+            )
+
+        def close(self):
+            return None
+
+    client = GwaaInstagramClient(base_url="https://highlights.gwaa.net")
+    client._client = FakeHttpClient()
+
+    try:
+        profiles = client.fetch_profiles(inputs=["missingprofile"])
+    finally:
+        client.close()
+
+    assert profiles == []
+
+
 def test_resolve_seed_input_builds_profile_url_when_missing():
     class FakeClient:
         def fetch_profiles(self, *, inputs):
