@@ -41,7 +41,7 @@ Example:
 pwsh ./scripts/post_merge_deploy_verify.ps1 `
   -Server deploy@YOUR_SERVER_IP `
   -RemoteDir YOUR_APP_DIR `
-  -SmokeUserId 33
+  -SmokeUserId YOUR_TELEGRAM_USER_ID
 ```
 
 The helper prints:

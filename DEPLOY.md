@@ -1,43 +1,53 @@
 # Deploy
 
-Target server for the first real deployment: `YOUR_SERVER_IP`
+This document is a generic deployment template for self-hosters. It is not a hosted service guarantee and should be adapted to your own infrastructure.
+
+Use placeholders consistently:
+
+- `YOUR_SERVER_IP`
+- `YOUR_DOMAIN`
+- `YOUR_TELEGRAM_USER_ID`
+- `YOUR_TELEGRAM_CHAT_ID`
+- `YOUR_APP_DIR`
+- `YOUR_REPO_URL`
 
 ## Bootstrap checklist
-1. Confirm SSH access to `YOUR_SERVER_IP` with a user that can run Docker commands.
-2. Install these server prerequisites:
+
+1. Provision a Linux server that can run Docker.
+2. Install prerequisites:
    - Docker Engine
    - Docker Compose plugin (`docker compose version` must work)
    - Git
    - curl
-3. Create the app directory, for example:
+3. Create the app directory:
 
 ```bash
 sudo mkdir -p YOUR_APP_DIR
 sudo chown "$USER":"$USER" YOUR_APP_DIR
 ```
 
-4. Configure GitHub read access for the private repo on the server.
-   Without a deploy key, machine user, or PAT-backed clone, server-side `git clone`, update, and rollback commands will fail.
-5. Clone the repo on the server:
+4. Configure repository read access on the server.
+   Use a deploy key, machine user, or another secure Git access path.
+5. Clone the repo:
 
 ```bash
-git clone git@github.com:kirillsaven/competitors_spy.git YOUR_APP_DIR
+git clone YOUR_REPO_URL YOUR_APP_DIR
 cd YOUR_APP_DIR
 ```
 
-6. Copy the production env template and fill all required values:
+6. Copy the production env template and fill required values:
 
 ```bash
 cp deploy/env.production.example .env
 ```
 
-7. Decide how traffic will reach the app.
-   This repo now includes an internal production reverse proxy container.
-   Open only port `80/tcp` publicly for the first deployment baseline.
-   Do not expose `8000/tcp` publicly.
+7. Decide how traffic reaches the app.
+   The production Compose file includes an internal Nginx reverse proxy. Open only the intended public reverse-proxy port. Do not expose Django's development server publicly.
 
 ## Required production env vars
+
 Minimum required values in `.env`:
+
 - `DJANGO_SECRET_KEY`
 - `DJANGO_ALLOWED_HOSTS`
 - `DJANGO_CSRF_TRUSTED_ORIGINS`
@@ -47,13 +57,15 @@ Minimum required values in `.env`:
 - `DATABASE_URL`
 - `REDIS_URL`
 - `TELEGRAM_BOT_TOKEN`
-- `YOUTUBE_API_KEY`
+- `YOUTUBE_API_KEY` or `YOUTUBE_API_KEYS`
 
 Optional provider envs:
-- `TIKTOK_PROVIDER=apify` plus `TIKTOK_PROVIDER_ACCESS_TOKEN` when TikTok is enabled
-- `INSTAGRAM_PROVIDER=apify` plus `INSTAGRAM_PROVIDER_ACCESS_TOKEN` when Instagram is enabled
 
-Recommended hardening vars for a reverse-proxied HTTPS setup:
+- `TIKTOK_PROVIDER=apify` plus `TIKTOK_PROVIDER_ACCESS_TOKEN`
+- `INSTAGRAM_PROVIDER=apify` plus `INSTAGRAM_PROVIDER_ACCESS_TOKEN`
+
+Recommended hardening vars for HTTPS behind a reverse proxy:
+
 - `DJANGO_TRUST_X_FORWARDED_PROTO=1`
 - `DJANGO_USE_X_FORWARDED_HOST=1`
 - `DJANGO_USE_X_FORWARDED_PORT=1`
@@ -64,12 +76,27 @@ Recommended hardening vars for a reverse-proxied HTTPS setup:
 - `DJANGO_SECURE_HSTS_INCLUDE_SUBDOMAINS=1`
 - `DJANGO_SECURE_HSTS_PRELOAD=1`
 
-Current first-deploy HTTP baseline:
-- Keep `DJANGO_SECURE_SSL_REDIRECT=0`, `DJANGO_SESSION_COOKIE_SECURE=0`, `DJANGO_CSRF_COOKIE_SECURE=0`, and `DJANGO_SECURE_HSTS_SECONDS=0` until real HTTPS termination exists.
-- Set `DJANGO_SILENCED_SYSTEM_CHECKS=security.W004,security.W008,security.W012,security.W016` so `check --deploy` does not fail on HTTPS-only warnings that are intentionally deferred on this baseline.
-- Do not silence `security.W009`; fix it by setting a strong production-only `DJANGO_SECRET_KEY`.
+Do not silence Django security warnings unless you understand the exact risk. Use a strong production-only `DJANGO_SECRET_KEY`.
+
+## HTTPS recommendation
+
+Use HTTPS for production. Common options include:
+
+- host-level Nginx or Caddy with managed certificates
+- a managed load balancer or reverse proxy
+- Cloudflare Tunnel or another explicitly configured edge proxy
+
+Set `DJANGO_CSRF_TRUSTED_ORIGINS` to your public HTTPS origin, for example:
+
+```env
+DJANGO_ALLOWED_HOSTS=YOUR_DOMAIN
+DJANGO_CSRF_TRUSTED_ORIGINS=https://YOUR_DOMAIN
+```
+
+Never expose `python manage.py runserver` to the public internet.
 
 ## Production start and update commands
+
 First start from the server checkout:
 
 ```bash
@@ -92,21 +119,21 @@ bash scripts/prod-update.sh <git-ref>
 ```
 
 `scripts/prod-update.sh` fails fast if:
+
 - required commands are missing
 - `.env` is missing
 - `deploy/nginx/default.conf` is missing
 - the server checkout is dirty
 - the requested git ref does not resolve
 
-## Health verification commands
+## Health check checklist
+
 After each deploy:
 
 ```bash
 cd YOUR_APP_DIR
 bash scripts/prod-health.sh
 ```
-
-`scripts/prod-health.sh` verifies the public container path through the reverse proxy at `http://127.0.0.1/healthz/`.
 
 If health checks fail or you need more context:
 
@@ -115,68 +142,76 @@ cd YOUR_APP_DIR
 bash scripts/prod-logs.sh 200
 ```
 
-This includes `proxy` logs as well as `web`, `bot`, `worker`, and `beat`.
+Check:
 
-## Rollback baseline
+- containers are running and healthy
+- `http://127.0.0.1/healthz/` works on the server
+- `python manage.py check --deploy --fail-level WARNING` passes or produces only reviewed warnings
+- migrations are applied
+- the bot, worker, and beat services are running
+
+## Smoke test template
+
+Use your own Telegram IDs and test profiles only:
+
+```bash
+cd YOUR_APP_DIR
+docker compose -f docker-compose.prod.yml exec web python manage.py send_test_platform_report \
+  --tg-user-id YOUR_TELEGRAM_USER_ID \
+  --tg-chat-id YOUR_TELEGRAM_CHAT_ID \
+  --tiktok https://www.tiktok.com/@example \
+  --instagram https://www.instagram.com/example/
+```
+
+Do not publish real Telegram IDs or message IDs in issues, docs, or screenshots.
+
+## Production checklist
+
+- `.env` exists on the server and is not committed.
+- Tokens and API keys were generated specifically for this deployment.
+- `DJANGO_DEBUG=0`.
+- `DJANGO_ALLOWED_HOSTS` contains only your public hostnames/IPs.
+- HTTPS is configured before real users rely on the deployment.
+- Secure cookie and HSTS settings match your HTTPS setup.
+- Database and Redis volumes are backed up.
+- Logs do not expose tokens or private user data.
+- Admin access is restricted to trusted operators.
+- Provider API quotas and billing limits are understood.
+
+## Rollback checklist
+
 1. Identify the previous good commit or tag.
-2. Roll back by redeploying that exact ref:
+2. Redeploy that exact ref:
 
 ```bash
 cd YOUR_APP_DIR
 bash scripts/prod-update.sh <previous-good-ref>
 ```
 
-3. Re-run:
+3. Re-run health checks:
 
 ```bash
 bash scripts/prod-health.sh
 ```
 
+4. Confirm worker, beat, bot, and web services are healthy.
+5. Run a smoke check if the change affected report generation or Telegram delivery.
+
 ## Reverse proxy baseline
-- Public entrypoint: `proxy` on port `80`
+
+- Public entrypoint: `proxy` on port `80` in `docker-compose.prod.yml`
 - Internal app port: `web:8000` on the Docker network only
-- Current scope: plain HTTP only
-- Missing piece for HTTPS: an explicit TLS termination plan such as host-level Nginx/Caddy or manually managed certificates
+- Recommended production path: put HTTPS termination in front of the proxy or adapt the Nginx config for TLS
 
-## First deployment record
-Date: `2026-03-25`
+Update `deploy/nginx/default.conf` with `YOUR_DOMAIN` or your intended server name before production use.
 
-Target host: `YOUR_SERVER_IP`
+## Token rotation
 
-Deployed ref:
-- `origin/main`
-- resolved on server to commit `8d5c1c79b6c7f06842c87e361896a3e53cf92b8c`
+Rotate credentials before public launch if they were ever stored in a private repo, shared in chat, used in local experiments, or pasted into logs. This includes:
 
-Exact commands run:
-
-```bash
-ssh deploy@YOUR_SERVER_IP "docker stop PRIVATE_CONTAINER_PLACEHOLDER"
-ssh deploy@YOUR_SERVER_IP "cd YOUR_APP_DIR && bash scripts/prod-update.sh origin/main"
-ssh deploy@YOUR_SERVER_IP "cd YOUR_APP_DIR && bash scripts/prod-health.sh"
-ssh deploy@YOUR_SERVER_IP "cd YOUR_APP_DIR && docker compose -f docker-compose.prod.yml exec web python manage.py migrate --check"
-ssh deploy@YOUR_SERVER_IP "cd YOUR_APP_DIR && docker compose -f docker-compose.prod.yml exec web python manage.py send_test_platform_report --tg-user-id YOUR_TELEGRAM_USER_ID --tg-chat-id YOUR_TELEGRAM_USER_ID --tiktok nba --instagram nasa"
-```
-
-Observed results:
-- Containers started successfully for `db`, `redis`, `web`, `proxy`, `bot`, `worker`, and `beat`
-- Proxy health endpoint returned `{"status": "ok"}` from `http://YOUR_SERVER_IP/healthz/`
-- `python manage.py migrate --check` succeeded, so no unapplied migrations remained after deploy
-- Live Telegram smoke send succeeded with real provider data:
-  - TikTok section count: `5`
-  - Instagram section count: `3`
-  - Telegram `message_id`: `251`
-
-Final container status:
-- `competitors_spy-db-1`: healthy
-- `competitors_spy-redis-1`: healthy
-- `competitors_spy-web-1`: healthy
-- `competitors_spy-proxy-1`: healthy, bound to `0.0.0.0:80->80/tcp`
-- `competitors_spy-bot-1`: running
-- `competitors_spy-worker-1`: running
-- `competitors_spy-beat-1`: running
-
-Remaining operational gaps:
-- Port `80` was occupied by unrelated container `PRIVATE_CONTAINER_PLACEHOLDER` before the first deploy. That conflict must stay resolved for future deploys.
-- `bash scripts/prod-health.sh` still exits non-zero on this plain-HTTP baseline because `python manage.py check --deploy --fail-level WARNING` reports hardening warnings for missing TLS and secure-cookie settings.
-- The current deployment is HTTP-only. HTTPS termination and the related secure Django settings are still pending.
-- `DJANGO_SECRET_KEY` should be rotated to a strong production-only value before broader public exposure.
+- `DJANGO_SECRET_KEY`
+- `TELEGRAM_BOT_TOKEN`
+- YouTube API keys
+- Apify tokens
+- database passwords
+- Redis passwords if configured

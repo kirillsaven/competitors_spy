@@ -1,0 +1,41 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      DJANGO_SECRET_KEY: release-ci-secret-key-with-enough-length-1234567890
+      DJANGO_DEBUG: "0"
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,testserver
+      DJANGO_CSRF_TRUSTED_ORIGINS: https://example.com
+      DJANGO_SECURE_SSL_REDIRECT: "1"
+      DJANGO_SESSION_COOKIE_SECURE: "1"
+      DJANGO_CSRF_COOKIE_SECURE: "1"
+      DJANGO_SECURE_HSTS_PRELOAD: "1"
+      DJANGO_TRUST_X_FORWARDED_PROTO: "0"
+      CELERY_TASK_ALWAYS_EAGER: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Django checks
+        run: |
+          python manage.py check
+          python manage.py check --deploy --fail-level WARNING
+
+      - name: Run tests
+        run: pytest -q

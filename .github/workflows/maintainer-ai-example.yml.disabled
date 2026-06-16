@@ -1,0 +1,29 @@
+name: Maintainer AI Example
+
+on:
+  workflow_dispatch:
+
+jobs:
+  pr-summary-example:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install optional OpenAI SDK
+        run: python -m pip install openai
+
+      - name: Draft release notes
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python tools/maintainer_ai.py release-notes --changelog CHANGELOG.md
+
+      - name: Safety note
+        run: |
+          echo "This example is disabled by filename and does not post comments."
+          echo "Review generated output manually before sharing it publicly."
