@@ -25,5 +25,5 @@ jobs:
 
       - name: Safety note
         run: |
-          echo "This example is disabled by filename and does not post comments."
-          echo "Review generated output manually before sharing it publicly."
+          echo "This example is documentation only and must be reviewed before use."
+          echo "Do not configure it to post unreviewed AI comments to public issues or pull requests."

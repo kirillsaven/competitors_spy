@@ -4,7 +4,7 @@ import argparse
 import os
 import re
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 MAX_MODEL_CHARS = 60000
@@ -22,6 +22,9 @@ _PRIVATE_KEY_RE = re.compile(
 _TELEGRAM_BOT_TOKEN_RE = re.compile(r"\b\d{6,}:[A-Za-z0-9_-]{20,}\b")
 _OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b")
 _GOOGLE_API_KEY_RE = re.compile(r"\bAIza[A-Za-z0-9_-]{20,}\b")
+_GITHUB_CLASSIC_TOKEN_RE = re.compile(r"\bgh[pousr]_[A-Za-z0-9_]{20,}\b")
+_GITHUB_FINE_GRAINED_TOKEN_RE = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b")
+_SLACK_TOKEN_RE = re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{20,}\b")
 _DB_URL_WITH_CREDS_RE = re.compile(r"\b((?:postgresql?|mysql|redis)://)([^:/\s]+):([^@\s]+)@([^\s]+)")
 _ENV_ASSIGNMENT_RE = re.compile(
     r"(?im)^([A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|PASSWD|ACCESS_TOKEN|DATABASE_URL|REDIS_URL|POSTGRES_PASSWORD)[A-Z0-9_]*\s*=\s*)(.+)$"
@@ -29,7 +32,27 @@ _ENV_ASSIGNMENT_RE = re.compile(
 _JSON_SECRET_RE = re.compile(
     r'(?i)("?[a-z0-9_]*(?:api[_-]?key|token|secret|password|passwd|access[_-]?token)"?\s*:\s*")([^"]+)(")'
 )
-_ENV_DIFF_HEADER_RE = re.compile(r"(?m)^(diff --git a/\.env(?:\s|$)|--- a/\.env(?:\s|$)|\+\+\+ b/\.env(?:\s|$))")
+_BEARER_SECRET_CONTEXT_RE = re.compile(
+    r"(?im)^((?:authorization|proxy-authorization)\s*:\s*bearer\s+)([A-Za-z0-9._~+/=-]{20,})$"
+)
+_DIFF_PATH_RE = re.compile(r"(?m)^(?:diff --git a/(.*?) b/(.*?)|--- (?:a/)?(.*?)|\+\+\+ (?:b/)?(.*?))$")
+
+
+def _is_private_env_path(path: str) -> bool:
+    cleaned = path.strip()
+    if not cleaned or cleaned == "/dev/null":
+        return False
+    cleaned = cleaned.split("\t", 1)[0].strip()
+    name = PurePosixPath(cleaned.replace("\\", "/")).name
+    return (name == ".env" or name.startswith(".env.")) and name != ".env.example"
+
+
+def diff_contains_private_env_path(diff_text: str) -> bool:
+    for match in _DIFF_PATH_RE.finditer(diff_text):
+        for group in match.groups():
+            if group and _is_private_env_path(group):
+                return True
+    return False
 
 
 def redact_sensitive_text(text: str) -> str:
@@ -37,9 +60,13 @@ def redact_sensitive_text(text: str) -> str:
     redacted = _TELEGRAM_BOT_TOKEN_RE.sub("[REDACTED_TELEGRAM_BOT_TOKEN]", redacted)
     redacted = _OPENAI_KEY_RE.sub("[REDACTED_API_KEY]", redacted)
     redacted = _GOOGLE_API_KEY_RE.sub("[REDACTED_API_KEY]", redacted)
+    redacted = _GITHUB_CLASSIC_TOKEN_RE.sub("[REDACTED_GITHUB_TOKEN]", redacted)
+    redacted = _GITHUB_FINE_GRAINED_TOKEN_RE.sub("[REDACTED_GITHUB_TOKEN]", redacted)
+    redacted = _SLACK_TOKEN_RE.sub("[REDACTED_SLACK_TOKEN]", redacted)
     redacted = _DB_URL_WITH_CREDS_RE.sub(r"\1[REDACTED_CREDENTIALS]@\4", redacted)
     redacted = _ENV_ASSIGNMENT_RE.sub(r"\1[REDACTED]", redacted)
     redacted = _JSON_SECRET_RE.sub(r"\1[REDACTED]\3", redacted)
+    redacted = _BEARER_SECRET_CONTEXT_RE.sub(r"\1[REDACTED_BEARER_TOKEN]", redacted)
     return redacted
 
 
@@ -193,8 +220,8 @@ def _model_prompt(command: str, content: str, source: str) -> str:
 
 
 def _call_openai(command: str, content: str, source: str) -> str:
-    if _ENV_DIFF_HEADER_RE.search(content):
-        raise MaintainerAiError("Refusing to send a diff containing .env file changes to OpenAI.")
+    if diff_contains_private_env_path(content):
+        raise MaintainerAiError("Refusing to send a diff containing private .env file changes to OpenAI.")
 
     try:
         from openai import OpenAI  # type: ignore

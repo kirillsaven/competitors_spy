@@ -1,0 +1,10 @@
+[allowlist]
+description = "Known fake Django secret keys used only in GitHub Actions test environments."
+regexes = [
+  '''ci-secret-key-with-enough-length-and-entropy-1234567890''',
+  '''release-ci-secret-key-with-enough-length-1234567890''',
+]
+paths = [
+  '''^\.github/workflows/ci\.yml$''',
+  '''^\.github/workflows/release\.yml$''',
+]

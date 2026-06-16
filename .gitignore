@@ -39,6 +39,15 @@ htmlcov/
 *.tar
 *.zip
 
+# Private maintainer scratchpads / application prep
+.codex_tmp/
+docs/proaudit/
+*PROAUDIT*.md
+*ProAudit*.md
+CODEX_*PROMPT*.md
+*OSS_APPLICATION_PROMPT*.md
+*OSS_APPLICATION_NOTES*.md
+
 # OS
 .DS_Store
 Thumbs.db

@@ -24,6 +24,12 @@ Safety:
 - Diffs containing `.env` changes are not sent to OpenAI.
 - Do not paste real bot tokens, API keys, database URLs, private keys, Telegram IDs, or private server details into input files.
 
+Workflow example:
+
+- A documentation-only GitHub Actions example lives at `docs/examples/maintainer-ai-example.workflow.yml`.
+- It is intentionally outside `.github/workflows/` so it cannot run unless a maintainer copies it into the active workflow directory.
+- Review generated output manually before sharing it publicly.
+
 Optional install:
 
 ```bash
