@@ -2237,6 +2237,8 @@ def test_youtube_low_recall_rescue_requeries_and_merges_candidates(monkeypatch):
         return [initial_candidate]
 
     def fake_collector_aware_candidates(*, platform, candidates, keywords, max_candidates, context=None):
+        if platform != Platform.YOUTUBE:
+            return [], ""
         ids = sorted(candidate.external_id for candidate in candidates)
         if ids == ["yt-1"]:
             return [initial_candidate], ""
@@ -2252,6 +2254,8 @@ def test_youtube_low_recall_rescue_requeries_and_merges_candidates(monkeypatch):
         "_collector_aware_candidates",
         fake_collector_aware_candidates,
     )
+    monkeypatch.setattr(platform_onboarding, "_search_instagram_candidates_raw", lambda **kwargs: [])
+    monkeypatch.setattr(platform_onboarding, "_search_tiktok_candidates_raw", lambda **kwargs: [])
     monkeypatch.setattr(
         platform_onboarding,
         "_youtube_fallback_queries",
