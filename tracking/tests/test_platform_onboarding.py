@@ -688,6 +688,11 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
         ],
     )
 
+    recent_instagram_ts_1 = (datetime.now(UTC) - timedelta(days=3)).isoformat().replace("+00:00", "Z")
+    recent_instagram_ts_2 = (datetime.now(UTC) - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+    recent_tiktok_ts_1 = (datetime.now(UTC) - timedelta(days=3)).isoformat().replace("+00:00", "Z")
+    recent_tiktok_ts_2 = (datetime.now(UTC) - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+
     def fake_fetch_instagram_profiles_cached(*, inputs, context=None, purpose=None, context_id=None):
         lookup = inputs[0]
         if "reelhub" in lookup:
@@ -701,7 +706,7 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
                             "productType": "clips",
                             "url": "https://www.instagram.com/reel/reel-1/",
                             "caption": "English teacher reel",
-                            "timestamp": "2026-03-03T10:30:00.000Z",
+                            "timestamp": recent_instagram_ts_1,
                             "videoViewCount": 2400,
                         },
                         {
@@ -709,7 +714,7 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
                             "productType": "clips",
                             "url": "https://www.instagram.com/reel/reel-2/",
                             "caption": "Lesson planning for english teachers",
-                            "timestamp": "2026-03-18T10:30:00.000Z",
+                            "timestamp": recent_instagram_ts_2,
                             "videoViewCount": 2400,
                         }
                     ],
@@ -740,7 +745,7 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
                     {
                         "id": "vid-1",
                         "text": "english teacher short lesson",
-                        "createTimeISO": "2026-03-03T14:22:40.000Z",
+                            "createTimeISO": recent_tiktok_ts_1,
                         "authorMeta": {"id": "auth-1", "name": "teachertok", "nickName": "TeacherTok"},
                         "webVideoUrl": "https://www.tiktok.com/@teachertok/video/vid-1",
                         "videoMeta": {"duration": 19},
@@ -752,7 +757,7 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
                     {
                         "id": "vid-2",
                         "text": "lesson planning ideas for english tutors",
-                        "createTimeISO": "2026-03-18T14:22:40.000Z",
+                            "createTimeISO": recent_tiktok_ts_2,
                         "authorMeta": {"id": "auth-1", "name": "teachertok", "nickName": "TeacherTok"},
                         "webVideoUrl": "https://www.tiktok.com/@teachertok/video/vid-2",
                         "videoMeta": {"duration": 22},

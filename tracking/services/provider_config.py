@@ -90,9 +90,10 @@ def get_tiktok_apify_config() -> TikTokApifyConfig:
 
 def get_instagram_apify_config() -> InstagramApifyConfig:
     provider = get_provider_config(Platform.INSTAGRAM)
+    default_base_url = "https://highlights.gwaa.net" if provider.provider in {"gwaa", "public", "noauth"} else "https://api.apify.com/v2"
     return InstagramApifyConfig(
         provider=provider.provider,
-        base_url=provider.base_url or "https://api.apify.com/v2",
+        base_url=provider.base_url or default_base_url,
         access_token=provider.access_token,
         profile_actor_id=str(
             getattr(settings, "INSTAGRAM_APIFY_PROFILE_ACTOR_ID", "apify/instagram-profile-scraper")

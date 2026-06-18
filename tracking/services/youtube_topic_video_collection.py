@@ -411,6 +411,14 @@ def _supplemental_subject_cluster(stems: set[str]) -> str | None:
     return best_cluster if best_score >= 2 else None
 
 
+def _supplemental_min_views_for_age_days(age_days: float) -> int:
+    base = max(1, int(getattr(settings, "YT_SUPPLEMENTAL_MIN_VIEWS_BASE", 200) or 200))
+    per_day = max(0, int(getattr(settings, "YT_SUPPLEMENTAL_MIN_VIEWS_PER_DAY", 120) or 120))
+    cap = max(base, int(getattr(settings, "YT_SUPPLEMENTAL_MIN_VIEWS_CAP", 1200) or 1200))
+    effective_age_days = max(float(age_days), 1.0)
+    return min(cap, max(base, int(math.ceil(effective_age_days * per_day))))
+
+
 def _compute_supplemental_candidate_ranking(
     *,
     candidate: YouTubeSupplementalVideoCandidate,
@@ -480,6 +488,7 @@ def _compute_supplemental_candidate_ranking(
     factors["freshness"] = round(0.12 * freshness_ratio, 4)
 
     traction_views = max(int(candidate.views or 0), 1)
+    min_views_floor = _supplemental_min_views_for_age_days(age_days)
     factors["traction"] = round(min(math.log10(traction_views) / 20.0, 0.18), 4)
     if candidate.hit_count > 1:
         factors["multi_query_support"] = min((candidate.hit_count - 1) * 0.06, 0.18)
@@ -539,10 +548,17 @@ def _compute_supplemental_candidate_ranking(
         if negative_total <= -0.35 and positive_total < 0.45:
             return _SupplementalRankingDecision(
                 score=score,
-                factors=sorted_factors,
-                drop_reason="off_topic_penalty",
-                survival_reason=None,
-            )
+            factors=sorted_factors,
+            drop_reason="off_topic_penalty",
+            survival_reason=None,
+        )
+    if traction_views < min_views_floor:
+        return _SupplementalRankingDecision(
+            score=score,
+            factors=sorted_factors,
+            drop_reason="low_traction_quality",
+            survival_reason=None,
+        )
     if score < _SUPPLEMENTAL_MIN_SCORE:
         return _SupplementalRankingDecision(
             score=score,
@@ -827,6 +843,7 @@ def collect_youtube_topic_video_candidates(
         diagnostics["raw_candidates_before_ranking"] = 0
         diagnostics["dropped_by_generic_query_weakness"] = 0
         diagnostics["dropped_by_off_topic_penalty"] = 0
+        diagnostics["dropped_by_low_traction_quality"] = 0
         diagnostics["dropped_by_low_supplemental_score"] = 0
 
         candidates: list[YouTubeSupplementalVideoCandidate] = []
@@ -897,6 +914,9 @@ def collect_youtube_topic_video_candidates(
             if ranking.drop_reason == "off_topic_penalty":
                 diagnostics["dropped_by_off_topic_penalty"] += 1
                 continue
+            if ranking.drop_reason == "low_traction_quality":
+                diagnostics["dropped_by_low_traction_quality"] += 1
+                continue
             if ranking.drop_reason == "low_supplemental_score":
                 diagnostics["dropped_by_low_supplemental_score"] += 1
                 continue
@@ -947,7 +967,7 @@ def collect_youtube_topic_video_candidates(
             "dropped_by_hydration_budget=%s filtered_missing_published_at=%s filtered_missing_metrics=%s "
             "filtered_too_old=%s filtered_non_short=%s raw_candidates_before_ranking=%s "
             "dropped_by_generic_query_weakness=%s dropped_by_off_topic_penalty=%s "
-            "dropped_by_low_supplemental_score=%s ranked_candidates_before_shaping=%s "
+            "dropped_by_low_traction_quality=%s dropped_by_low_supplemental_score=%s ranked_candidates_before_shaping=%s "
             "dropped_by_near_duplicate=%s dropped_by_same_theme_oversupply=%s "
             "dropped_by_per_channel_cap=%s dropped_by_format_bucket_run=%s final_candidates=%s",
             diagnostics["queries_built"],
@@ -965,6 +985,7 @@ def collect_youtube_topic_video_candidates(
             diagnostics["raw_candidates_before_ranking"],
             diagnostics["dropped_by_generic_query_weakness"],
             diagnostics["dropped_by_off_topic_penalty"],
+            diagnostics["dropped_by_low_traction_quality"],
             diagnostics["dropped_by_low_supplemental_score"],
             diagnostics["ranked_candidates_before_shaping"],
             diagnostics["dropped_by_near_duplicate"],

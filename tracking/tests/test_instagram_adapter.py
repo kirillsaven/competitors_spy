@@ -88,6 +88,101 @@ def test_profile_to_video_details_keeps_only_reels_with_views():
     assert details[0].shares is None
 
 
+def test_profile_to_video_details_supports_gwaa_public_profile_shape():
+    details = profile_to_video_details(
+        {
+            "username": "anyagal",
+            "pk": "8763809956",
+            "posts": [
+                {
+                    "id": "3794699980469066210",
+                    "code": "DSpe4btClni",
+                    "taken_at": 1766583653,
+                    "is_video": True,
+                    "media_type": 2,
+                    "product_type": "clips",
+                    "caption": "9 видео, которые принесли +10 тыс подписчиков",
+                    "play_count": 42000,
+                    "like_count": 4216,
+                    "comment_count": 138,
+                },
+                {
+                    "id": "feed-1",
+                    "code": "FeedOnly",
+                    "taken_at": 1766583653,
+                    "is_video": False,
+                    "media_type": 1,
+                    "product_type": "feed",
+                    "caption": "Image post",
+                    "like_count": 10,
+                },
+            ],
+        }
+    )
+
+    assert len(details) == 1
+    assert details[0].video_id == "3794699980469066210"
+    assert details[0].url == "https://www.instagram.com/reel/DSpe4btClni/"
+    assert details[0].views == 42000
+    assert details[0].likes == 4216
+    assert details[0].comments == 138
+
+
+def test_gwaa_client_fetches_public_profiles():
+    from tracking.adapters.instagram import GwaaInstagramClient
+
+    seen: dict[str, object] = {}
+
+    class FakeHttpClient:
+        def get(self, url, params, headers):
+            seen["url"] = url
+            seen["params"] = params
+            seen["headers"] = headers
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"username": "anyagal", "pk": "8763809956", "posts": []},
+            )
+
+        def close(self):
+            return None
+
+    client = GwaaInstagramClient(base_url="https://highlights.gwaa.net")
+    client._client = FakeHttpClient()
+
+    try:
+        profiles = client.fetch_profiles(inputs=["https://www.instagram.com/anyagal/"])
+    finally:
+        client.close()
+
+    assert seen["url"] == "https://highlights.gwaa.net/api/instagram/profile.php"
+    assert seen["params"] == {"username": "anyagal"}
+    assert profiles == [{"username": "anyagal", "pk": "8763809956", "posts": []}]
+
+
+def test_gwaa_client_skips_missing_public_profiles():
+    from tracking.adapters.instagram import GwaaInstagramClient
+
+    class FakeHttpClient:
+        def get(self, url, params, headers):
+            return SimpleNamespace(
+                status_code=404,
+                json=lambda: {"success": False, "error": "Profile not found"},
+            )
+
+        def close(self):
+            return None
+
+    client = GwaaInstagramClient(base_url="https://highlights.gwaa.net")
+    client._client = FakeHttpClient()
+
+    try:
+        profiles = client.fetch_profiles(inputs=["missingprofile"])
+    finally:
+        client.close()
+
+    assert profiles == []
+
+
 def test_resolve_seed_input_builds_profile_url_when_missing():
     class FakeClient:
         def fetch_profiles(self, *, inputs):

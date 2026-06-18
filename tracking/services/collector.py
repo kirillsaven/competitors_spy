@@ -10,7 +10,12 @@ from tracking.adapters.registry import (
     get_refresh_competitor_handler,
     register_refresh_competitor_handler,
 )
-from tracking.adapters.instagram import ApifyInstagramClient, build_profile_url as build_instagram_profile_url, profile_to_video_details
+from tracking.adapters.instagram import (
+    ApifyInstagramClient,
+    GwaaInstagramClient,
+    build_profile_url as build_instagram_profile_url,
+    profile_to_video_details,
+)
 from tracking.adapters.tiktok import ApifyTikTokClient, build_profile_url, item_to_video_details
 from tracking.adapters.youtube import (
     YouTubeApiError,
@@ -77,6 +82,8 @@ def _get_instagram_client() -> ApifyInstagramClient:
     config = get_instagram_apify_config()
     profile_actor_id = str(getattr(config, "profile_actor_id", getattr(config, "actor_id", "")) or "")
     search_actor_id = str(getattr(config, "search_actor_id", "") or "")
+    if config.provider in {"gwaa", "public", "noauth"}:
+        return GwaaInstagramClient(base_url=config.base_url)
     if config.provider != "apify":
         raise CollectorError(f"Unsupported Instagram provider: {config.provider}")
     if not config.access_token:

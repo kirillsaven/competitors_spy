@@ -175,6 +175,57 @@ class ApifyInstagramClient:
         return [item for item in data if isinstance(item, dict)]
 
 
+class GwaaInstagramClient:
+    """Best-effort public Instagram profile fetcher.
+
+    This provider does not use Instagram credentials or a logged-in browser
+    session. It relies on the public GWAA profile endpoint and therefore may be
+    less complete than Apify, but it is enough for lightweight competitor
+    intelligence when only public profiles/reels are needed.
+    """
+
+    def __init__(
+        self,
+        *,
+        base_url: str = "https://highlights.gwaa.net",
+        timeout_s: float = 60.0,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self._client = httpx.Client(timeout=timeout_s, follow_redirects=True)
+
+    def close(self) -> None:
+        self._client.close()
+
+    def fetch_profiles(self, *, inputs: list[str]) -> list[dict[str, Any]]:
+        profiles: list[dict[str, Any]] = []
+        for raw in inputs:
+            handle = extract_handle(raw)
+            if not handle:
+                continue
+            url = f"{self.base_url}/api/instagram/profile.php"
+            try:
+                response = self._client.get(
+                    url,
+                    params={"username": handle},
+                    headers={"Accept": "application/json"},
+                )
+            except httpx.HTTPError as exc:
+                raise InstagramApiError(f"GWAA Instagram API transport error: {exc}") from exc
+            try:
+                data = response.json()
+            except Exception as exc:
+                raise InstagramApiError(f"GWAA Instagram API invalid JSON: status={response.status_code}") from exc
+            if response.status_code == 404:
+                continue
+            if response.status_code >= 400:
+                raise InstagramApiError(f"GWAA Instagram API error: status={response.status_code} body={data}")
+            if not isinstance(data, dict):
+                raise InstagramApiError(f"GWAA Instagram API returned unexpected payload: {data!r}")
+            if data.get("error"):
+                continue
+            profiles.append(data)
+        return profiles
+
 def resolve_seed_input(client: ApifyInstagramClient, raw_input: str) -> SeedResolution | None:
     lookup = (raw_input or "").strip()
     handle = extract_handle(raw_input)
@@ -187,7 +238,7 @@ def resolve_seed_input(client: ApifyInstagramClient, raw_input: str) -> SeedReso
 
 def seed_from_profile(profile: dict[str, Any]) -> SeedResolution | None:
     username = str(profile.get("username") or "").strip()
-    profile_id = str(profile.get("id") or "").strip()
+    profile_id = str(profile.get("id") or profile.get("pk") or username).strip()
     if not username or not profile_id:
         return None
     image_url = str(
@@ -221,7 +272,7 @@ def seed_from_profiles(*, raw_input: str, profiles: list[dict[str, Any]]) -> See
 
 def profile_to_video_details(profile: dict[str, Any]) -> list[VideoDetails]:
     posts: list[dict[str, Any]] = []
-    for key in ("latestPosts", "latestReels"):
+    for key in ("latestPosts", "latestReels", "posts"):
         value = profile.get(key)
         if isinstance(value, list):
             posts.extend(item for item in value if isinstance(item, dict))
@@ -231,7 +282,14 @@ def profile_to_video_details(profile: dict[str, Any]) -> list[VideoDetails]:
     for item in posts:
         if not _is_reel_item(item):
             continue
-        views = _to_int(item.get("videoViewCount"))
+        views = _to_int(
+            item.get("videoViewCount")
+            or item.get("video_play_count")
+            or item.get("videoPlayCount")
+            or item.get("viewCount")
+            or item.get("views")
+            or item.get("play_count")
+        )
         if views is None:
             continue
         external_id = str(item.get("id") or item.get("shortCode") or item.get("url") or "").strip()
@@ -240,6 +298,9 @@ def profile_to_video_details(profile: dict[str, Any]) -> list[VideoDetails]:
         seen_ids.add(external_id)
 
         url = str(item.get("url") or "").strip()
+        shortcode = str(item.get("shortCode") or item.get("shortcode") or item.get("code") or "").strip()
+        if not url and shortcode:
+            url = f"https://www.instagram.com/reel/{shortcode}/"
         title = str(item.get("title") or item.get("description") or item.get("caption") or "").strip()
         description = str(item.get("caption") or item.get("description") or title).strip()
         content_type = str(item.get("productType") or item.get("mediaType") or "").strip().lower()
@@ -252,12 +313,12 @@ def profile_to_video_details(profile: dict[str, Any]) -> list[VideoDetails]:
                 url=url,
                 title=title or f"Instagram {external_id}",
                 description=description,
-                published_at=_parse_datetime(item.get("timestamp")),
-                duration_seconds=_to_int(item.get("videoDuration")),
+                published_at=_parse_datetime(item.get("timestamp") or item.get("taken_at")),
+                duration_seconds=_to_int(item.get("videoDuration") or item.get("video_duration")),
                 views=views,
-                likes=_to_int(item.get("likesCount") or item.get("likes")),
-                comments=_to_int(item.get("commentsCount") or item.get("comments")),
-                shares=_to_int(item.get("sharesCount")),
+                likes=_to_int(item.get("likesCount") or item.get("likes") or item.get("like_count")),
+                comments=_to_int(item.get("commentsCount") or item.get("comments") or item.get("comment_count")),
+                shares=_to_int(item.get("sharesCount") or item.get("share_count")),
             )
         )
 
