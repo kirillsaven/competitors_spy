@@ -1,131 +1,252 @@
-# Competitor Content Tracker Bot (MVP: YouTube)
+# Competitor Spy
 
-## Local run (Docker)
-Все команды ниже выполняй из папки, где лежит `docker-compose.yml`.
+Open-source Telegram bot for tracking competitor content across YouTube, TikTok, and Instagram.
 
-1) Create `.env` from `.env.example` (skip if you already have `.env`) and fill:
-- `TELEGRAM_BOT_TOKEN`
-- `YOUTUBE_API_KEY`
-- (optional) TikTok via Apify: `TIKTOK_PROVIDER=apify`, `TIKTOK_PROVIDER_ACCESS_TOKEN`, `TIKTOK_PROVIDER_BASE_URL`
-- (optional) Instagram via Apify: `INSTAGRAM_PROVIDER=apify`, `INSTAGRAM_PROVIDER_ACCESS_TOKEN`, `INSTAGRAM_PROVIDER_BASE_URL`
+Competitor Spy is a self-hosted Django, Celery, Redis, Postgres, and aiogram application for creators, agencies, indie hackers, and small marketing teams that want scheduled competitor-content trend reports in Telegram.
 
-2) Start services:
-```bash
-docker compose up -d
+This project is not affiliated with YouTube, TikTok, Instagram, Telegram, Apify, OpenAI, or their parent companies. Self-hosters are responsible for complying with platform terms, API limits, and local law.
+
+## What it does
+
+- Accepts a creator profile URL, `@handle`, or plain handle in Telegram.
+- Infers niche keywords from profile metadata and recent content.
+- Discovers YouTube competitors during setup and lets users remove irrelevant channels.
+- Tracks explicit TikTok and Instagram competitors through provider integrations.
+- Collects content metrics into shared global snapshots.
+- Scores items against each competitor's recent baseline.
+- Sends scheduled Russian-language Telegram reports with YouTube, TikTok, and Instagram sections.
+- Exposes users, competitors, reports, schedules, and job runs in Django Admin.
+
+## Who it is for
+
+- Creators looking for repeatable content ideas.
+- Small agencies monitoring client niches.
+- Developers building Telegram bot plus Django/Celery workflows.
+- Teams that prefer self-hosted content-intelligence tooling.
+- Maintainers interested in provider adapters, reporting pipelines, and scheduled jobs.
+
+## Features
+
+- Docker-first local setup.
+- aiogram Telegram bot with Russian UI/messages.
+- Django Admin for inspection and operations.
+- Celery worker and Celery Beat for collection and scheduled reporting.
+- YouTube channel resolving, discovery, collection, scoring, and reports.
+- TikTok and Instagram provider abstraction with Apify-backed collection support.
+- Shared content and metric snapshots across users.
+- JobRun records for task observability.
+- pytest test suite and GitHub Actions CI.
+- Optional maintainer automation under `tools/`; OpenAI is not required for core runtime.
+
+## Architecture
+
+```mermaid
+flowchart TD
+  TG[Telegram User] --> BOT[aiogram Bot]
+  BOT --> DJ[Django App]
+  DJ --> DB[(Postgres)]
+  DJ --> R[(Redis)]
+  CEL[Celery Worker] --> DB
+  CEL --> R
+  CEL --> YT[YouTube API]
+  CEL --> APIFY[Apify Providers]
+  BEAT[Celery Beat] --> CEL
+  DJ --> ADM[Django Admin]
 ```
 
-3) Run migrations:
+## Quick start with Docker
+
+Run from the repository root:
+
 ```bash
+cp .env.example .env
+docker compose up -d --build
 docker compose exec web python manage.py migrate
-```
-
-4) Create admin user:
-```bash
 docker compose exec web python manage.py createsuperuser
+docker compose exec web pytest
 ```
-`createsuperuser` creates a login/password for Django Admin (`/admin/`). It is not related to Telegram.
-You can choose any username/password you want.
 
-5) Open:
-- Django Admin: `http://localhost:8000/admin/`
+Open Django Admin at `http://localhost:8000/admin/`.
 
-## Useful commands
-Run report immediately for a user (by tg_user_id):
+`createsuperuser` creates a Django Admin login. It is not related to Telegram.
+
+## Configuration
+
+Copy `.env.example` to `.env` and fill only the credentials you need. Do not commit `.env`.
+
+Required for the full bot:
+
+- `DJANGO_SECRET_KEY`
+- `DATABASE_URL`
+- `REDIS_URL`
+- `TELEGRAM_BOT_TOKEN`
+- `YOUTUBE_API_KEY` or `YOUTUBE_API_KEYS`
+
+Useful defaults and limits:
+
+- `BASELINE_N`
+- `BASELINE_WINDOW_DAYS`
+- `YT_RECENT_N_FOR_METRICS`
+- `MAX_COMPETITORS_PER_PLATFORM`
+- `MIN_DELTA_VIEWS`
+- `MIN_VIEWS_END`
+
+Provider credentials and bot tokens belong in `.env` or your deployment secret manager, never in source control or public issues.
+
+## Provider setup
+
+### YouTube
+
+Set:
+
+```env
+YOUTUBE_API_KEY=your-youtube-api-key
+```
+
+or provide a comma-separated key pool:
+
+```env
+YOUTUBE_API_KEYS=key-one,key-two
+```
+
+YouTube is the only MVP platform with automatic competitor discovery during setup. The app prefers cheaper YouTube Data API calls and uses `search.list` only for discovery or fallback resolving.
+
+### TikTok via Apify
+
+Set:
+
+```env
+TIKTOK_PROVIDER=apify
+TIKTOK_PROVIDER_ACCESS_TOKEN=your-apify-token
+```
+
+Optional:
+
+```env
+TIKTOK_PROVIDER_BASE_URL=https://api.apify.com/v2
+TIKTOK_APIFY_PROFILE_ACTOR_ID=clockworks/tiktok-profile-scraper
+TIKTOK_APIFY_SEARCH_ACTOR_ID=clockworks/tiktok-user-search-scraper
+TIKTOK_APIFY_RESULTS_PER_PROFILE=10
+```
+
+TikTok competitors are added from explicit links or handles.
+
+### Instagram via Apify
+
+Set:
+
+```env
+INSTAGRAM_PROVIDER=apify
+INSTAGRAM_PROVIDER_ACCESS_TOKEN=your-apify-token
+```
+
+Optional:
+
+```env
+INSTAGRAM_PROVIDER_BASE_URL=https://api.apify.com/v2
+INSTAGRAM_APIFY_PROFILE_ACTOR_ID=apify/instagram-profile-scraper
+INSTAGRAM_APIFY_SEARCH_ACTOR_ID=iron-crawler/instagram-search-users
+```
+
+Instagram competitors are added from explicit links or handles.
+
+## Running reports
+
+Run a report immediately for a Telegram user:
+
 ```bash
 docker compose exec web python manage.py run_user_report <tg_user_id>
 ```
 
 Verify live TikTok and Instagram report sections locally with real provider data:
+
 ```bash
 docker compose exec web python manage.py verify_live_platform_report \
   --tiktok https://www.tiktok.com/@example \
   --instagram https://www.instagram.com/example/
 ```
-The command resolves the supplied profiles through the real providers, refreshes snapshots, applies the current scoring pipeline, and fails if either requested platform still renders an empty report section.
 
-Send a real live TikTok/Instagram report to Telegram and print the exact sent text plus Telegram `message_id`:
+Send a live test report to Telegram:
+
 ```bash
 docker compose exec web python manage.py send_test_platform_report \
-  --tg-user-id <your_telegram_user_id> \
-  --tiktok nba \
-  --instagram nasa
+  --tg-user-id <YOUR_TELEGRAM_USER_ID> \
+  --tg-chat-id <YOUR_TELEGRAM_CHAT_ID> \
+  --tiktok https://www.tiktok.com/@example \
+  --instagram https://www.instagram.com/example/
 ```
-Use `--tg-chat-id` as well if the target chat id differs from the Telegram user id.
 
-Run tests:
+Use only your own test chat/user IDs.
+
+## Development
+
+Install dependencies locally if you are not using Docker:
+
 ```bash
-docker compose exec web pytest
+python -m pip install -r requirements.txt
+python manage.py migrate
+python manage.py check
+pytest -q
 ```
 
-## Production baseline
-1) Prepare `.env` with production values:
-- `DJANGO_SECRET_KEY`
-- `DJANGO_ALLOWED_HOSTS`
-- `DJANGO_CSRF_TRUSTED_ORIGINS`
-- `DATABASE_URL`
-- `REDIS_URL`
-- `TELEGRAM_BOT_TOKEN`
-- `YOUTUBE_API_KEY`
+The Docker path is the preferred reproducible setup because it includes Postgres, Redis, the bot, worker, and beat services.
 
-2) Start the production stack:
+## Testing
+
+Run:
+
 ```bash
-docker compose -f docker-compose.prod.yml up -d --build
+pytest -q
+python manage.py check
+python manage.py check --deploy --fail-level WARNING
 ```
 
-3) Check the app health endpoint:
-```bash
-curl http://localhost/healthz/
-```
+CI uses fake safe environment values and must not require real YouTube, Telegram, Apify, or OpenAI credentials.
 
-The production override switches Django to Gunicorn behind an Nginx reverse proxy, keeps `web` internal on the Docker network, publishes only port `80`, collects static files, runs migrations on web startup, and enables restart/healthcheck defaults for all services.
+## Production deployment
 
-For the first real VPS deployment baseline, see `DEPLOY.md`.
+See [DEPLOY.md](./DEPLOY.md) for a generic Docker Compose deployment template.
 
-Post-merge completion standard:
+Production deployments should use HTTPS, a strong `DJANGO_SECRET_KEY`, private environment variables, a real domain in `DJANGO_ALLOWED_HOSTS`, and a reverse proxy. Never expose Django's development server directly to the public internet.
 
-- merge is not enough
-- done = merge + deploy + verify
-- use `pwsh ./scripts/post_merge_deploy_verify.ps1 -SmokeUserId <user_id>` after every merged production PR
-- truth report must include live SHA before, live SHA after, restarted services, one smoke check, and whether the key symptom is fixed
+## Security model
 
-## CI
-GitHub Actions runs `python manage.py check`, `python manage.py check --deploy --fail-level WARNING`, and `pytest -q` on pushes to `main` and on pull requests targeting `main`.
+- Users do not log into social networks through this app.
+- Users provide public profile URLs or handles.
+- Platform credentials are configured by the self-hoster.
+- Shared snapshots are stored once per platform content item.
+- Reports and Telegram identifiers are operational data and should be protected like application data.
+- AI-related maintainer tooling is optional and separate from core runtime.
 
-## Provider env vars
-TikTok and Instagram now support Apify as MVP providers.
+## Public release safety
 
-- `TIKTOK_PROVIDER`
-- `TIKTOK_PROVIDER_BASE_URL`
-- `TIKTOK_PROVIDER_API_KEY`
-- `TIKTOK_PROVIDER_API_SECRET`
-- `TIKTOK_PROVIDER_ACCESS_TOKEN`
-- `TIKTOK_APIFY_PROFILE_ACTOR_ID`
-- `TIKTOK_APIFY_RESULTS_PER_PROFILE`
-- `INSTAGRAM_PROVIDER`
-- `INSTAGRAM_PROVIDER_BASE_URL`
-- `INSTAGRAM_PROVIDER_API_KEY`
-- `INSTAGRAM_PROVIDER_API_SECRET`
-- `INSTAGRAM_PROVIDER_ACCESS_TOKEN`
-- `INSTAGRAM_APIFY_PROFILE_ACTOR_ID`
+- No secrets should be committed to the repository.
+- `.env` is ignored.
+- Use `.env.example` for documented placeholders only.
+- Rotate tokens immediately if they are accidentally exposed.
+- Report vulnerabilities privately using [SECURITY.md](./SECURITY.md).
+- Do not paste real bot tokens, API keys, database URLs, Telegram IDs, or private server details into issues.
 
-TikTok Apify setup:
+## Limitations
 
-- Set `TIKTOK_PROVIDER=apify`
-- Set `TIKTOK_PROVIDER_ACCESS_TOKEN` to your Apify API token
-- Optional: set `TIKTOK_PROVIDER_BASE_URL` (defaults to `https://api.apify.com/v2`)
-- Optional: override `TIKTOK_APIFY_PROFILE_ACTOR_ID` (default `clockworks/tiktok-profile-scraper`)
-- Optional: cap per-profile fetch size with `TIKTOK_APIFY_RESULTS_PER_PROFILE` (default `10`)
+- YouTube is the most complete MVP provider.
+- TikTok and Instagram support depends on configured provider behavior and returned public metrics.
+- Platform APIs, provider actors, and rate limits can change.
+- Scoring is heuristic and baseline-relative; it is intended for trend discovery, not guaranteed business advice.
+- The project does not provide hosted infrastructure.
 
-Cross-platform competitor cap:
+## Why open source?
 
-- Set `MAX_COMPETITORS_PER_PLATFORM` to keep the same per-user cap on YouTube, TikTok, and Instagram
-- Legacy `MAX_COMPETITORS_YOUTUBE` is still honored as a compatibility alias if the new setting is not present
+Competitor Spy is open source to help developers learn Telegram bot, Django, Celery, Redis, Postgres, and provider integration patterns in a real workflow. It provides a useful self-hosted competitor-tracking baseline and invites improvements to provider integrations, report quality, deployment hardening, and security review.
 
-Instagram Apify setup:
+## Roadmap
 
-- Set `INSTAGRAM_PROVIDER=apify`
-- Set `INSTAGRAM_PROVIDER_ACCESS_TOKEN` to your Apify API token
-- Optional: set `INSTAGRAM_PROVIDER_BASE_URL` (defaults to `https://api.apify.com/v2`)
-- Optional: override `INSTAGRAM_APIFY_PROFILE_ACTOR_ID` (default `apify/instagram-profile-scraper`)
+See [ROADMAP.md](./ROADMAP.md).
 
-Current Instagram MVP tracks only recent items that include public view counts from Apify output, because the existing scoring/report pipeline is view-based and this PR does not add a separate image-post scoring path.
+## Contributing
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md).
+
+## License
+
+MIT. See [LICENSE](./LICENSE).

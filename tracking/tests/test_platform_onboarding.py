@@ -638,6 +638,12 @@ def test_discover_competitors_for_onboarding_ranks_and_dedupes_candidates(monkey
 
 
 def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_tiktok_candidates(monkeypatch):
+    recent_instagram_ts_a = (datetime.now(UTC) - timedelta(days=5)).isoformat().replace("+00:00", "Z")
+    recent_instagram_ts_b = (datetime.now(UTC) - timedelta(days=2)).isoformat().replace("+00:00", "Z")
+    recent_tiktok_ts_a = (datetime.now(UTC) - timedelta(days=5)).isoformat().replace("+00:00", "Z")
+    recent_tiktok_ts_b = (datetime.now(UTC) - timedelta(days=2)).isoformat().replace("+00:00", "Z")
+    old_ts = (datetime.now(UTC) - timedelta(days=365)).isoformat().replace("+00:00", "Z")
+
     monkeypatch.setattr(platform_onboarding, "_discover_youtube_search_candidates", lambda **kwargs: [])
     monkeypatch.setattr(
         platform_onboarding,
@@ -701,7 +707,7 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
                             "productType": "clips",
                             "url": "https://www.instagram.com/reel/reel-1/",
                             "caption": "English teacher reel",
-                            "timestamp": "2026-03-03T10:30:00.000Z",
+                            "timestamp": recent_instagram_ts_a,
                             "videoViewCount": 2400,
                         },
                         {
@@ -709,7 +715,7 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
                             "productType": "clips",
                             "url": "https://www.instagram.com/reel/reel-2/",
                             "caption": "Lesson planning for english teachers",
-                            "timestamp": "2026-03-18T10:30:00.000Z",
+                            "timestamp": recent_instagram_ts_b,
                             "videoViewCount": 2400,
                         }
                     ],
@@ -720,14 +726,14 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
                 "id": "ig-bad",
                 "username": "feedonly",
                 "latestPosts": [
-                    {
-                        "id": "feed-1",
-                        "productType": "feed",
-                        "url": "https://www.instagram.com/p/feed-1/",
-                        "caption": "Feed video",
-                        "timestamp": "2024-07-03T10:30:00.000Z",
-                        "videoViewCount": 1900,
-                    }
+                        {
+                            "id": "feed-1",
+                            "productType": "feed",
+                            "url": "https://www.instagram.com/p/feed-1/",
+                            "caption": "Feed video",
+                            "timestamp": old_ts,
+                            "videoViewCount": 1900,
+                        }
                 ],
             }
         ]
@@ -737,24 +743,24 @@ def test_discover_competitors_for_onboarding_drops_noncollectible_instagram_and_
         for handle in handles:
             if handle == "teachertok":
                 out[handle] = [
-                    {
-                        "id": "vid-1",
-                        "text": "english teacher short lesson",
-                        "createTimeISO": "2026-03-03T14:22:40.000Z",
-                        "authorMeta": {"id": "auth-1", "name": "teachertok", "nickName": "TeacherTok"},
-                        "webVideoUrl": "https://www.tiktok.com/@teachertok/video/vid-1",
+                        {
+                            "id": "vid-1",
+                            "text": "english teacher short lesson",
+                            "createTimeISO": recent_tiktok_ts_a,
+                            "authorMeta": {"id": "auth-1", "name": "teachertok", "nickName": "TeacherTok"},
+                            "webVideoUrl": "https://www.tiktok.com/@teachertok/video/vid-1",
                         "videoMeta": {"duration": 19},
                         "playCount": 8800,
                         "diggCount": 200,
                         "commentCount": 11,
                         "shareCount": 4,
                     },
-                    {
-                        "id": "vid-2",
-                        "text": "lesson planning ideas for english tutors",
-                        "createTimeISO": "2026-03-18T14:22:40.000Z",
-                        "authorMeta": {"id": "auth-1", "name": "teachertok", "nickName": "TeacherTok"},
-                        "webVideoUrl": "https://www.tiktok.com/@teachertok/video/vid-2",
+                        {
+                            "id": "vid-2",
+                            "text": "lesson planning ideas for english tutors",
+                            "createTimeISO": recent_tiktok_ts_b,
+                            "authorMeta": {"id": "auth-1", "name": "teachertok", "nickName": "TeacherTok"},
+                            "webVideoUrl": "https://www.tiktok.com/@teachertok/video/vid-2",
                         "videoMeta": {"duration": 22},
                         "playCount": 7600,
                         "diggCount": 170,
@@ -2231,6 +2237,8 @@ def test_youtube_low_recall_rescue_requeries_and_merges_candidates(monkeypatch):
         return [initial_candidate]
 
     def fake_collector_aware_candidates(*, platform, candidates, keywords, max_candidates, context=None):
+        if platform != Platform.YOUTUBE:
+            return [], ""
         ids = sorted(candidate.external_id for candidate in candidates)
         if ids == ["yt-1"]:
             return [initial_candidate], ""
@@ -2246,6 +2254,8 @@ def test_youtube_low_recall_rescue_requeries_and_merges_candidates(monkeypatch):
         "_collector_aware_candidates",
         fake_collector_aware_candidates,
     )
+    monkeypatch.setattr(platform_onboarding, "_search_instagram_candidates_raw", lambda **kwargs: [])
+    monkeypatch.setattr(platform_onboarding, "_search_tiktok_candidates_raw", lambda **kwargs: [])
     monkeypatch.setattr(
         platform_onboarding,
         "_youtube_fallback_queries",

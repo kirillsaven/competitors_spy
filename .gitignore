@@ -16,7 +16,9 @@ ENV/
 
 # Django
 db.sqlite3
+*.sqlite3
 *.log
+logs/
 staticfiles/
 media/
 celerybeat-schedule
@@ -31,6 +33,22 @@ htmlcov/
 .idea/
 .vscode/
 
+# Local exports / archives
+*.dump
+*.sql
+*.tar
+*.zip
+
+# Private maintainer scratchpads / application prep
+.codex_tmp/
+docs/proaudit/
+*PROAUDIT*.md
+*ProAudit*.md
+CODEX_*PROMPT*.md
+*OSS_APPLICATION_PROMPT*.md
+*OSS_APPLICATION_NOTES*.md
+
 # OS
+.DS_Store
 Thumbs.db
 Desktop.ini
