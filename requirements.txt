@@ -9,5 +9,5 @@ gunicorn>=22.0,<24.0
 whitenoise>=6.8,<7.0
 timezonefinder>=6.5,<7.0; platform_system != "Windows"
 
-pytest>=8.0,<9.0
+pytest>=9.1.0,<10.0
 pytest-django>=4.8,<5.0
