@@ -39,4 +39,7 @@ class VideoDetails:
     likes: int | None
     comments: int | None
     shares: int | None = None
+    content_type: str = "reel"
+    views_available: bool = True
+    ranking_source: str = "views"
 

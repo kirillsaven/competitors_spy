@@ -63,21 +63,34 @@ def build_profile_url(handle: str) -> str:
     return f"https://www.instagram.com/{handle}/"
 
 
-def _is_reel_item(item: dict[str, Any]) -> bool:
+def _content_type(item: dict[str, Any]) -> str:
     url = str(item.get("url") or "").strip().lower()
     if "/reel/" in url or "/reels/" in url:
-        return True
+        return "reel"
 
     product_type = str(item.get("productType") or item.get("product_type") or "").strip().lower()
     if product_type in {"clips", "clip", "reel", "reels"}:
-        return True
+        return "reel"
+    if product_type in {"carousel", "album"}:
+        return "carousel"
+    if product_type in {"photo", "photo_mode"}:
+        return "photo_mode"
     if product_type in {"igtv", "feed", "post"}:
-        return False
+        children = item.get("sidecarChildren") or item.get("carousel_media") or item.get("children")
+        return "carousel" if isinstance(children, list) and children else "post"
 
     media_type = str(item.get("mediaType") or item.get("type") or item.get("__typename") or "").strip().lower()
     if media_type in {"clips", "clip", "reel", "reels"}:
-        return True
-    return False
+        return "reel"
+    if media_type in {"carousel", "sidecar", "graphsidecar"}:
+        return "carousel"
+    if media_type in {"image", "photo", "graphimage"}:
+        return "photo_mode"
+    return "post"
+
+
+def _is_reel_item(item: dict[str, Any]) -> bool:
+    return _content_type(item) == "reel"
 
 
 class ApifyInstagramClient:
@@ -270,7 +283,12 @@ def seed_from_profiles(*, raw_input: str, profiles: list[dict[str, Any]]) -> See
     return seed_from_profile(profiles[0])
 
 
-def profile_to_video_details(profile: dict[str, Any]) -> list[VideoDetails]:
+def profile_to_video_details(
+    profile: dict[str, Any],
+    *,
+    include_carousels: bool = False,
+    include_posts: bool = False,
+) -> list[VideoDetails]:
     posts: list[dict[str, Any]] = []
     for key in ("latestPosts", "latestReels", "posts"):
         value = profile.get(key)
@@ -280,9 +298,16 @@ def profile_to_video_details(profile: dict[str, Any]) -> list[VideoDetails]:
     out: list[VideoDetails] = []
     seen_ids: set[str] = set()
     for item in posts:
-        if not _is_reel_item(item):
+        content_type = _content_type(item)
+        if content_type == "reel":
+            pass
+        elif content_type == "carousel" and include_carousels:
+            pass
+        elif content_type in {"post", "photo_mode"} and include_posts:
+            pass
+        else:
             continue
-        views = _to_int(
+        views_raw = _to_int(
             item.get("videoViewCount")
             or item.get("video_play_count")
             or item.get("videoPlayCount")
@@ -290,8 +315,11 @@ def profile_to_video_details(profile: dict[str, Any]) -> list[VideoDetails]:
             or item.get("views")
             or item.get("play_count")
         )
-        if views is None:
-            continue
+        views_available = views_raw is not None
+        views = views_raw if views_raw is not None else 0
+        likes = _to_int(item.get("likesCount") or item.get("likes") or item.get("like_count"))
+        comments = _to_int(item.get("commentsCount") or item.get("comments") or item.get("comment_count"))
+        ranking_source = "views" if views_available and views > 0 else "interactions"
         external_id = str(item.get("id") or item.get("shortCode") or item.get("url") or "").strip()
         if not external_id or external_id in seen_ids:
             continue
@@ -303,9 +331,6 @@ def profile_to_video_details(profile: dict[str, Any]) -> list[VideoDetails]:
             url = f"https://www.instagram.com/reel/{shortcode}/"
         title = str(item.get("title") or item.get("description") or item.get("caption") or "").strip()
         description = str(item.get("caption") or item.get("description") or title).strip()
-        content_type = str(item.get("productType") or item.get("mediaType") or "").strip().lower()
-        if not content_type:
-            content_type = "video" if views is not None else "image"
 
         out.append(
             VideoDetails(
@@ -316,9 +341,12 @@ def profile_to_video_details(profile: dict[str, Any]) -> list[VideoDetails]:
                 published_at=_parse_datetime(item.get("timestamp") or item.get("taken_at")),
                 duration_seconds=_to_int(item.get("videoDuration") or item.get("video_duration")),
                 views=views,
-                likes=_to_int(item.get("likesCount") or item.get("likes") or item.get("like_count")),
-                comments=_to_int(item.get("commentsCount") or item.get("comments") or item.get("comment_count")),
+                likes=likes,
+                comments=comments,
                 shares=_to_int(item.get("sharesCount") or item.get("share_count")),
+                content_type=content_type,
+                views_available=views_available,
+                ranking_source=ranking_source,
             )
         )
 

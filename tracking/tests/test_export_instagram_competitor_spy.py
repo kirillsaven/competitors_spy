@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from django.core.management import call_command
 
 
@@ -184,3 +186,122 @@ def test_export_instagram_competitor_spy_supports_gwaa_without_token(tmp_path, m
     assert "@anyagal" in text
     assert "PublicReel" in text
     assert "Adapt the mechanism, not the wording" in text
+
+
+def test_export_instagram_competitor_spy_continue_on_error_and_diagnostics(tmp_path, monkeypatch, settings):
+    from tracking.adapters.instagram import InstagramApiError
+    from tracking.management.commands import export_instagram_competitor_spy as command_module
+
+    settings.INSTAGRAM_PROVIDER = "apify"
+    settings.INSTAGRAM_PROVIDER_ACCESS_TOKEN = "token"
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def fetch_profiles(self, *, inputs):
+            if inputs == ["blocked"]:
+                raise InstagramApiError("status=403")
+            assert len(inputs) == 1
+            return [
+                {
+                    "username": inputs[0],
+                    "latestReels": [
+                        {
+                            "id": "reel-no-views",
+                            "productType": "clips",
+                            "url": "https://www.instagram.com/reel/reel-no-views/",
+                            "caption": "No views but real interactions",
+                            "timestamp": "2026-06-03T10:00:00.000Z",
+                            "likesCount": 1000,
+                            "commentsCount": 50,
+                        }
+                    ],
+                }
+            ]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(command_module, "ApifyInstagramClient", FakeClient)
+    output_path = tmp_path / "instagram_spy.json"
+    diagnostics_path = tmp_path / "diagnostics.json"
+
+    call_command(
+        "export_instagram_competitor_spy",
+        "--instagram",
+        "okprofile",
+        "--instagram",
+        "blocked",
+        "--continue-on-error",
+        "--min-successful-profiles",
+        "1",
+        "--min-output-items",
+        "1",
+        "--diagnostics-output",
+        str(diagnostics_path),
+        "--format",
+        "json",
+        "--output",
+        str(output_path),
+    )
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+    diagnostics = json.loads(diagnostics_path.read_text(encoding="utf-8"))
+
+    assert payload["items"][0]["views"] == 0
+    assert payload["items"][0]["views_available"] is False
+    assert payload["items"][0]["ranking_source"] == "interactions"
+    assert diagnostics["provider_status"]["okprofile"]["status"] == "ok"
+    assert diagnostics["provider_status"]["blocked"]["status"] == "failed"
+
+
+def test_export_instagram_competitor_spy_includes_carousels_when_requested(tmp_path, monkeypatch, settings):
+    from tracking.management.commands import export_instagram_competitor_spy as command_module
+
+    settings.INSTAGRAM_PROVIDER = "apify"
+    settings.INSTAGRAM_PROVIDER_ACCESS_TOKEN = "token"
+
+    class FakeClient:
+        def __init__(self, **kwargs):
+            pass
+
+        def fetch_profiles(self, *, inputs):
+            return [
+                {
+                    "username": "creator",
+                    "latestPosts": [
+                        {
+                            "id": "carousel-1",
+                            "productType": "carousel",
+                            "url": "https://www.instagram.com/p/carousel-1/",
+                            "caption": "Useful carousel",
+                            "timestamp": "2026-06-03T10:00:00.000Z",
+                            "likesCount": 1000,
+                            "commentsCount": 50,
+                        }
+                    ],
+                }
+            ]
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(command_module, "ApifyInstagramClient", FakeClient)
+    output_path = tmp_path / "instagram_spy.json"
+
+    call_command(
+        "export_instagram_competitor_spy",
+        "--instagram",
+        "creator",
+        "--include-carousels",
+        "--format",
+        "json",
+        "--output",
+        str(output_path),
+    )
+
+    payload = json.loads(output_path.read_text(encoding="utf-8"))
+
+    assert payload["items"][0]["content_type"] == "carousel"
+    assert payload["items"][0]["ranking_source"] == "interactions"

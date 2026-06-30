@@ -46,7 +46,7 @@ def test_resolve_seed_input_returns_none_when_provider_cannot_verify_profile():
     assert resolve_seed_input(FakeClient(), "https://www.instagram.com/apifytech/") is None
 
 
-def test_profile_to_video_details_keeps_only_reels_with_views():
+def test_profile_to_video_details_keeps_reels_without_views_for_interaction_ranking():
     details = profile_to_video_details(
         {
             "latestPosts": [
@@ -58,9 +58,8 @@ def test_profile_to_video_details_keeps_only_reels_with_views():
                     "caption": "Instagram reel caption",
                     "timestamp": "2024-07-03T10:30:00.000Z",
                     "videoDuration": 31,
-                    "videoViewCount": 124000,
-                    "likesCount": 930,
-                    "commentsCount": 18,
+                        "likesCount": 930,
+                        "commentsCount": 18,
                 },
                 {
                     "id": "3666666666666666666",
@@ -82,10 +81,46 @@ def test_profile_to_video_details_keeps_only_reels_with_views():
     assert details[0].video_id == "3555555555555555555"
     assert details[0].url == "https://www.instagram.com/reel/C9abc123xyz/"
     assert details[0].title == "Instagram reel caption"
-    assert details[0].views == 124000
+    assert details[0].views == 0
+    assert details[0].views_available is False
+    assert details[0].ranking_source == "interactions"
     assert details[0].likes == 930
     assert details[0].comments == 18
     assert details[0].shares is None
+
+
+def test_profile_to_video_details_can_include_carousels_and_posts():
+    details = profile_to_video_details(
+        {
+            "latestPosts": [
+                {
+                    "id": "carousel-1",
+                    "productType": "carousel",
+                    "url": "https://www.instagram.com/p/carousel-1/",
+                    "caption": "Carousel caption",
+                    "timestamp": "2024-07-03T10:30:00.000Z",
+                    "likesCount": 900,
+                    "commentsCount": 45,
+                },
+                {
+                    "id": "post-1",
+                    "productType": "feed",
+                    "url": "https://www.instagram.com/p/post-1/",
+                    "caption": "Feed caption",
+                    "timestamp": "2024-07-03T10:40:00.000Z",
+                    "likesCount": 120,
+                    "commentsCount": 4,
+                },
+            ]
+        },
+        include_carousels=True,
+        include_posts=True,
+    )
+
+    assert [item.content_type for item in details] == ["carousel", "post"]
+    assert all(item.views == 0 for item in details)
+    assert all(item.views_available is False for item in details)
+    assert all(item.ranking_source == "interactions" for item in details)
 
 
 def test_profile_to_video_details_supports_gwaa_public_profile_shape():
