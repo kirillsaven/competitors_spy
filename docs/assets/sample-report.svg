@@ -1,0 +1,39 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720" role="img" aria-labelledby="title desc">
+  <title id="title">Synthetic Competitor Spy sample report preview</title>
+  <desc id="desc">A synthetic Telegram-style report preview with YouTube, TikTok, and Instagram sections using placeholder handles and fake metrics.</desc>
+  <rect width="1200" height="720" fill="#f6f8fb"/>
+  <rect x="70" y="48" width="1060" height="624" rx="18" fill="#ffffff" stroke="#d7dee8" stroke-width="2"/>
+  <text x="110" y="102" font-family="Arial, sans-serif" font-size="34" font-weight="700" fill="#172033">Competitor Spy</text>
+  <text x="110" y="138" font-family="Arial, sans-serif" font-size="18" fill="#5a6678">Synthetic Telegram report preview - placeholder data only</text>
+
+  <rect x="110" y="178" width="980" height="86" rx="12" fill="#e8f2ff" stroke="#b8d7ff"/>
+  <text x="136" y="212" font-family="Arial, sans-serif" font-size="22" font-weight="700" fill="#12355b">Отчет за 2026-07-01 09:00-21:00</text>
+  <text x="136" y="242" font-family="Arial, sans-serif" font-size="17" fill="#315273">Sections: YouTube, TikTok, Instagram. Users provide public handles only.</text>
+
+  <rect x="110" y="292" width="300" height="236" rx="14" fill="#fff7f5" stroke="#ffd1c8"/>
+  <text x="136" y="330" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#bd2c18">YouTube</text>
+  <text x="136" y="368" font-family="Arial, sans-serif" font-size="17" fill="#172033">@example_channel</text>
+  <text x="136" y="397" font-family="Arial, sans-serif" font-size="16" fill="#4b5565">+2,900 views in 6h</text>
+  <text x="136" y="426" font-family="Arial, sans-serif" font-size="16" fill="#4b5565">3.1x above baseline</text>
+  <rect x="136" y="456" width="226" height="34" rx="17" fill="#ffffff" stroke="#ffd1c8"/>
+  <text x="154" y="479" font-family="Arial, sans-serif" font-size="15" fill="#bd2c18">watch?v=example001</text>
+
+  <rect x="450" y="292" width="300" height="236" rx="14" fill="#f5fff8" stroke="#bfe8cc"/>
+  <text x="476" y="330" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#18703a">TikTok</text>
+  <text x="476" y="368" font-family="Arial, sans-serif" font-size="17" fill="#172033">@example_tiktok</text>
+  <text x="476" y="397" font-family="Arial, sans-serif" font-size="16" fill="#4b5565">+8,500 views in 5h</text>
+  <text x="476" y="426" font-family="Arial, sans-serif" font-size="16" fill="#4b5565">provider-backed metrics</text>
+  <rect x="476" y="456" width="220" height="34" rx="17" fill="#ffffff" stroke="#bfe8cc"/>
+  <text x="494" y="479" font-family="Arial, sans-serif" font-size="15" fill="#18703a">video/7000000001</text>
+
+  <rect x="790" y="292" width="300" height="236" rx="14" fill="#fbf7ff" stroke="#dcc8ff"/>
+  <text x="816" y="330" font-family="Arial, sans-serif" font-size="24" font-weight="700" fill="#6b3fb5">Instagram</text>
+  <text x="816" y="368" font-family="Arial, sans-serif" font-size="17" fill="#172033">No items selected</text>
+  <text x="816" y="397" font-family="Arial, sans-serif" font-size="16" fill="#4b5565">Diagnostic: all candidates</text>
+  <text x="816" y="426" font-family="Arial, sans-serif" font-size="16" fill="#4b5565">were below thresholds</text>
+  <rect x="816" y="456" width="210" height="34" rx="17" fill="#ffffff" stroke="#dcc8ff"/>
+  <text x="834" y="479" font-family="Arial, sans-serif" font-size="15" fill="#6b3fb5">empty_reason=scoring</text>
+
+  <rect x="110" y="562" width="980" height="62" rx="12" fill="#f8fafc" stroke="#d7dee8"/>
+  <text x="136" y="598" font-family="Arial, sans-serif" font-size="17" fill="#354052">Self-hosted Django Admin + Celery schedules + provider adapters + Russian Telegram reports.</text>
+</svg>
