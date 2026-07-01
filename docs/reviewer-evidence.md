@@ -57,12 +57,12 @@ http://localhost:8000/admin/
 
 ## Release State
 
-At the time this file was added:
+Current release state:
 
-- GitHub Releases: none published yet.
+- Latest GitHub Release: `v0.1.1`.
 - Existing tag: `v0.1.0`, created before the GHCR workflow existed.
 - GHCR `main` image: public and inspectable.
-- Recommended next release after this PR merges: create `v0.1.1`, publish a GitHub Release, and let the Docker workflow publish `ghcr.io/kirillsaven/competitors_spy:v0.1.1`.
+- GHCR release image: `ghcr.io/kirillsaven/competitors_spy:0.1.1`.
 
 ## Starter Issues
 

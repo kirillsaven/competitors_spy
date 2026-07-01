@@ -112,10 +112,10 @@ The current public `main` image is published to GitHub Container Registry:
 docker pull ghcr.io/kirillsaven/competitors_spy:main
 ```
 
-The existing `v0.1.0` tag was created before the Docker image workflow existed, so there is no `v0.1.0` GHCR image. After the next release tag is created, use the tagged image, for example:
+The existing `v0.1.0` tag was created before the Docker image workflow existed, so there is no `v0.1.0` GHCR image. The current release image is:
 
 ```bash
-docker pull ghcr.io/kirillsaven/competitors_spy:v0.1.1
+docker pull ghcr.io/kirillsaven/competitors_spy:0.1.1
 ```
 
 For local development, `docker compose up -d --build` remains the recommended path because it starts Postgres, Redis, web, bot, worker, and beat together.
