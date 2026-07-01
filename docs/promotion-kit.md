@@ -58,6 +58,31 @@ Suggested repository topics:
 - Ask for feedback first; stars should be a secondary call to action.
 - Share in communities where the project is genuinely relevant: Django, Telegram bot, Celery, self-hosted, creator tools, marketing automation, and indie hacker communities.
 
+## Ethical visibility plan
+
+1. Publish the release, sample report, troubleshooting docs, and visual preview first.
+2. Record a 60-90 second demo clip. A longer 4-5 minute walkthrough can follow the script in `docs/demo-script.md`.
+3. Post once from the maintainer's real account with a clear maintainer disclosure, a feedback request, and a secondary "star only if useful" call to action.
+4. Ask 10-20 real developer friends, creators, or self-hosters for feedback. Do not ask for guaranteed stars.
+5. Use Hacker News `Show HN` only when the maintainer has time to answer comments.
+6. Post to Reddit, Discord, Telegram, or similar communities only where self-promotion is allowed and the project is genuinely relevant.
+7. Rewrite the post for each community instead of reposting the same text everywhere.
+8. Respond quickly to early issues and setup friction.
+
+## Maintainer follow-up draft for OpenAI
+
+```text
+Hi OpenAI team - quick update on my OSS support application for kirillsaven/competitors_spy.
+
+Since applying, I merged an OSS-readiness pass and prepared another review-polish PR: clearer README and quickstart, MIT/CONTRIBUTING/SECURITY/CODE_OF_CONDUCT, CI + Docker image workflow, public roadmap, starter issues, sanitized sample report output, troubleshooting docs, reviewer evidence, and a release/demo path. The project is a self-hosted Telegram + Django/Celery app for competitor-content trend reports across YouTube, TikTok, and Instagram, with optional maintainer AI tooling separate from core runtime.
+
+Repo: https://github.com/kirillsaven/competitors_spy
+Reviewer evidence: https://github.com/kirillsaven/competitors_spy/blob/main/docs/reviewer-evidence.md
+CI: https://github.com/kirillsaven/competitors_spy/actions/workflows/ci.yml
+
+Thanks for reviewing - feedback is welcome even if the application is not selected.
+```
+
 ## Outreach checklist
 
 - [ ] Add GitHub description and topics.

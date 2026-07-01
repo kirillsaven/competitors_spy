@@ -2,6 +2,8 @@
 
 Use these as the first public issues after the OSS-readiness PR lands. They are intentionally small, testable, and safe for new contributors.
 
+Status note: the OSS approval polish PR addresses #75, #76, and the documentation part of #78. Keep #77 and #79 open unless code changes close them, and replenish beginner-friendly issues when the documentation tasks are merged.
+
 ## 1. Add a sanitized sample Telegram report payload
 
 Public issue: https://github.com/kirillsaven/competitors_spy/issues/75
@@ -71,3 +73,17 @@ Acceptance criteria:
 - Add a short GHCR section to README or `docs/deployment.md`.
 - Explain that Compose remains preferred for full local development.
 - Do not require users to publish their own package.
+
+## Replacement issue ideas after merge
+
+These replacement issues are already open so the repo keeps newcomer-friendly tasks after #75, #76, or #78 are closed:
+
+- #81 Add YouTube sample fixture for missing engagement metrics.
+- #82 Add provider diagnostics test for empty Instagram response.
+- #83 Add docs asset accessibility pass.
+- #84 Add maintainer demo recording checklist.
+
+Additional future ideas:
+
+- Improve Russian copy for first-run no-baseline reports.
+- Add a short fixture for TikTok provider rate-limit diagnostics.

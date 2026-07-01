@@ -41,7 +41,6 @@ htmlcov/
 
 # Private maintainer scratchpads / application prep
 .codex_tmp/
-docs/proaudit/
 *PROAUDIT*.md
 *ProAudit*.md
 CODEX_*PROMPT*.md

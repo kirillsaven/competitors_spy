@@ -1,10 +1,18 @@
 # Competitor Spy
 
+[![CI](https://github.com/kirillsaven/competitors_spy/actions/workflows/ci.yml/badge.svg)](https://github.com/kirillsaven/competitors_spy/actions/workflows/ci.yml)
+[![Docker image](https://github.com/kirillsaven/competitors_spy/actions/workflows/docker-image.yml/badge.svg)](https://github.com/kirillsaven/competitors_spy/actions/workflows/docker-image.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
+[![Python 3.12](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/)
+[![Self-hosted](https://img.shields.io/badge/deploy-self--hosted-2ea44f.svg)](./DEPLOY.md)
+
 Self-hosted Telegram bot for tracking competitor content across YouTube, TikTok, and Instagram.
 
 Competitor Spy is a self-hosted Django, Celery, Redis, Postgres, and aiogram application for creators, agencies, indie hackers, and small marketing teams that want scheduled competitor-content trend reports in Telegram.
 
 This project is not affiliated with YouTube, TikTok, Instagram, Telegram, Apify, OpenAI, or their parent companies. Self-hosters are responsible for complying with platform terms, API limits, and local law.
+
+![Synthetic sample report preview](./docs/assets/sample-report.svg)
 
 ## Why this exists
 
@@ -52,8 +60,17 @@ It is built as a practical OSS reference for Telegram bot onboarding, Django Adm
 ## Demo paths
 
 - [Demo script](./docs/demo-script.md): five-minute walkthrough for maintainers, reviewers, or potential contributors.
+- [Sample report payload](./docs/examples/sample-report-payload.md): deterministic synthetic report examples for YouTube, TikTok, and Instagram.
+- [Troubleshooting](./docs/troubleshooting.md): safe provider diagnostics and empty-section explanations.
+- [Reviewer evidence](./docs/reviewer-evidence.md): compact map for external reviewers.
 - [Public launch checklist](./docs/public-launch-checklist.md): release and promotion readiness checklist.
 - [Promotion kit](./docs/promotion-kit.md): short descriptions, social posts, and community-submission copy.
+
+## What the report looks like
+
+Reports are Russian-language Telegram messages with one section per platform. Each section can contain top items or an explicit diagnostic when no item qualifies.
+
+See the fully synthetic [sample report payload](./docs/examples/sample-report-payload.md). It uses placeholder handles, fake links, fake view counts, and fake Telegram IDs.
 
 ## Architecture
 
@@ -89,10 +106,16 @@ Open Django Admin at `http://localhost:8000/admin/`.
 
 ## Docker image
 
-After this workflow is merged, new pushes to `main` and new `v*` tags publish a container image to GitHub Container Registry:
+The current public `main` image is published to GitHub Container Registry:
 
 ```bash
-docker pull ghcr.io/kirillsaven/competitors_spy:<published-tag>
+docker pull ghcr.io/kirillsaven/competitors_spy:main
+```
+
+The existing `v0.1.0` tag was created before the Docker image workflow existed, so there is no `v0.1.0` GHCR image. After the next release tag is created, use the tagged image, for example:
+
+```bash
+docker pull ghcr.io/kirillsaven/competitors_spy:v0.1.1
 ```
 
 For local development, `docker compose up -d --build` remains the recommended path because it starts Postgres, Redis, web, bot, worker, and beat together.
@@ -205,6 +228,12 @@ docker compose exec web python manage.py send_test_platform_report \
 
 Use only your own test chat/user IDs.
 
+## Troubleshooting
+
+If a report section is empty, start with [docs/troubleshooting.md](./docs/troubleshooting.md). Common causes include missing provider credentials, provider rate limits, no public metrics, no baseline snapshots yet, thresholds that are too high, or all items being filtered below score.
+
+Do not paste real tokens, `.env` files, Telegram IDs, private hosts, provider payloads, logs, or screenshots with private data into public issues.
+
 ## Development
 
 Install dependencies locally if you are not using Docker:
@@ -217,6 +246,16 @@ pytest -q
 ```
 
 The Docker path is the preferred reproducible setup because it includes Postgres, Redis, the bot, worker, and beat services.
+
+Optional Makefile shortcuts are available for common tasks:
+
+```bash
+make up
+make migrate
+make check
+make test
+make docker-build
+```
 
 ## Testing
 
@@ -275,6 +314,8 @@ See [ROADMAP.md](./ROADMAP.md).
 ## Contributing
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md).
+
+For support boundaries and safe issue guidance, see [SUPPORT.md](./SUPPORT.md).
 
 ## License
 

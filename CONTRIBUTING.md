@@ -13,6 +13,14 @@ pytest -q
 
 The project targets Python 3.12.
 
+Optional shortcuts:
+
+```bash
+make check
+make test
+make docker-build
+```
+
 ## Docker setup
 
 ```bash
@@ -21,6 +29,14 @@ docker compose up -d --build
 docker compose exec web python manage.py migrate
 docker compose exec web python manage.py createsuperuser
 docker compose exec web pytest
+```
+
+Equivalent shortcuts:
+
+```bash
+make up
+make migrate
+make demo-check
 ```
 
 ## Running migrations
@@ -83,6 +99,7 @@ Tests must not require real Telegram, YouTube, Apify, TikTok, Instagram, or Open
 3. Call out any intentional fallback behavior.
 4. Call out any security or deployment implications.
 5. Do not include secrets, private server details, raw Telegram IDs, or private smoke-test records.
+6. Use [SUPPORT.md](./SUPPORT.md) for public support boundaries and safe troubleshooting guidance.
 
 ## PR checklist
 
