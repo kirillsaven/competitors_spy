@@ -1,9 +1,13 @@
-# SPEC - Competitor Content Tracker (MVP YouTube)
+# SPEC - Competitor Content Tracker
 
 ## Summary
 Telegram bot for tracking competitors and sending scheduled reports (RU messages).
 User supplies a profile URL or handle/nickname (no social logins).
-MVP: YouTube full; TikTok/Instagram stubs.
+
+Current public baseline:
+- YouTube end-to-end: setup, discovery, collection, scoring, scheduled reporting.
+- TikTok and Instagram: explicit competitor links/handles, provider-backed collection, scoring, and report sections.
+- YouTube remains the only platform with automatic competitor discovery during setup.
 
 Key decisions:
 - Collection strategy: incremental (minimize YouTube quota)
@@ -129,12 +133,12 @@ Select:
 ## Report payload / format
 payload.sections = [youtube, tiktok, instagram]
 Each section has items (max 5).
-TikTok/Instagram empty in MVP (explicit stub text).
+TikTok/Instagram sections render live items when providers are configured and public metrics are available. Empty sections should include explicit diagnostics rather than silent fallback data.
 
 Telegram message (RU) contains:
 - Header: period + timezone
 - YouTube section: list items with title, competitor, published date, delta views, optional ER, link
-- TikTok/Instagram: “MVP: пока не поддерживается”
+- TikTok/Instagram: list items when available, otherwise explicit no-data diagnostics
 
 ## Celery tasks
 - tick_due_schedules (every 1 min): find due schedules, enqueue run_user_report
