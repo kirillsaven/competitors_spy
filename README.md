@@ -1,10 +1,21 @@
 # Competitor Spy
 
-Open-source Telegram bot for tracking competitor content across YouTube, TikTok, and Instagram.
+Self-hosted Telegram bot for tracking competitor content across YouTube, TikTok, and Instagram.
 
 Competitor Spy is a self-hosted Django, Celery, Redis, Postgres, and aiogram application for creators, agencies, indie hackers, and small marketing teams that want scheduled competitor-content trend reports in Telegram.
 
 This project is not affiliated with YouTube, TikTok, Instagram, Telegram, Apify, OpenAI, or their parent companies. Self-hosters are responsible for complying with platform terms, API limits, and local law.
+
+## Why this exists
+
+Most content teams still check competitors manually: open each profile, scan recent videos, compare views by memory, and paste notes into chat. Competitor Spy turns that workflow into a repeatable self-hosted bot:
+
+1. add your own profile and competitors,
+2. collect public metrics on a schedule,
+3. compare each new item against that competitor's own baseline,
+4. receive a concise Russian-language Telegram report with the outliers worth studying.
+
+It is built as a practical OSS reference for Telegram bot onboarding, Django Admin operations, Celery scheduling, provider adapters, baseline-relative scoring, and public-safe maintainer automation.
 
 ## What it does
 
@@ -38,6 +49,12 @@ This project is not affiliated with YouTube, TikTok, Instagram, Telegram, Apify,
 - pytest test suite and GitHub Actions CI.
 - Optional maintainer automation under `tools/`; OpenAI is not required for core runtime.
 
+## Demo paths
+
+- [Demo script](./docs/demo-script.md): five-minute walkthrough for maintainers, reviewers, or potential contributors.
+- [Public launch checklist](./docs/public-launch-checklist.md): release and promotion readiness checklist.
+- [Promotion kit](./docs/promotion-kit.md): short descriptions, social posts, and community-submission copy.
+
 ## Architecture
 
 ```mermaid
@@ -69,6 +86,16 @@ docker compose exec web pytest
 Open Django Admin at `http://localhost:8000/admin/`.
 
 `createsuperuser` creates a Django Admin login. It is not related to Telegram.
+
+## Docker image
+
+After this workflow is merged, new pushes to `main` and new `v*` tags publish a container image to GitHub Container Registry:
+
+```bash
+docker pull ghcr.io/kirillsaven/competitors_spy:<published-tag>
+```
+
+For local development, `docker compose up -d --build` remains the recommended path because it starts Postgres, Redis, web, bot, worker, and beat together.
 
 ## Configuration
 
@@ -238,6 +265,8 @@ Production deployments should use HTTPS, a strong `DJANGO_SECRET_KEY`, private e
 ## Why open source?
 
 Competitor Spy is open source to help developers learn Telegram bot, Django, Celery, Redis, Postgres, and provider integration patterns in a real workflow. It provides a useful self-hosted competitor-tracking baseline and invites improvements to provider integrations, report quality, deployment hardening, and security review.
+
+If the project helps you or gives you a useful implementation reference, a GitHub star helps other developers discover it.
 
 ## Roadmap
 

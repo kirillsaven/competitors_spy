@@ -1,0 +1,40 @@
+# Desired GitHub labels for the public repository.
+# Apply manually or with a labels-sync tool. Keep names stable because issue
+# templates and public starter issues reference them.
+
+- name: good first issue
+  color: "7057ff"
+  description: Small, well-scoped task for a first contribution.
+- name: help wanted
+  color: "008672"
+  description: Maintainer would welcome external help.
+- name: documentation
+  color: "0075ca"
+  description: Documentation, examples, README, or guides.
+- name: provider:youtube
+  color: "ff0000"
+  description: YouTube adapter, discovery, metrics, or reporting.
+- name: provider:tiktok
+  color: "000000"
+  description: TikTok adapter, provider config, metrics, or reporting.
+- name: provider:instagram
+  color: "c13584"
+  description: Instagram adapter, provider config, metrics, or reporting.
+- name: area:telegram
+  color: "2aabee"
+  description: Telegram bot, aiogram handlers, keyboards, or callbacks.
+- name: area:admin
+  color: "5319e7"
+  description: Django Admin and operator workflows.
+- name: area:deployment
+  color: "1d76db"
+  description: Docker, Compose, CI, release, or production deployment.
+- name: area:scoring
+  color: "fbca04"
+  description: Baselines, scoring, ranking, thresholds, and reports.
+- name: security
+  color: "d73a4a"
+  description: Security, privacy, secret handling, or hardening.
+- name: maintainer-ai
+  color: "bfdadc"
+  description: Optional maintainer automation and review tooling.
