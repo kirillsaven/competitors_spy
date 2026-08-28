@@ -12,6 +12,8 @@
 
 ### Changed
 
+- Refreshed the pending Python dependency and GitHub Actions updates together, including Gunicorn 26 and pytest 9.
+- CI now checks dependency compatibility, migration drift, Gunicorn configuration, and migrations against PostgreSQL 16 alongside the existing test suite.
 - README now explains the problem, demo paths, Docker image distribution, and public discovery call to action.
 - Roadmap now separates provider hardening, demo/report quality, AI-assisted reports, and maintainer automation.
 

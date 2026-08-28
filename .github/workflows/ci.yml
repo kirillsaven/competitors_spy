@@ -9,6 +9,20 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: competitors_spy_ci
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: ci-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d competitors_spy_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       DJANGO_SECRET_KEY: ci-secret-key-with-enough-length-and-entropy-1234567890
       DJANGO_DEBUG: "0"
@@ -22,21 +36,34 @@ jobs:
       CELERY_TASK_ALWAYS_EAGER: "1"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
+          pip check
 
       - name: Django checks
         run: |
           python manage.py check
           python manage.py check --deploy --fail-level WARNING
+          python manage.py makemigrations --check --dry-run
+
+      - name: Gunicorn configuration smoke test
+        run: gunicorn --check-config config.wsgi:application
+
+      - name: PostgreSQL migration smoke test
+        env:
+          DATABASE_URL: postgres://postgres:ci-only-password@localhost:5432/competitors_spy_ci
+        run: |
+          python manage.py migrate --noinput
+          python manage.py check --database default
 
       - name: Run tests
         run: pytest -q
