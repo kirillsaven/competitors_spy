@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Isolated the retry cache in unit tests so local Windows runs do not stall resolving Docker's `redis` hostname or reuse another test's cached provider data. Production cache behavior is unchanged.
+
 ### Added
 
 - Demo script for reviewers and contributors.
